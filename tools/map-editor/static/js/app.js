@@ -388,6 +388,51 @@ async function doExport() {
   status('exported ' + fname + ' → add it under maps/community/ and open a PR');
 }
 
+/* Submit = the community-PR pipeline. Server runs the SAME lint gate CI runs,
+   then hands back a pre-filled github.com new-file URL: GitHub walks the
+   (signed-in) contributor through fork -> commit -> pull request natively, so
+   the PR is authored by THEIR GitHub identity — no tokens ever touch this
+   server. CI then lints + builds the ROM on the PR; merge = in the next ROM. */
+async function doSubmit() {
+  syncName();
+  if (ME.ghUser) {                     // one-click signed-in path
+    status('opening your pull request…');
+    const r = await fetch('/submit_pr', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ME.model),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.ok) {
+      window.open(j.pr_url, '_blank');
+      status((j.existing ? 'updated your open PR #' : 'pull request #') + j.pr_number +
+             ' — CI is checking your map; once merged it ships in the next ROM release.');
+      return;
+    }
+    const errs = (j.errors || [j.error || ('HTTP ' + r.status)]);
+    if (r.status !== 401) { status('submit failed: ' + errs.join(' | ')); return; }
+    /* session expired -> fall through to the URL flow */
+  }
+  const r = await fetch('/submit_url', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ME.model),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    const errs = (j.errors || [j.error || ('HTTP ' + r.status)]);
+    status('submit blocked by lint: ' + errs[0] + (errs.length > 1 ? '  (+' + (errs.length - 1) + ' more)' : ''));
+    return;
+  }
+  if (j.url_len < 7500) {                 // fits comfortably in a URL
+    window.open(j.url, '_blank');
+    status('opening GitHub: sign in, then "Propose new file" → "Create pull request". ' +
+           'Your map lands in ' + j.filename + ' under your own name.');
+  } else {                                // huge map: clipboard + bare new-file page
+    try { await navigator.clipboard.writeText(j.text); } catch (e) { /* fall through */ }
+    window.open(j.bare_url, '_blank');
+    status('map copied to clipboard (too big for a URL) — paste it into the GitHub editor that just opened, then "Propose new file".');
+  }
+}
+
 /* Import = open a .map a user picked off their disk (parsed by the shared
    Python module so the editor never disagrees with the build). */
 function doImport(file) {
@@ -414,6 +459,7 @@ async function doSave() {                          // local-dev only (hidden whe
 function wireFileBar() {
   $('#btn-new').onclick = () => doNew(parseInt($('#new-size').value, 10));
   $('#btn-export').onclick = doExport;
+  $('#btn-submit').onclick = doSubmit;
   $('#btn-import').onclick = () => $('#file-import').click();
   $('#file-import').onchange = e => { if (e.target.files[0]) doImport(e.target.files[0]); e.target.value = ''; };
   $('#btn-save').onclick = doSave;
@@ -449,6 +495,7 @@ async function init() {
     const cfg = await jget('/config');
     if (cfg.readonly) $('#btn-save').style.display = 'none';
   } catch (e) {}
+  refreshAuth();                                   // GitHub sign-in state (Phase 3, optional)
   await refreshList();
   const wip = loadWip();
   if (wip && wip.model) {

@@ -15,10 +15,17 @@ import config
 sys.path.insert(0, config.TOOLS_DIR)
 import mapfmt          # noqa: E402  (shared .map syntax — single source of truth)
 import export_assets   # noqa: E402  (palette + textures from the ROM source)
+import lint_maps       # noqa: E402  (the same gate CI runs — lint before submit)
 
-from flask import Flask, jsonify, request, render_template
+import github_pr        # noqa: E402  (OAuth + fork/branch/PR — pipeline Phase 3)
+
+from flask import Flask, jsonify, request, render_template, redirect, session
 
 app = Flask(__name__)
+# Signs the session cookie that carries a signed-in user's OWN GitHub token
+# between requests (Phase 3). Unset -> OAuth routes disable themselves and the
+# editor uses the zero-auth pre-filled-URL submit flow.
+app.secret_key = config.SESSION_SECRET or None
 
 
 def _safe(name):
@@ -109,8 +116,83 @@ def assets():
 @app.route("/config")
 def client_config():
     """The client adapts its UI to this: on a hosted (read-only) instance the
-    Save-to-disk button hides and Export (download) is the way out."""
-    return jsonify({"readonly": config.READONLY})
+    Save-to-disk button hides and Export (download) is the way out; when OAuth
+    is configured the Submit button upgrades to the in-editor PR flow."""
+    return jsonify({"readonly": config.READONLY,
+                    "github_oauth": config.OAUTH_ENABLED,
+                    "github_repo": config.GITHUB_REPO})
+
+
+# ---------------- Phase 3: GitHub sign-in + in-editor PR ----------------
+
+@app.route("/auth/login")
+def auth_login():
+    if not config.OAUTH_ENABLED:
+        return jsonify({"error": "GitHub OAuth is not configured on this instance"}), 501
+    state = os.urandom(16).hex()
+    session["oauth_state"] = state
+    redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
+    # fly terminates TLS ahead of us; the public callback must be https.
+    if request.headers.get("X-Forwarded-Proto") == "https":
+        redirect_uri = redirect_uri.replace("http://", "https://", 1)
+    return redirect(github_pr.authorize_url(config.GITHUB_CLIENT_ID, redirect_uri, state))
+
+
+@app.route("/auth/callback")
+def auth_callback():
+    if not config.OAUTH_ENABLED:
+        return jsonify({"error": "OAuth not configured"}), 501
+    if request.args.get("state") != session.pop("oauth_state", None):
+        return jsonify({"error": "state mismatch — retry sign-in"}), 400
+    code = request.args.get("code", "")
+    try:
+        token = github_pr.exchange_code(config.GITHUB_CLIENT_ID,
+                                        config.GITHUB_CLIENT_SECRET, code)
+        login = github_pr.whoami(token)
+    except github_pr.GitHubError as e:
+        return jsonify({"error": str(e)}), 502
+    session["gh_token"] = token
+    session["gh_login"] = login
+    return redirect("/")
+
+
+@app.route("/auth/user")
+def auth_user():
+    return jsonify({"login": session.get("gh_login") or None,
+                    "oauth": config.OAUTH_ENABLED})
+
+
+@app.route("/auth/logout", methods=["POST"])
+def auth_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/submit_pr", methods=["POST"])
+def submit_pr():
+    """Signed-in submit: lint, then fork/branch/commit/PR AS THE USER. The map
+    arrives as a normal GitHub PR under their identity; CI takes it from there."""
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    model = request.get_json(force=True, silent=True)
+    model, text, errs = _lint_submission(model)
+    if errs:
+        return jsonify({"ok": False, "errors": errs}), 400
+    slug = _safe(model["name"]).lower()
+    try:
+        pr = github_pr.open_map_pr(
+            token, login, config.GITHUB_REPO, config.GITHUB_BRANCH,
+            "maps/community/%s.map" % slug, text,
+            title="Community map: %s" % model["name"],
+            body=("New community map **%s** by @%s, submitted from the "
+                  "[hosted map editor](https://backrooms-32x-project.fly.dev/).\n\n"
+                  "CI lints it and builds the ROM; once merged it ships in the "
+                  "next `build-N` release automatically." % (model["name"], login)))
+    except github_pr.GitHubError as e:
+        return jsonify({"ok": False, "errors": [str(e)]}), 502
+    return jsonify({"ok": True, "pr_url": pr["url"], "pr_number": pr["number"],
+                    "existing": pr["existing"]})
 
 
 @app.route("/maps")
@@ -208,6 +290,63 @@ def map_save(name):
         fh.write(text)
     return jsonify({"ok": True, "name": _safe(model["name"]), "cloned": cloned,
                     "folder": "community", "text": text})
+
+
+def _lint_submission(model):
+    """Run the CI lint gate on a submission model (forced role=community).
+    Returns (model, text, errors). Duplicate names against the repo's existing
+    maps are rejected here so junk PRs never reach GitHub."""
+    if not isinstance(model, dict):
+        return None, None, ["expected a JSON model"]
+    model = dict(model)
+    model["name"] = (model.get("name") or "untitled").upper()[:16]
+    model["role"] = "community"          # submissions are always community maps
+    text, err = _serialize_or_400(model)
+    if err:
+        return model, None, [err]
+
+    with open(config.REGISTRY) as fh:
+        reg = json.load(fh)
+    # Seed the duplicate-name check with every map already in the repo.
+    seen, errs = {}, []
+    for folder, name, path in _iter_map_files():
+        try:
+            nm = (mapfmt.parse(open(path).read()).get("name") or name).upper()
+        except Exception:
+            nm = name.upper()
+        seen[nm] = "maps/%s/%s.map" % (folder or ".", name)
+    lint_maps.lint_model(mapfmt.parse(text), model["name"], "community",
+                         reg, seen, errs)
+    return model, text, errs
+
+
+@app.route("/lint", methods=["POST"])
+def map_lint():
+    """The same gate CI runs, before the contributor leaves the editor."""
+    model = request.get_json(force=True, silent=True)
+    _model, _text, errs = _lint_submission(model)
+    return jsonify({"ok": not errs, "errors": errs})
+
+
+@app.route("/submit_url", methods=["POST"])
+def submit_url():
+    """Phase 1 of the community-PR pipeline: lint the model, then hand back a
+    pre-filled github.com new-file URL. GitHub natively walks a signed-in
+    contributor through fork -> commit -> pull request, so the PR is authored
+    by THEIR identity with no tokens or secrets on this server. The client
+    falls back to clipboard + a bare new-file URL if the encoded URL is too
+    long for the browser/GitHub (~8KB)."""
+    from urllib.parse import quote
+    model = request.get_json(force=True, silent=True)
+    model, text, errs = _lint_submission(model)
+    if errs:
+        return jsonify({"ok": False, "errors": errs}), 400
+    slug = _safe(model["name"]).lower()
+    filename = "maps/community/%s.map" % slug
+    base = "https://github.com/%s/new/%s" % (config.GITHUB_REPO, config.GITHUB_BRANCH)
+    url = "%s?filename=%s&value=%s" % (base, quote(filename, safe=""), quote(text, safe=""))
+    return jsonify({"ok": True, "url": url, "bare_url": "%s?filename=%s" % (base, quote(filename, safe="")),
+                    "filename": filename, "text": text, "url_len": len(url)})
 
 
 @app.route("/new")

@@ -25,10 +25,12 @@
     <span class="sep"></span>
     <label>Name <input id="map-name" maxlength="16" size="14" placeholder="MYMAP"></label>
     <button id="btn-export" class="primary" title="Download this map as a .map file to your computer">⬇ Export .map</button>
+    <button id="btn-submit" class="primary" title="Submit this map to the game: opens a pre-filled GitHub pull request under your own GitHub account. CI checks it; once merged it ships in the next ROM.">🚀 Submit to game</button>
     <button id="btn-import" title="Open a .map file from your computer">⬆ Import</button>
     <input id="file-import" type="file" accept=".map,text/plain" hidden>
     <button id="btn-save" title="Save into this checkout's maps/community/ (local dev only)">Save to repo</button>
     <button id="btn-walk" title="Walk the current map in a first-person preview">▶ Walk</button>
+    <span id="gh-auth" class="gh-auth"></span>
     <span id="status"></span>
   </div>
 </header>

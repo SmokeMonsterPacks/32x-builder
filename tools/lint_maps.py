@@ -61,12 +61,20 @@ def _reachable(m, glyphs, sx, sy):
 
 
 def lint_map(path, reg, seen_names, errs):
+    """Lint one .map FILE (the CI/build gate). Parses, then defers to
+    lint_model — which the editor also calls directly on submissions."""
     base = os.path.relpath(path, ROOT)
-    def e(msg): errs.append("%s: %s" % (base, msg))
     try:
         m = mapfmt.parse(open(path).read())
     except mapfmt.MapFormatError as ex:
-        e(str(ex)); return
+        errs.append("%s: %s" % (base, ex)); return
+    lint_model(m, base, os.path.basename(os.path.dirname(path)), reg, seen_names, errs)
+
+
+def lint_model(m, base, folder, reg, seen_names, errs):
+    """Lint a parsed map MODEL. `base` labels the errors; `folder` is where the
+    map lives (or will live — 'community' for editor submissions)."""
+    def e(msg): errs.append("%s: %s" % (base, msg))
     glyphs, roles, lim = reg["cells"]["glyphs"], reg.get("roles", {}), reg["limits"]
 
     role = m.get("role", "community")
@@ -74,7 +82,7 @@ def lint_map(path, reg, seen_names, errs):
         e("unknown role %r (valid: %s)" % (role, ", ".join(sorted(roles))))
     else:
         want = roles[role].get("folder")
-        if want and os.path.basename(os.path.dirname(path)) != want:
+        if want and folder != want:
             e("role %r belongs in maps/%s/" % (role, want))
 
     name = (m.get("name") or "").strip()
@@ -139,7 +147,34 @@ def lint_assets(reg, sh_dir, errs):
         export_assets.build_assets(ROOT)        # resolves palette + registry + sprites
     except Exception as ex:
         errs.append("assets: build_assets failed: %s" % ex); return
-    for fn in ("wall_tex.h", "partition_tex.h", "outlet_tex.h", "door_tex.h", "neander_tex.h"):
+
+    # The sprite ASSET CATALOG (registry "assets") drives the codegen'd
+    # sprite_defs[] table — validate every entry + that its _tex.h exist and are
+    # well-formed, so a bad asset fails the build/PR (same gate as maps).
+    sprites = reg.get("assets", {}).get("sprites", [])
+    kinds_seen, tex_files = {}, set(["wall_tex.h", "partition_tex.h"])
+    for s in sprites:
+        sid = s.get("id", "?")
+        for k in ("id", "kind", "mount", "sym", "base", "decode", "tex"):
+            if k not in s:
+                errs.append("assets: sprite %s missing %r" % (sid, k))
+        if s.get("mount") not in (None, "wall", "billboard"):
+            errs.append("assets: sprite %s bad mount %r" % (sid, s["mount"]))
+        if s.get("decode") not in (None, "offset", "door"):
+            errs.append("assets: sprite %s bad decode %r" % (sid, s["decode"]))
+        for f in s.get("flags", []):
+            if f not in ("animated", "lod", "standalone"):
+                errs.append("assets: sprite %s bad flag %r" % (sid, f))
+        if "kind" in s:
+            if s["kind"] in kinds_seen:
+                errs.append("assets: kind %d shared by %s and %s"
+                            % (s["kind"], kinds_seen[s["kind"]], sid))
+            kinds_seen[s["kind"]] = sid
+        for t in (s.get("tex"), s.get("tex_hi")):
+            if t:
+                tex_files.add(t)
+
+    for fn in sorted(tex_files):
         p = os.path.join(sh_dir, fn)
         if not os.path.exists(p):
             errs.append("assets: missing %s" % fn); continue
