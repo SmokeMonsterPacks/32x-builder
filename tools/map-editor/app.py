@@ -352,8 +352,10 @@ def submit_url():
 @app.route("/new")
 def map_new():
     try:
-        w = max(4, min(64, int(request.args.get("w", 16))))
-        h = max(4, min(64, int(request.args.get("h", 16))))
+        with open(config.REGISTRY) as fh:
+            md = json.load(fh)["limits"]["max_dim"]
+        w = max(4, min(md, int(request.args.get("w", 16))))
+        h = max(4, min(md, int(request.args.get("h", 16))))
     except ValueError:
         return jsonify({"error": "bad w/h"}), 400
     name = _safe(request.args.get("name", "untitled")).upper()[:16]

@@ -54,8 +54,8 @@
   },
 
   "limits": {
-    "_doc": "must match the engine caps; the codegen rejects maps that exceed these",
-    "max_dim": 64,
+    "_doc": "must match the engine caps; the codegen rejects maps that exceed these. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
+    "max_dim": 32,
     "max_partitions": 32,
     "max_decals": 16,
     "max_crawl_runs": 8
