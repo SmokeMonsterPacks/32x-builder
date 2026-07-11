@@ -1,0 +1,644 @@
+#include "mars.h"
+#include "menu.h"
+#include "raycast.h"
+#include "font.h"
+#include "shared.h"
+#include "procgen.h"
+#include "custom_maps.h"
+#include "box3d.h"
+#include "box_hero.h"
+#include "sound.h"
+
+/* Non-static so box3d.c can drive the same swap state during the
+ * title screen — keeps the front/back buffer bookkeeping in one
+ * place. */
+uint32_t lastTick = 0;
+uint16_t currentFB = 0;
+
+/* On-screen debug metrics — off by default, toggled by the six-button
+ * controller's MODE button (edge-detected once per frame from any loop). */
+uint8_t g_metrics_on = 0;
+
+/* Pause-menu MAPS tab -> warp request. -1 = none; else a custom_maps[] index.
+ * The menu (menu.c) sets it; the main loop drains it into portal_to_custom. */
+volatile int g_warp_request = -1;
+static void metrics_mode_check(uint16_t pad) {
+    static uint16_t prev = 0xFFFF;
+    if ((pad & SEGA_CTRL_MODE) && !(prev & SEGA_CTRL_MODE)) g_metrics_on ^= 1;
+    /* X cycles the WALLS res mode FULL/HALF/AUTO (also in the VISUALS menu tab). */
+    if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
+        SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 3);
+    prev = pad;
+}
+
+/* Frame-time profiler. Reads the SH-2 free-running timer at Φ/32
+ * (~720kHz, 1.39μs per tick) once per frame and displays the delta
+ * since the previous frame in the top-right corner. 60fps ≈ 12000
+ * ticks, 30fps ≈ 24000, 15fps ≈ 48000. Single-stage rolling EMA
+ * smooths jitter; the display updates every frame so changes are
+ * immediate without being visually noisy. Remove this block when
+ * we're done with the optimization pass. */
+static uint16_t prof_prev_frt = 0;
+static uint32_t prof_smoothed = 0;   /* 32-bit: a sub-15fps frame exceeds the 16-bit FRT range */
+static uint16_t prof_secondary_smoothed = 0;
+static uint16_t prof_half_smoothed = 0;
+
+extern volatile uint16_t prof_primary_half_ticks;  /* written by raycast_render */
+
+static inline uint16_t prof_read_frt(void) {
+    /* Hitachi SH-2 FRT quirk: reading FRCH latches FRCL into a
+     * temporary register so the 16-bit value stays atomic. */
+    uint8_t hi = SH2_FRT_FRCH;
+    uint8_t lo = SH2_FRT_FRCL;
+    return ((uint16_t)hi << 8) | lo;
+}
+
+static inline void prof_init(void) {
+    SH2_FRT_TIER  = 0x01;  /* default — no interrupts enabled */
+    SH2_FRT_TCR   = 0x01;  /* Φ/32 prescaler = ~720kHz */
+    SH2_FRT_FTCSR = 0;     /* clear OVF/OCF; free-running */
+    prof_prev_frt = prof_read_frt();
+}
+
+static void prof_sample_and_draw(uint8_t *fb) {
+    uint16_t now = prof_read_frt();
+    uint16_t raw = (uint16_t)(now - prof_prev_frt);
+    prof_prev_frt = now;
+    /* The 16-bit FRT wraps once per ~91ms. A frame under ~15fps (>48000 ticks)
+     * still fits, but a sub-11fps frame (>65536) wraps and reads tiny. Unwrap
+     * the single overflow the same way the FPS calc does: a "frame" shorter
+     * than 12000 ticks (>60fps) can't be real here, so it's a wrapped long one. */
+    uint32_t delta = (raw < 12000) ? (uint32_t)raw + 65536u : raw;
+    /* EMA: 7/8 old + 1/8 new — ~8-frame time constant. */
+    prof_smoothed = (prof_smoothed - (prof_smoothed >> 3)) + (delta >> 3);
+    uint16_t secondary = SHARED_UC->secondary_render_ticks;
+    prof_secondary_smoothed = (uint16_t)((prof_secondary_smoothed - (prof_secondary_smoothed >> 3)) + (secondary >> 3));
+    uint16_t half = prof_primary_half_ticks;
+    prof_half_smoothed = (uint16_t)((prof_half_smoothed - (prof_half_smoothed >> 3)) + (half >> 3));
+
+    /* "T:NNNNN H:NNNNN S:NNNNN" — frame total, primary half-render,
+     * secondary half-render. Higher of H/S is the parallel bottleneck.
+     * (Effective FPS rides the bottom line next to the per-pass breakdown.) */
+    char text[24];
+    text[0] = 'T'; text[1] = ':';
+    uint16_t v = prof_smoothed;
+    text[6] = '0' + (v % 10); v /= 10;
+    text[5] = '0' + (v % 10); v /= 10;
+    text[4] = '0' + (v % 10); v /= 10;
+    text[3] = '0' + (v % 10); v /= 10;
+    text[2] = '0' + v;
+    text[7] = ' '; text[8] = 'H'; text[9] = ':';
+    v = prof_half_smoothed;
+    text[14] = '0' + (v % 10); v /= 10;
+    text[13] = '0' + (v % 10); v /= 10;
+    text[12] = '0' + (v % 10); v /= 10;
+    text[11] = '0' + (v % 10); v /= 10;
+    text[10] = '0' + v;
+    text[15] = ' '; text[16] = 'S'; text[17] = ':';
+    v = prof_secondary_smoothed;
+    text[22] = '0' + (v % 10); v /= 10;
+    text[21] = '0' + (v % 10); v /= 10;
+    text[20] = '0' + (v % 10); v /= 10;
+    text[19] = '0' + (v % 10); v /= 10;
+    text[18] = '0' + v;
+    text[23] = 0;
+    /* Top-right corner. LIGHT_BASE[0] (palette idx 49) is the brightest
+     * fixture-white, reads on every background. */
+    font_draw_string(fb, SCREEN_W - 8 * 23 - 4, 4, text, 49);
+
+    /* Second line: primary-half per-pass breakdown — Clear / ceiling-Grid /
+     * caRpet / Walls (raw FRT ticks), then F = effective FPS. Per-pass tells
+     * us which pass to optimize; F is the bottom-line score it rolls up to. */
+    {
+        extern volatile uint16_t prof_pass_clear, prof_pass_ceil,
+                                 prof_pass_carpet, prof_pass_walls;
+        static const char lbl[4] = {'C', 'G', 'R', 'W'};
+        uint16_t pv[4] = { prof_pass_clear, prof_pass_ceil,
+                           prof_pass_carpet, prof_pass_walls };
+        char t2[40];
+        int pos = 0;
+        for (int i = 0; i < 4; i++) {
+            t2[pos++] = lbl[i];
+            t2[pos++] = ':';
+            uint16_t x = pv[i];
+            for (int d = 4; d >= 0; d--) { t2[pos + d] = '0' + (x % 10); x /= 10; }
+            pos += 5;
+            t2[pos++] = ' ';
+        }
+        /* Effective FPS = 720000 / frame_period (FRT is ~720kHz). The 16-bit
+         * FRT wraps at 65536 (~91ms); a per-frame delta below one vblank
+         * (12000 ticks) wrapped once, so add 65536 — honest down to ~10fps. */
+        uint32_t ft = delta ? delta : 1;
+        if (ft < 12000) ft += 65536;
+        uint32_t fps = (720000u + ft / 2) / ft;
+        if (fps > 99) fps = 99;
+        t2[pos++] = 'F'; t2[pos++] = ':';
+        t2[pos++] = '0' + (fps / 10);
+        t2[pos++] = '0' + (fps % 10);
+        t2[pos] = 0;
+        font_draw_string(fb, 4, SCREEN_H - 12, t2, 49);
+    }
+
+    /* Third line: the SERIAL TAIL — primary-only post-sync work that the
+     * C/G/R/W line does NOT cover. L = low-ceiling slab + bulkheads
+     * (crawlspace, scene-dependent), P = lights + standups sprites. This is
+     * the ~25%-of-frame block that was invisible until now. */
+    {
+        extern volatile uint16_t prof_pass_slab, prof_pass_sprite;
+        static const char lbl[2] = {'L', 'P'};
+        uint16_t pv[2] = { prof_pass_slab, prof_pass_sprite };
+        char t3[20];
+        int pos = 0;
+        for (int i = 0; i < 2; i++) {
+            t3[pos++] = lbl[i];
+            t3[pos++] = ':';
+            uint16_t x = pv[i];
+            for (int d = 4; d >= 0; d--) { t3[pos + d] = '0' + (x % 10); x /= 10; }
+            pos += 5;
+            t3[pos++] = ' ';
+        }
+        t3[pos] = 0;
+        font_draw_string(fb, 4, SCREEN_H - 24, t3, 49);
+    }
+}
+
+/* Top-left position + angle overlay for debugging map locations.
+ * Line 1: "X:NN.N Y:NN.N" — integer cell + one decimal.
+ * Line 2: "A:NNN"          — raw uint8 angle.
+ * Two lines so A: doesn't collide with the top-right T/H/S timer. */
+static void pos_draw(uint8_t *fb) {
+    char line1[14];
+    char line2[6];
+    int32_t px = player.x;
+    int32_t py = player.y;
+    int px_i = (int)(px >> 16);
+    int px_f = (int)(((uint32_t)(px & 0xFFFF) * 10) >> 16);
+    int py_i = (int)(py >> 16);
+    int py_f = (int)(((uint32_t)(py & 0xFFFF) * 10) >> 16);
+    int angle = (int)player.angle;
+    if (px_i < 0)  px_i = 0;
+    if (px_i > 99) px_i = 99;
+    if (py_i < 0)  py_i = 0;
+    if (py_i > 99) py_i = 99;
+
+    line1[0] = 'X'; line1[1] = ':';
+    line1[2] = '0' + (px_i / 10);
+    line1[3] = '0' + (px_i % 10);
+    line1[4] = '.';
+    line1[5] = '0' + px_f;
+    line1[6] = ' '; line1[7] = 'Y'; line1[8] = ':';
+    line1[9]  = '0' + (py_i / 10);
+    line1[10] = '0' + (py_i % 10);
+    line1[11] = '.';
+    line1[12] = '0' + py_f;
+    line1[13] = 0;
+
+    line2[0] = 'A'; line2[1] = ':';
+    line2[4] = '0' + (angle % 10); angle /= 10;
+    line2[3] = '0' + (angle % 10); angle /= 10;
+    line2[2] = '0' + (angle % 10);
+    line2[5] = 0;
+
+    font_draw_string(fb, 4,  4, line1, 49);
+    font_draw_string(fb, 4, 16, line2, 49);
+}
+
+void swapBuffers(void) {
+    while (lastTick == MARS_SYS_COMM12);
+    /* In vblank now — safe palette-write window. */
+    raycast_shimmer();
+    MARS_VDP_FBCTL = currentFB ^ 1;
+    while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+    currentFB ^= 1;
+    lastTick = MARS_SYS_COMM12;
+}
+
+/* One brightness-fade step with its own vblank flip (bypasses raycast_shimmer,
+ * which would reset the bright palette mid-fade). Shared by the lobby walk-
+ * through and the door portal. */
+static void fade_step(int lvl) {
+    SHARED_UC->frame_count++;
+    raycast_render();
+    while (lastTick == MARS_SYS_COMM12);
+    raycast_set_brightness(lvl);
+    MARS_VDP_FBCTL = currentFB ^ 1;
+    while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+    currentFB ^= 1;
+    lastTick = MARS_SYS_COMM12;
+}
+
+/* Fill an 8px-tall selection bar into the text framebuffer — the same muted
+ * LIGHT_BASE+2 (idx 51) shade as the pause-menu highlight, so the lobby start
+ * picker reads consistently. Caller gates the ~10 Hz blink. */
+static void lobby_hl_bar(uint8_t *fb, int x, int y, int w) {
+    for (int yy = 0; yy < 8; yy++) {
+        uint8_t *row = fb + (y + yy) * SCREEN_W + x;
+        for (int xx = 0; xx < w; xx++) row[xx] = 51;
+    }
+}
+
+/* Start-menu picker row: "> [ NAME ]" — brackets always (so the current pick
+ * reads), cursor + blinking bar when selected. Drawn at box-pixel (x,y). */
+static void lobby_picker_row(uint8_t *fb, int x, int y, int sel, const char *name) {
+    char line[24]; int p = 0;
+    line[p++] = sel ? '>' : ' ';
+    line[p++] = ' '; line[p++] = '['; line[p++] = ' ';
+    for (const char *nm = name; *nm && p < 21; nm++) line[p++] = *nm;
+    line[p++] = ' '; line[p++] = ']';
+    line[p] = '\0';
+    if (sel && (SHARED_UC->frame_count % 6) < 3) {
+        int nl = 0; while (name[nl]) nl++;
+        lobby_hl_bar(fb, x + 2 * 8, y, (nl + 4) * 8);
+    }
+    font_draw_string(fb, x, y, line, 49);
+}
+
+/* Start-menu action row: "> LABEL" — cursor + blinking bar when selected. */
+static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *label) {
+    char line[20]; int p = 0;
+    line[p++] = sel ? '>' : ' ';
+    line[p++] = ' ';
+    for (const char *nm = label; *nm; nm++) line[p++] = *nm;
+    line[p] = '\0';
+    if (sel && (SHARED_UC->frame_count % 6) < 3) {
+        int nl = 0; while (label[nl]) nl++;
+        lobby_hl_bar(fb, x + 2 * 8, y, nl * 8);
+    }
+    font_draw_string(fb, x, y, line, 49);
+}
+
+/* SHOW CONTROLS sub-screen: the title and the controls legend over the frozen
+ * lobby, until any face/START button sends you back to the start menu. */
+static void show_controls_screen(void) {
+    const uint16_t BTNS = SEGA_CTRL_START | SEGA_CTRL_A | SEGA_CTRL_B |
+                          SEGA_CTRL_C | SEGA_CTRL_X | SEGA_CTRL_Y | SEGA_CTRL_Z;
+    HwMdReadPad(0);
+    uint16_t prev = MARS_SYS_COMM8;          /* seed: ignore the button still held */
+    for (;;) {
+        HwMdReadPad(0);
+        uint16_t pad = MARS_SYS_COMM8;
+        uint16_t pressed = (uint16_t)(pad & ~prev);
+        prev = pad;
+        if (pressed & BTNS) break;
+        SHARED_UC->frame_count++;
+        raycast_render();
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        font_draw_string(fb, (SCREEN_W - 13 * 8) / 2, 32, "BACKROOMS 32X", 49);
+        const int LEG_X = 92;
+        font_draw_string(fb, LEG_X, 78,  "RUN / INTERACT: A", 49);
+        font_draw_string(fb, LEG_X, 92,  "LOOK: C",           49);
+        font_draw_string(fb, LEG_X, 106, "CROUCH: A+B",       49);
+        font_draw_string(fb, LEG_X, 120, "DEBUG STATS: MODE", 49);
+        font_draw_string(fb, LEG_X, 134, "RESOLUTION: X",     49);
+        font_draw_string(fb, (SCREEN_W - 16 * 8) / 2, 170, "ANY BUTTON: BACK", 49);
+        swapBuffers();
+    }
+}
+
+/* Walk-through-the-EXIT-door portal: fade to black, generate a fresh procedural
+ * map, drop the player at the standard spawn, fade back up. The "way out" only
+ * loops you deeper into the backrooms. Mirrors the lobby walk-through fade. */
+static void portal_to_procgen(void) {
+    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+    procgen_run(SHARED_UC->frame_count * 1000003u + (uint32_t)player.x);
+    player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
+    raycast_init();                 /* rebuilds full-bright palette... */
+    raycast_set_brightness(0);      /* ...held black until the fade-in */
+    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+}
+
+/* Pause-menu MAPS-tab warp: the same fade/load/fade as the procgen portal, but
+ * loads a hand-authored custom map by index (it sets its own spawn). Lets you
+ * jump to any compiled-in map mid-session — the editor test-loop + an escape
+ * hatch when the player gets stuck or is done with a map. */
+static void portal_to_custom(int idx) {
+    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+    raycast_load_custom(idx);
+    raycast_init();
+    raycast_set_brightness(0);
+    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+}
+
+int m_main(void) {
+    /* Release the secondary SH-2. The crt0 (mars_start.s:271-273) intends
+     * to do this after the init JSR but uses a stale r0 — the write
+     * to "clear secondary status" goes to ROM and is silently dropped.
+     * Without this, the secondary loops forever in its S_OK wait at
+     * 0x20004024 (= MARS_SYS_COMM4) and never reaches s_main().
+     *
+     * Writing 0 to COMM4 changes the upper half of the 32-bit word
+     * the secondary is polling for "S_OK" (0x535F4F4B) → cmp/eq fails →
+     * secondary exits the wait and jumps to s_main. */
+    MARS_SYS_COMM4 = 0;
+
+    Hw32xInit(MARS_VDP_MODE_256, 0);
+    Hw32xDelay(1);    /* wait for first vblank — palette is writable now */
+
+    /* High-res "attic box" splash: the SEGA CORE label on the closed
+     * carton, held until START. Then we hand off to the live low-res 3D
+     * box for the open + dive. */
+    box_hero_show();
+
+    /* Cardboard box title screen — the box mesh + camera dive are
+     * imported from box_model.h and rendered live by box3d (see
+     * tools/export_box.py). It owns its own CRAM palette and a
+     * shimmer-free flip, and runs BEFORE raycast_init so the gameplay
+     * palette build reclaims CRAM after a map is chosen. */
+    box3d_play();   /* loads the box palette in vblank on its first frame */
+
+    /* No button needed: the box intro flows straight into the trap-door
+     * fall and we plummet into the void. (box3d_play can still be skipped
+     * with START.) The map is chosen later, down in the lobby. */
+    box3d_play_fall();
+
+    /* Land in the lobby — the open carpeted room from the HobbyTown
+     * reference. Build the lobby map BEFORE raycast_init so init_lights
+     * lays the ceiling-fixture grid over it. */
+    raycast_load_lobby();
+    raycast_init();
+    prof_init();
+
+    /* Backrooms ambience comes in as we stand up in the lobby (secondary
+     * starts pumping from the top of the loop now). */
+    amb_set_active(1);
+
+    /* ---- Landing reveal --------------------------------------------- *
+     * You fell through the box into darkness; now you come to from the
+     * floor. Fade up looking straight DOWN at the carpet, hold a beat so
+     * the floor perspective reads, then STAND UP — ease the camera from
+     * face-down to the level photo view, decelerating into standing. */
+    SHARED_UC->pitch_y = 80;                 /* face-down at the carpet */
+    for (int lvl = 0; lvl <= FADE_STEPS; lvl++) {     /* fade up from black */
+        SHARED_UC->frame_count++;
+        raycast_render();
+        while (lastTick == MARS_SYS_COMM12);
+        raycast_set_brightness(lvl);
+        MARS_VDP_FBCTL = currentFB ^ 1;
+        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+        currentFB ^= 1;
+        lastTick = MARS_SYS_COMM12;
+    }
+    for (int i = 0; i < 14; i++) {                    /* hold on the carpet */
+        SHARED_UC->frame_count++;
+        raycast_render();
+        swapBuffers();
+    }
+    while (SHARED_UC->pitch_y > 0) {                  /* stand up */
+        int p = SHARED_UC->pitch_y; p -= (p >> 3) + 1; if (p < 0) p = 0;
+        SHARED_UC->pitch_y = (int8_t)p;
+        SHARED_UC->frame_count++;
+        raycast_render();
+        swapBuffers();
+    }
+
+    /* --- Lobby: frozen menu, then walk in ---------------------------- *
+     * Phase A: the player is FROZEN at the photo vantage; only the text
+     * menu is live (UP/DOWN pick the level, any button confirms and
+     * dismisses the menu). Phase B: the menu is gone and the choice is
+     * locked — you wander the lobby and walk forward into the backrooms
+     * to enter the level you picked. */
+    int menu_row = 0;             /* cursor row */
+    int core_idx = 0;             /* core map pick:      custom_maps[0 .. custom_core_count)  */
+    int comm_off = 0;             /* community map pick: offset into [core, pick) span        */
+    /* Row layout: 0 = core map picker, 1 = procedural, [2 = community picker if
+     * any community maps], last = show controls. */
+    const int n_core   = custom_core_count;
+    const int n_comm   = custom_pick_count - custom_core_count;
+    const int has_comm = (n_comm > 0);
+    const int ROW_PROC = 1;
+    const int ROW_COMM = has_comm ? 2 : -1;
+    const int ROW_CTRL = has_comm ? 3 : 2;
+    uint32_t frame = 0;           /* time-in-lobby — entropy for procgen */
+    const uint16_t LOBBY_COMMIT = SEGA_CTRL_START | SEGA_CTRL_A | SEGA_CTRL_B |
+                                  SEGA_CTRL_C | SEGA_CTRL_X | SEGA_CTRL_Y | SEGA_CTRL_Z;
+
+    /* Phase A — frozen menu over the still photo-perspective. */
+    {
+        uint16_t prev_pad = 0xFFFF;
+        for (;;) {
+            HwMdReadPad(0);
+            uint16_t pad = MARS_SYS_COMM8;
+            uint16_t pressed = (uint16_t)(pad & ~prev_pad);
+            prev_pad = pad;
+            /* UP/DOWN move the cursor between the rows. LEFT/RIGHT cycle the
+             * map on whichever PICKER row the cursor is on (core or community). */
+            if ((pressed & SEGA_CTRL_UP)   && menu_row > 0)        menu_row--;
+            if ((pressed & SEGA_CTRL_DOWN) && menu_row < ROW_CTRL) menu_row++;
+            if (menu_row == 0 && n_core > 0) {
+                if (pressed & SEGA_CTRL_LEFT)  core_idx = (core_idx + n_core - 1) % n_core;
+                if (pressed & SEGA_CTRL_RIGHT) core_idx = (core_idx + 1) % n_core;
+            } else if (menu_row == ROW_COMM && n_comm > 0) {
+                if (pressed & SEGA_CTRL_LEFT)  comm_off = (comm_off + n_comm - 1) % n_comm;
+                if (pressed & SEGA_CTRL_RIGHT) comm_off = (comm_off + 1) % n_comm;
+            }
+            if (pressed & LOBBY_COMMIT) {
+                /* SHOW CONTROLS opens its sub-screen and returns here; the map
+                 * pickers (core/community) and PROCEDURAL confirm and start. */
+                if (menu_row == ROW_CTRL) {
+                    show_controls_screen();
+                    prev_pad = 0xFFFF;       /* swallow the still-held button */
+                    continue;
+                }
+                break;
+            }
+            metrics_mode_check(pad);
+            frame++;
+
+            SHARED_UC->frame_count++;
+            raycast_render();                    /* stationary lobby view */
+            uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            /* Title. */
+            font_draw_string(fb_text, (SCREEN_W - 13 * 8) / 2, 32,
+                             "BACKROOMS 32X", 49);
+
+            /* Start menu: a core map PICKER, PROCEDURAL, an optional COMMUNITY
+             * map picker, and SHOW CONTROLS. The cursor row gets the blinking
+             * highlight bar; picker rows (LEFT/RIGHT) show the pick in brackets. */
+            const int MENU_X = 88;
+            int y = 52;
+            font_draw_string(fb_text, MENU_X, y, "START MAP:", 49);  y += 16;
+            lobby_picker_row(fb_text, MENU_X, y, menu_row == 0,
+                             n_core > 0 ? custom_maps[core_idx].name : "BACKROOMS");
+            y += 16;
+            lobby_action_row(fb_text, MENU_X, y, menu_row == ROW_PROC, "PROCEDURAL");
+            y += 16;
+            if (has_comm) {
+                y += 8;
+                font_draw_string(fb_text, MENU_X, y, "COMMUNITY:", 49);  y += 16;
+                lobby_picker_row(fb_text, MENU_X, y, menu_row == ROW_COMM,
+                                 custom_maps[custom_core_count + comm_off].name);
+                y += 16;
+            }
+            y += 8;
+            lobby_action_row(fb_text, MENU_X, y, menu_row == ROW_CTRL, "SHOW CONTROLS");
+            y += 24;
+            font_draw_string(fb_text, (SCREEN_W - 19 * 8) / 2, y, "ANY BUTTON: CONFIRM", 49);
+            if (menu_row == 0 || menu_row == ROW_COMM)
+                font_draw_string(fb_text, (SCREEN_W - 15 * 8) / 2, y + 14, "L/R: CHANGE MAP", 49);
+
+            /* PAD-type readout (debug, top-left): 6/3/? button handshake. */
+            uint16_t ptype = pad & SEGA_CTRL_TYPE;
+            char padline[8] = { 'P','A','D',':',' ',
+                (ptype == SEGA_CTRL_SIX) ? '6' : (ptype == SEGA_CTRL_THREE) ? '3' : '?',
+                0, 0 };
+            font_draw_string(fb_text, 8, 8, padline, 49);
+            if (g_metrics_on) { prof_sample_and_draw(fb_text); pos_draw(fb_text); }
+            swapBuffers();
+        }
+    }
+
+    /* Phase A.5 — procedural weight tuning. Only when PROCEDURAL is chosen:
+     * the player dials the generation mix (or leaves the balanced default)
+     * before walking out. UP/DOWN pick a knob, LEFT/RIGHT adjust it, C resets
+     * to defaults, START locks it in. Drawn over the live lobby view. */
+    if (menu_row == 1) {
+        static const char *const labels[6] = {
+            "OPENNESS    ", "PARTITIONS  ", "CRAWLSPACES ",
+            "OUTLETS     ", "SPOTTED     ", "SEE-OVER    " };
+        uint8_t *const wv[6] = {
+            &g_procgen_params.openness,  &g_procgen_params.partitions,
+            &g_procgen_params.crawlspaces, &g_procgen_params.outlets,
+            &g_procgen_params.spotted,   &g_procgen_params.lowdivs };
+        int row = 0;
+        uint16_t prev_pad = 0xFFFF;
+        for (;;) {
+            HwMdReadPad(0);
+            uint16_t pad = MARS_SYS_COMM8;
+            uint16_t pressed = (uint16_t)(pad & ~prev_pad);
+            prev_pad = pad;
+            if ((pressed & SEGA_CTRL_UP)    && row > 0) row--;
+            if ((pressed & SEGA_CTRL_DOWN)  && row < 5) row++;
+            if ((pressed & SEGA_CTRL_LEFT)  && *wv[row] > 0) (*wv[row])--;
+            if ((pressed & SEGA_CTRL_RIGHT) && *wv[row] < PROCGEN_MAX_W) (*wv[row])++;
+            if (pressed & SEGA_CTRL_C) procgen_params_default();
+            if (pressed & SEGA_CTRL_START) break;     /* lock in, generate */
+            metrics_mode_check(pad);
+            frame++;
+
+            SHARED_UC->frame_count++;
+            raycast_render();                          /* live lobby behind */
+            uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            font_draw_string(fb_text, (SCREEN_W - 15 * 8) / 2, 36,
+                             "TUNE PROCEDURAL", 49);
+            for (int i = 0; i < 6; i++) {
+                /* "> OPENNESS    0 --|-- 4" — a slider | along a 0..MAX track,
+                 * min on the left, max value on the right, so the level reads
+                 * unambiguously (the old [##--] bar was unclear). */
+                char line[32]; int n = 0;
+                line[n++] = (i == row) ? '>' : ' ';
+                line[n++] = ' ';
+                for (const char *p = labels[i]; *p; p++) line[n++] = *p;
+                line[n++] = '0';
+                line[n++] = ' ';
+                for (int b = 0; b <= PROCGEN_MAX_W; b++)
+                    line[n++] = (b == *wv[i]) ? '|' : '-';
+                line[n++] = ' ';
+                line[n++] = (char)('0' + PROCGEN_MAX_W);
+                line[n]   = 0;
+                font_draw_string(fb_text, (SCREEN_W - n * 8) / 2, 64 + i * 14, line, 49);
+            }
+            font_draw_string(fb_text, (SCREEN_W - 23 * 8) / 2, SCREEN_H - 28,
+                             "L/R ADJUST   C DEFAULTS", 49);
+            font_draw_string(fb_text, (SCREEN_W - 14 * 8) / 2, SCREEN_H - 14,
+                             "START GENERATE", 49);
+            swapBuffers();
+        }
+    }
+
+    /* Phase B — menu dismissed, choice locked. Walk up to the black void
+     * (world_map cell == 2, the dark exit doorway along the east wall) and
+     * step through it. */
+    {
+        for (;;) {
+            HwMdReadPad(0);
+            uint16_t pad = MARS_SYS_COMM8;
+            metrics_mode_check(pad);
+            player_update(pad);
+            /* Exit when the player's cell sits against a black-void cell (==2),
+             * any side. Robust to where on the void edge you arrive — the old
+             * fixed x>7 / y<5 box missed the bottom row of the doorway. */
+            int pcx = FX_INT(player.x), pcy = FX_INT(player.y);
+            if ((pcx + 1 < MAP_W && world_map[pcy][pcx + 1] == 2) ||
+                (pcx - 1 >= 0    && world_map[pcy][pcx - 1] == 2) ||
+                (pcy + 1 < MAP_H && world_map[pcy + 1][pcx] == 2) ||
+                (pcy - 1 >= 0    && world_map[pcy - 1][pcx] == 2)) break;
+            SHARED_UC->frame_count++;
+            raycast_render();
+            uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            if (g_metrics_on) { prof_sample_and_draw(fb_text); pos_draw(fb_text); }
+            swapBuffers();
+        }
+    }
+
+    /* Walk-through transition: fade the lobby to black, swap in the chosen
+     * map behind the black, fade it up — reads as the lobby sealing off
+     * and the backrooms opening ahead. (Own vblank flip so it bypasses
+     * raycast_shimmer, which would reset the bright palette mid-fade.) */
+    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) {
+        SHARED_UC->frame_count++;
+        raycast_render();
+        while (lastTick == MARS_SYS_COMM12);
+        raycast_set_brightness(lvl);
+        MARS_VDP_FBCTL = currentFB ^ 1;
+        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+        currentFB ^= 1;
+        lastTick = MARS_SYS_COMM12;
+    }
+
+    if (menu_row == ROW_PROC) {
+        procgen_run((uint32_t)frame * 1000003u + (uint32_t)player.x);
+        player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
+    } else if (menu_row == ROW_COMM) {
+        raycast_load_custom(custom_core_count + comm_off);  /* community pick; sets its own spawn */
+    } else if (n_core > 0) {
+        raycast_load_custom(core_idx);                      /* core pick; sets its own spawn */
+    } else {
+        raycast_load_fixed();
+    }
+    raycast_init();                 /* rebuilds full-bright palette... */
+    raycast_set_brightness(0);      /* ...but hold black until the fade-in */
+
+    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) {
+        SHARED_UC->frame_count++;
+        raycast_render();
+        while (lastTick == MARS_SYS_COMM12);
+        raycast_set_brightness(lvl);
+        MARS_VDP_FBCTL = currentFB ^ 1;
+        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+        currentFB ^= 1;
+        lastTick = MARS_SYS_COMM12;
+    }
+
+    for (;;) {
+        /* Read the joypad up-front so the menu can both react to
+         * START and tell player_update to skip movement when open. */
+        HwMdReadPad(0);
+        uint16_t pad = MARS_SYS_COMM8;
+
+        menu_update(pad);
+        /* MAPS tab asked to warp -> fade to the chosen custom map. */
+        if (g_warp_request >= 0) {
+            int t = g_warp_request; g_warp_request = -1;
+            portal_to_custom(t);
+            continue;
+        }
+        metrics_mode_check(pad);
+        if (!menu_is_active()) {
+            player_update(pad);
+            /* Stepped into the open EXIT door -> portal into a fresh procgen map. */
+            if (raycast_door_portal_check()) { portal_to_procgen(); continue; }
+        }
+        /* Tick the shared frame counter before render so both CPUs
+         * read the same value when computing the distant-wall strobe. */
+        SHARED_UC->frame_count++;
+        raycast_render();
+        uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        menu_render(fb_text);
+        if (g_metrics_on) {
+            prof_sample_and_draw(fb_text);
+            pos_draw(fb_text);
+        }
+        swapBuffers();
+    }
+    return 0;
+}

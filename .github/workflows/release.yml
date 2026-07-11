@@ -1,0 +1,113 @@
+name: release
+
+# Community-map pipeline, phase 2: every merge to main that changes the game's
+# content (maps, engine, assets, registry) builds the ROM on the pinned marsdev
+# toolchain and publishes a GitHub Release — tag build-<commit count>, same
+# scheme as scripts/release.sh and the in-game CREDITS build number. A merged
+# community-map PR becomes a playable ROM download with no maintainer steps.
+#
+# Also runnable by hand (workflow_dispatch) to re-cut a release for HEAD.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'maps/**'
+      - 'sh_src/**'
+      - 'md_src/**'
+      - 'registry.json'
+      - 'tools/gen_maps.py'
+      - 'tools/gen_assets.py'
+      - 'tools/mapfmt.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create tags + releases, upload the ROM asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      MARSDEV_VER: v1.0.0-rc1
+      MARSDEV: ${{ github.workspace }}/.marsdev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # rev-list --count needs full history
+
+      - name: Compute build tag
+        id: tag
+        run: |
+          set -euo pipefail
+          BUILD=$(git rev-list --count HEAD)
+          SHA=$(git rev-parse --short HEAD)
+          echo "tag=build-${BUILD}"        >> "$GITHUB_OUTPUT"
+          echo "build=${BUILD}"            >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"                >> "$GITHUB_OUTPUT"
+          echo "date=$(date +%Y-%m-%d)"    >> "$GITHUB_OUTPUT"
+
+      - name: Skip if release already exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.tag.outputs.tag }}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "release ${{ steps.tag.outputs.tag }} already exists — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache marsdev toolchain
+        if: steps.exists.outputs.skip != 'true'
+        id: cache-marsdev
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MARSDEV }}
+          key: marsdev-${{ env.MARSDEV_VER }}-linux-x86_64
+
+      - name: Install marsdev (prebuilt toolchain)
+        if: steps.exists.outputs.skip != 'true' && steps.cache-marsdev.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          url="https://github.com/andwn/marsdev/releases/download/${MARSDEV_VER}/marsdev-${MARSDEV_VER}-linux-x86_64.tar.xz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar -xJ -C "$tmp"
+          gcc="$(find "$tmp" -path '*/sh-elf/bin/sh-elf-gcc' | head -1)"
+          test -n "$gcc" || { echo "::error::sh-elf-gcc not found in marsdev tarball"; exit 1; }
+          root="$(dirname "$(dirname "$(dirname "$gcc")")")"
+          mkdir -p "$MARSDEV"
+          cp -a "$root"/. "$MARSDEV"/
+
+      - name: Build ROM
+        if: steps.exists.outputs.skip != 'true'
+        run: make release MARSDEV="$MARSDEV"
+
+      - name: Release notes (commits since the previous build tag)
+        if: steps.exists.outputs.skip != 'true'
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV=$(git tag --list 'build-*' --sort=-creatordate | head -1 || true)
+          RANGE=""; [ -n "$PREV" ] && RANGE="${PREV}..HEAD"
+          NOTES=$(git log --no-merges --pretty='- %s (%h)' $RANGE)
+          [ -n "$NOTES" ] || NOTES="- (no new commits since ${PREV})"
+          # New community maps in this release get a shout-out up top.
+          NEWMAPS=$(git diff --diff-filter=A --name-only ${PREV:+$PREV..HEAD} -- 'maps/community/*.map' | \
+                    sed 's|maps/community/||; s|\.map$||; s/^/- 🗺️ NEW community map: /' || true)
+          {
+            echo 'notes<<NOTES_EOF'
+            [ -n "$NEWMAPS" ] && { echo "$NEWMAPS"; echo; }
+            echo "$NOTES"
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: steps.exists.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" rom/backrooms.32x \
+            -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Build ${{ steps.tag.outputs.build }} — ${{ steps.tag.outputs.date }} (${{ steps.tag.outputs.sha }})" \
+            --notes "${{ steps.notes.outputs.notes }}"

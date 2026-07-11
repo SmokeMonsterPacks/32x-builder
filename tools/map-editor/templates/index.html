@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backrooms 32X — Map Editor</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header>
+  <h1>BACKROOMS&nbsp;32X · MAP&nbsp;EDITOR</h1>
+  <div class="file-bar">
+    <label>Open <select id="map-list"><option value="">—</option></select></label>
+    <button id="btn-reload" title="Reload from disk">↻</button>
+    <span class="sep"></span>
+    <label>New
+      <select id="new-size">
+        <option value="8">8×8</option>
+        <option value="16" selected>16×16</option>
+        <option value="32">32×32</option>
+      </select>
+    </label>
+    <button id="btn-new">New map</button>
+    <span class="sep"></span>
+    <label>Name <input id="map-name" maxlength="16" size="14" placeholder="MYMAP"></label>
+    <button id="btn-export" class="primary" title="Download this map as a .map file to your computer">⬇ Export .map</button>
+    <button id="btn-submit" class="primary" title="Submit this map to the game: opens a pre-filled GitHub pull request under your own GitHub account. CI checks it; once merged it ships in the next ROM.">🚀 Submit to game</button>
+    <button id="btn-import" title="Open a .map file from your computer">⬆ Import</button>
+    <input id="file-import" type="file" accept=".map,text/plain" hidden>
+    <button id="btn-save" title="Save into this checkout's maps/community/ (local dev only)">Save to repo</button>
+    <button id="btn-walk" title="Walk the current map in a first-person preview">▶ Walk</button>
+    <span id="gh-auth" class="gh-auth"></span>
+    <span id="status"></span>
+  </div>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <div class="panel">
+      <h2>Layer</h2>
+      <div id="layers" class="btn-col"></div>
+    </div>
+    <div class="panel">
+      <h2 id="palette-title">Palette</h2>
+      <div id="palette"></div>
+    </div>
+    <div class="panel hint">
+      <h2>Keys</h2>
+      <ul>
+        <li><b>Left-drag</b> paint / place</li>
+        <li><b>Right-click</b> erase / delete</li>
+        <li>Grid: click cells</li>
+        <li>Decals: click a wall <i>edge</i></li>
+        <li>Partitions: click corners (chains); right-click ends</li>
+        <li>Crawl: click 2 cells (same row/col)</li>
+        <li>Spawn: click a cell, set facing</li>
+      </ul>
+    </div>
+  </aside>
+
+  <section id="stage">
+    <canvas id="grid"></canvas>
+    <div id="coords"></div>
+  </section>
+</main>
+
+<div id="preview">
+  <canvas id="pv-canvas"></canvas>
+  <div class="pv-help">
+    <span><b>W/S</b> move · <b>A/D</b> strafe · <b>←/→</b> or <b>Q/E</b> turn · <b>Esc</b> exit</span>
+    <button id="btn-exit-preview">✕ Exit preview</button>
+  </div>
+</div>
+
+<script src="/static/js/raycast.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

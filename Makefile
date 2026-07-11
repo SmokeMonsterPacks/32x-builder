@@ -1,0 +1,238 @@
+# Sample Makefile for Marsdev (32X version)
+# For 32X both m68k and SH-2 code has to be built
+# The usual variables are split into "MD" and "SH" versions
+
+# Default paths, can be overridden by setting MARSDEV before calling make
+MARSDEV ?= ${HOME}/mars
+TOOLSBIN = $(MARSDEV)/bin
+MDBIN    = $(MARSDEV)/m68k-elf/bin
+SHBIN    = $(MARSDEV)/sh-elf/bin
+
+ROMDIR  := rom
+TARGET  ?= $(ROMDIR)/backrooms
+MDTARGET = $(ROMDIR)/md_start
+
+# m68k GCC and Binutils
+MDCC   = $(MDBIN)/m68k-elf-gcc
+MDCXX  = $(MDBIN)/m68k-elf-g++
+MDAS   = $(MDBIN)/m68k-elf-as
+MDLD   = $(MDBIN)/m68k-elf-ld
+MDNM   = $(MDBIN)/m68k-elf-nm
+MDOBJC = $(MDBIN)/m68k-elf-objcopy
+# sh2 GCC and Binutils
+SHCC   = $(SHBIN)/sh-elf-gcc
+SHCXX  = $(SHBIN)/sh-elf-g++
+SHAS   = $(SHBIN)/sh-elf-as
+SHLD   = $(SHBIN)/sh-elf-ld
+SHNM   = $(SHBIN)/sh-elf-nm
+SHOBJC = $(SHBIN)/sh-elf-objcopy
+
+# Some files needed are in a versioned directory
+MDCC_VER := $(shell $(MDCC) -dumpversion)
+SHCC_VER := $(shell $(SHCC) -dumpversion)
+
+# Need the LTO plugin so NM can dump our symbol table
+MDPLUGIN = $(MARSDEV)/m68k-elf/libexec/gcc/m68k-elf/$(MDCC_VER)/liblto_plugin.so
+SHPLUGIN = $(MARSDEV)/sh-elf/libexec/gcc/sh-elf/$(SHCC_VER)/liblto_plugin.so
+
+MDINCS   = -Isrc_md -Iinc_md
+MDINCS  += -I$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(MDCC_VER)/include
+SHINCS   = -Isrc -Iinc
+SHINCS  += -I$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER)/include
+
+MDLIBS   = -L$(MARSDEV)/m68k-elf/lib/gcc/m68k-elf/$(MDCC_VER) -lgcc
+SHLIBS   = -L$(MARSDEV)/sh-elf/lib/gcc/sh-elf/$(SHCC_VER) -lgcc
+
+# Any C or C++ standard should be fine here as long as GCC supports it
+MDCCFLAGS  = -m68000 -mshort -Wall -Wextra -pedantic -std=c99 -ffreestanding
+MDCXXFLAGS = -m68000 -mshort -Wall -Wextra -pedantic -std=c++17 -ffreestanding
+SHCCFLAGS  = -m2 -mb -Wall -Wextra -pedantic -std=c99 -ffreestanding
+SHCXXFLAGS = -m2 -mb -Wall -Wextra -pedantic -std=c++17 -ffreestanding
+
+# Assembler flags
+MDASFLAGS  = -x assembler-with-cpp -Imd_src -m68000 -Wa,--register-prefix-optional
+SHASFLAGS  = -Ish_src --small
+
+# Linker flags
+MDLDFLAGS  = -T md_src/md.ld -nostdlib
+SHLDFLAGS  = -T sh_src/mars.ld -nostdlib
+
+# Extra options set by debug or release target
+MDEXTRA = 
+SHEXTRA = 
+
+# Generate m68k object target list
+MDSS    = $(wildcard md_src/*.s)
+MDCS    = $(wildcard md_src/*.c)
+MDCPPS  = $(wildcard md_src/*.cpp)
+MDOBJS  = $(MDSS:.s=.o)
+MDOBJS += $(MDCS:.c=.o)
+MDOBJS += $(MDCPPS:.cpp=.o)
+
+# Generate sh object target list
+SHSS    = $(wildcard sh_src/*.s)
+# custom_maps.c is generated (and may not exist at glob time on a clean build),
+# so exclude it from the wildcard and add its object explicitly below.
+SHCS    = $(filter-out sh_src/custom_maps.c,$(wildcard sh_src/*.c))
+SHCPPS  = $(wildcard sh_src/*.cpp)
+SHOBJS  = $(SHSS:.s=.o)
+SHOBJS += $(SHCS:.c=.o)
+SHOBJS += sh_src/custom_maps.o
+SHOBJS += $(SHCPPS:.cpp=.o)
+
+.PHONY: all release debug deploy deploy-tv publish lint
+
+# Override on command line: make deploy MISTER=root@othermister.local
+# Both targets probe usb0 then usb1 over ssh before scp'ing, so USB
+# drive renumber doesn't break the push.
+MISTER     ?= root@mister.office.local
+MISTER_TV  ?= root@mister.tv.local
+
+all: release
+
+release: MDEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
+release: SHEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
+release: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
+
+# Office MiSTer: probe usb0 then usb1 for the S32X dir.
+deploy: release
+	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+		echo "==> Copying $(TARGET).32x to $(MISTER):$$DIR/" && \
+		scp $(TARGET).32x $(MISTER):$$DIR/backrooms.32x
+
+# TV MiSTer: probe usb0 first (typical layout after a clean boot), fall
+# back to usb1 if the drives renumbered. Avoids the manual `find` dance
+# the office target's comment describes.
+deploy-tv: release
+	@DIR=$$(ssh $(MISTER_TV) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+		echo "==> Copying $(TARGET).32x to $(MISTER_TV):$$DIR/" && \
+		scp $(TARGET).32x $(MISTER_TV):$$DIR/backrooms.32x
+
+# Build + publish a GitHub Release (ROM as the asset, commit log as notes).
+# Git-derived tag build-<commit-count>. Needs the gh CLI, authenticated.
+# Use 'make publish ARGS=--dry-run' to preview without building/publishing.
+publish:
+	@scripts/release.sh $(ARGS)
+
+# Gens-KMod, BlastEm and UMDK support GDB tracing, enabled by this target
+debug: MDEXTRA = -g -Og -DDEBUG -DKDEBUG
+debug: SHEXTRA = -g -Og -DDEBUG -DKDEBUG
+debug: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
+
+# Symbol listings for both CPUs
+$(MDTARGET).lst: $(MDTARGET).elf
+	$(MDNM) --plugin=$(MDPLUGIN) -n $< > $@
+
+$(TARGET).lst: $(TARGET).elf
+	$(SHNM) --plugin=$(SHPLUGIN) -n $< > $@
+
+# m68k stuff
+
+$(MDTARGET).bin: $(MDTARGET).elf
+	@echo "Stripping ELF header from M68K program"
+	@$(MDOBJC) -O binary $< $@
+
+$(MDTARGET).elf: $(MDOBJS) | $(ROMDIR)
+	$(MDCC) $(MDLDFLAGS) $^ -o $@ $(MDLIBS)
+
+md_src/%.o: md_src/%.s
+	@echo "MDAS $<"
+	@$(MDCC) $(MDASFLAGS) -c $< -o $@
+
+md_src/%.o: md_src/%.c
+	@echo "MDCC $<"
+	@$(MDCC) $(MDCCFLAGS) $(MDEXTRA) $(MDINCS) -MMD -MP -c $< -o $@
+
+md_src/%.o: md_src/%.cpp
+	@echo "MDCXX $<"
+	@$(MDCXX) $(MDCXXFLAGS) $(MDEXTRA) $(MDINCS) -MMD -MP -c $< -o $@
+
+# sh2 stuff
+
+$(TARGET).32x: $(TARGET).elf
+	@echo "Stripping ELF header from SH-2 program"
+	@$(SHOBJC) -O binary $< temp.32x
+	@dd if=temp.32x of=$@ bs=8192 conv=sync
+	@rm -f temp.32x
+
+$(TARGET).elf: $(SHOBJS) | $(ROMDIR)
+	$(SHCC) $(SHLDFLAGS) $^ -o $@ $(SHLIBS)
+
+$(ROMDIR):
+	@mkdir -p $(ROMDIR)
+
+# sh_src/mars_start.s embeds the assembled 68000 boot blob via
+# `.incbin "md_start.bin"`, which the assembler resolves on -Ish_src. Stage it
+# there from the MD build output and make the SH startup depend on it, so a clean
+# build (CI, fresh checkout) orders the MD side first instead of relying on a
+# stale leftover copy.
+sh_src/md_start.bin: $(MDTARGET).bin
+	@cp $< $@
+sh_src/mars_start.o: sh_src/md_start.bin
+
+sh_src/%.o: sh_src/%.s
+	@echo "SHAS $<"
+	@$(SHAS) $(SHASFLAGS) $< -o $@
+
+sh_src/%.o: sh_src/%.c
+	@echo "SHCC $<"
+	@$(SHCC) $(SHCCFLAGS) $(SHEXTRA) $(SHINCS) -MMD -MP -c $< -o $@
+
+sh_src/%.o: sh_src/%.cpp
+	@echo "SHCXX $<"
+	@$(SHCXX) $(SHCXXFLAGS) $(SHEXTRA) $(SHINCS) -MMD -MP -c $< -o $@
+
+# --- Build version stamp -------------------------------------------------
+# sh_src/version.h is regenerated every build from git + the clock, but only
+# rewritten when its contents actually change (commit count / sha / date) —
+# so an unchanged same-day rebuild stays byte-stable and doesn't needlessly
+# recompile menu.o. Generated, not tracked (see .gitignore).
+.PHONY: FORCE
+FORCE:
+
+sh_src/version.h: FORCE
+	@BUILD=$$(git rev-list --count HEAD 2>/dev/null || echo 0); \
+	SHA=$$(git rev-parse --short HEAD 2>/dev/null || echo nogit); \
+	DATE=$$(date +%Y%m%d); \
+	printf '/* AUTO-GENERATED by the Makefile each build. Do not edit; not tracked. */\n#ifndef VERSION_H\n#define VERSION_H\n#define VERSION_BUILD_STR "%05d"\n#define VERSION_DATE_STR  "%s"\n#define VERSION_SHA_STR   "%s"\n#endif\n' "$$BUILD" "$$DATE" "$$SHA" > sh_src/version.h.tmp; \
+	if ! cmp -s sh_src/version.h.tmp sh_src/version.h 2>/dev/null; then \
+		mv sh_src/version.h.tmp sh_src/version.h; \
+		echo "  VERSION  build $$BUILD ($$SHA) $$DATE"; \
+	else rm -f sh_src/version.h.tmp; fi
+
+# menu.c draws the version strings, so it must see a fresh version.h.
+sh_src/menu.o: sh_src/version.h
+
+# sh_src/custom_maps.c is codegen'd from maps/*.map + registry.json by the level
+# editor's generator. Regenerate when a .map, the registry, or the generator
+# changes; the sh_src/*.c wildcard then compiles it like any source. Tracked
+# (unlike version.h) so the parse-time wildcard sees it on a clean checkout; the
+# generator only rewrites the file when its contents actually change.
+# Maps live in role folders (maps/core/, maps/community/); gen_maps globs them
+# recursively and lints maps+assets before emitting (a bad map fails the build).
+sh_src/custom_maps.c: $(wildcard maps/*.map maps/core/*.map maps/community/*.map) \
+                      registry.json tools/gen_maps.py tools/mapfmt.py tools/lint_maps.py
+	@python3 tools/gen_maps.py
+
+# Standalone gate (maps + assets + registry), no toolchain — used by CI.
+lint:
+	@python3 tools/lint_maps.py
+
+# Auto-generated header dependency files. -MMD emits one per .c next to
+# the .o; -include silently ignores them on a clean tree. Without this,
+# header changes don't trigger rebuilds and you ship stale .o files
+# compiled against an outdated struct layout — which is exactly how
+# we corrupted memory during the SH-2 split work.
+-include $(MDOBJS:.o=.d)
+-include $(SHOBJS:.o=.d)
+
+.PHONY: clean
+
+clean:
+	rm -f $(MDOBJS) $(SHOBJS)
+	rm -f $(MDOBJS:.o=.d) $(SHOBJS:.o=.d)
+	rm -f $(MDTARGET).bin $(MDTARGET).elf $(MDTARGET).lst
+	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
+	rm -f m68k_crt0.bin.o m68k_crt0.bin
+	rm -f sh_src/md_start.bin
+	rm -f sh_src/version.h sh_src/version.h.tmp
