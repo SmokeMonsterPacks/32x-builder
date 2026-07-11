@@ -46,6 +46,7 @@ def new_model(name="UNTITLED", w=16, h=16):
             grid.append("#" + "." * (w - 2) + "#")
     return {
         "name": name, "w": w, "h": h, "role": "community", "canon": "", "author": "",
+        "next": "",
         "spawn": {"x": w / 2.0, "y": h - 2.5, "facing": "N"},
         "grid": grid, "crawls": [], "partitions": [], "decals": [], "lights": [],
         "options": {"place_outlets": 0, "place_exit_door": 0, "lobby_ceiling": 0},
@@ -54,6 +55,7 @@ def new_model(name="UNTITLED", w=16, h=16):
 
 def parse(text):
     m = {"name": None, "w": None, "h": None, "role": "community", "canon": "", "author": "",
+         "next": "",
          "spawn": None,
          "grid": [], "crawls": [], "partitions": [], "decals": [], "lights": [],
          "options": {"place_outlets": 0, "place_exit_door": 0, "lobby_ceiling": 0}}
@@ -104,6 +106,10 @@ def parse(text):
                 m["canon"] = val
             elif key == "author":
                 m["author"] = val
+            elif key == "next":
+                # Story chaining: the map the exit door leads to (linked list,
+                # forward pointer ONLY — "loads from"/"starting map" are derived).
+                m["next"] = val
             else:
                 err(n, "unknown header key %r" % key)
 
@@ -189,6 +195,7 @@ def serialize(model):
     if m.get("role"):   L.append("role: %s" % m["role"])
     if m.get("canon"):  L.append("canon: %s" % m["canon"])
     if m.get("author"): L.append("author: %s" % m["author"])
+    if m.get("next"):   L.append("next: %s" % m["next"])
     L += ["", "[grid]"]
     L.extend(m["grid"])
     L.append("")

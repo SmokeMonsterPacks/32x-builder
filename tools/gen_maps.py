@@ -101,6 +101,7 @@ def resolve(path, reg):
     if role not in roles:
         die("%s: unknown role %r (valid: %s)" % (base, role, ", ".join(sorted(roles))))
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
+            "next": (m.get("next") or "").strip(),
             "decals": decals, "crawls": crawls, "spawn": spawn,
             "lobby_ceiling": m["options"]["lobby_ceiling"],
             "place_outlets": m["options"]["place_outlets"],
@@ -147,25 +148,30 @@ def emit(maps, out_path):
             parts = ("%s_parts,%d" % (p, len(m["parts"]))) if m["parts"] else "0,0"
             decals = ("%s_decals,%d" % (p, len(m["decals"]))) if m["decals"] else "0,0"
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
-            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s,%s,%d, %d,%d,%d },' %
+            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
                      (m["name"][:16], m["w"], m["h"], p, parts, decals, crawls,
                       fxlit(sx), fxlit(sy), sa,
-                      m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"]))
+                      m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
+                      m["next_idx"]))
         L.append("};")
         L.append("const int custom_map_count = (int)(sizeof custom_maps / sizeof custom_maps[0]);")
         # pickable maps are ordered first (by role priority), so the in-game
         # picker just bounds on this; the lobby sits past it (not selectable).
         L.append("const int custom_pick_count = %d;" % sum(1 for m in maps if m.get("picker")))
-        # core (starter/play) pickable maps sort before community ones, so this
-        # split lets the start menu list a separate Community section: core maps
-        # are [0, custom_core_count), community [custom_core_count, custom_pick_count).
+        # Role-priority ordering gives the start menu clean index boundaries:
+        #   [0, start)        starter maps        ("-- START MAPS --" group)
+        #   [start, core)     play + test maps    ("-- TEST --" group)
+        #   [core, pick)      community maps      (community + story groups)
+        L.append("const int custom_start_count = %d;" %
+                 sum(1 for m in maps if m.get("picker") and m["role"] == "starter"))
         L.append("const int custom_core_count = %d;" %
-                 sum(1 for m in maps if m.get("picker") and m["folder"] == "core"))
+                 sum(1 for m in maps if m.get("picker") and m["role"] != "community"))
     else:
         L.append("/* no maps found */")
         L.append("const custom_map_t custom_maps[1] = {{0}};")
         L.append("const int custom_map_count = 0;")
         L.append("const int custom_pick_count = 0;")
+        L.append("const int custom_start_count = 0;")
         L.append("const int custom_core_count = 0;")
     L.append("")
     text = "\n".join(L)
@@ -203,6 +209,19 @@ def main():
     maps = [resolve(p, reg) for p in files]
     # order: by role priority (pickable first, lobby last), then name -> stable
     maps.sort(key=lambda m: (m["priority"], m["name"]))
+    # Story chains: resolve each map's `next:` NAME to its post-sort index so
+    # the exit door can jump straight to custom_maps[next_map] at runtime.
+    by_name = {m["name"].upper(): i for i, m in enumerate(maps)}
+    for m in maps:
+        if m["next"]:
+            tgt = by_name.get(m["next"].upper())
+            if tgt is None:
+                die("%s: next: %r does not name a map in this build" % (m["name"], m["next"]))
+            if maps[tgt] is m:
+                die("%s: next: points at itself" % m["name"])
+            m["next_idx"] = tgt
+        else:
+            m["next_idx"] = -1
     emit(maps, args.out)
 
 

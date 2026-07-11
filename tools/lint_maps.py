@@ -141,6 +141,18 @@ def lint_model(m, base, folder, reg, seen_names, errs):
         if reach and not any((cx, cy) in reach for cx, cy in adj):
             e("exit door at (%g,%g) is unreachable from spawn" % (d["x"], d["y"]))
 
+    # Story chain (next:): the exit door IS the transition, so a chained map
+    # must have one; a map can't chain to itself. Dangling targets + cycles are
+    # cross-map properties checked in lint_all / the editor submit gate.
+    nxt = (m.get("next") or "").strip()
+    if nxt:
+        has_door = (any(d.get("kind") == "door" for d in m["decals"])
+                    or m["options"].get("place_exit_door"))
+        if not has_door:
+            e("next: %s needs an exit door (place one, or set place_exit_door: 1)" % nxt)
+        if nxt.upper() == (m.get("name") or "").upper():
+            e("next: points at itself")
+
 
 def lint_assets(reg, sh_dir, errs):
     try:
@@ -191,6 +203,32 @@ def lint_all(maps_dir, reg, sh_dir):
     paths = sorted(glob.glob(os.path.join(maps_dir, "**", "*.map"), recursive=True))
     for path in paths:
         lint_map(path, reg, seen, errs)
+    # Story chains across the whole tree: every next: target must exist, and
+    # following the links must never loop (stories END; procgen is the infinite).
+    nxt_of, file_of = {}, {}
+    for p in paths:
+        try:
+            mm = mapfmt.parse(open(p).read())
+        except Exception:
+            continue
+        nm = (mm.get("name") or "").upper()
+        file_of[nm] = os.path.relpath(p, ROOT)
+        if (mm.get("next") or "").strip():
+            nxt_of[nm] = mm["next"].strip().upper()
+    for nm, tgt in sorted(nxt_of.items()):
+        if tgt not in file_of:
+            errs.append("%s: next: %r does not name any map in the tree"
+                        % (file_of.get(nm, nm), tgt))
+    for start in sorted(nxt_of):
+        seen_chain, cur = set(), start
+        while cur in nxt_of:
+            if cur in seen_chain:
+                errs.append("%s: story chain loops (%s -> ... -> %s)"
+                            % (file_of.get(start, start), start, cur))
+                break
+            seen_chain.add(cur)
+            cur = nxt_of[cur]
+
     pickable = sum(1 for p in paths
                    if reg.get("roles", {}).get(mapfmt.parse(open(p).read()).get("role", "community"), {}).get("picker"))
     if paths and pickable == 0:

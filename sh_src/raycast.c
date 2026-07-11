@@ -767,6 +767,10 @@ void raycast_set_brightness(int lvl) {
 
 static void build_palette(void) {
     Hw32xSetBGColor(0, 0, 0, 0);
+    /* Automap overlay reds (see raycast.h) — deliberately outside every ramp
+     * so no fog/shade math ever lands on them. */
+    Hw32xSetBGColor(AMAP_RED,        22, 3, 3);
+    Hw32xSetBGColor(AMAP_RED_BRIGHT, 31, 6, 6);
     /* Walls: milky cream-yellow. Desaturated from the old gold (30,27,13,
      * R-B gap 17) by lifting B to 18 (gap 12, sat ~0.40) — reads as pale
      * old wallpaper under fluorescent light rather than school-bus gold,
@@ -3087,6 +3091,27 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                  * stay mid-bright and readable instead of fogging out. */
                 int cap = LIT_FOG_CAP - (lit - 1) * 2;
                 if (wall_shade > cap) wall_shade = cap;
+            }
+            /* Crawlspace light model: a wall face SEEN FROM under a low
+             * ceiling gets no fixture light — the slab blocks it. Push it
+             * well into the dark ramp, AFTER the lit-cap above so a fixture
+             * in the room beyond can't cancel it. The low ceiling lives on
+             * the viewer-side OPEN cell (the wall cell itself is full), so
+             * back-step the DDA one cell on the axis it last crossed;
+             * partition hits already carry their open cell in litX/litY.
+             * Gated on g_lowceil_active: crawl-less maps pay nothing. */
+            if (g_lowceil_active) {
+                int cfx = litX, cfy = litY;
+                if (!partition_hit) {
+                    if (side == 0) cfx = mapX - stepX;
+                    else           cfy = mapY - stepY;
+                }
+                if ((unsigned)cfx < (unsigned)MAP_W &&
+                    (unsigned)cfy < (unsigned)MAP_H &&
+                    CEIL_H(cfy, cfx) != CEIL_H_FULL) {
+                    wall_shade += 5;
+                    if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
+                }
             }
         }
 

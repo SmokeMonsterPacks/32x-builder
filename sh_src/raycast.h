@@ -5,6 +5,12 @@
 
 #define MAP_W      32
 #define MAP_H      32
+
+/* Automap overlay palette slots (first free indices past FRAME_BASE+5=122).
+ * The Backrooms palette has no red by design — these exist ONLY so the
+ * debug automap reads unmistakably against the yellow world. */
+#define AMAP_RED        122   /* wall / partition lines */
+#define AMAP_RED_BRIGHT 123   /* player arrow */
 /* The hand-authored entry maps (fixed_map, lobby_map) are 32x32. They load into
  * the top-left of the larger live grid with the rest filled solid wall (they're
  * self-sealed entry rooms). Procgen fills the full MAP_W x MAP_H. */

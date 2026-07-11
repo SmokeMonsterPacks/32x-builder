@@ -317,6 +317,11 @@ def _lint_submission(model):
         seen[nm] = "maps/%s/%s.map" % (folder or ".", name)
     lint_maps.lint_model(mapfmt.parse(text), model["name"], "community",
                          reg, seen, errs)
+    nxt = (model.get("next") or "").strip().upper()
+    if nxt and nxt not in seen:
+        errs.append("%s: next: %r is not a map in the game yet — submit the "
+                    "later chapters of a story first (chains are built "
+                    "tail-first)" % (model["name"], nxt))
     return model, text, errs
 
 

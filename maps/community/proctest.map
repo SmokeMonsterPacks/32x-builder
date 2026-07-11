@@ -2,7 +2,7 @@
 name: PROCTEST
 size: 32x32
 spawn: 16.5, 28.5 facing=N
-role: community
+role: test
 author: mike
 
 [grid]

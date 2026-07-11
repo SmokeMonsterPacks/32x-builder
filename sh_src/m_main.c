@@ -1,6 +1,7 @@
 #include "mars.h"
 #include "menu.h"
 #include "raycast.h"
+#include "sin_table.h"   /* COS_FX/SIN_FX for the automap player arrow */
 #include "font.h"
 #include "shared.h"
 #include "procgen.h"
@@ -18,16 +19,54 @@ uint16_t currentFB = 0;
 /* On-screen debug metrics — off by default, toggled by the six-button
  * controller's MODE button (edge-detected once per frame from any loop). */
 uint8_t g_metrics_on = 0;
+/* Automap overlay (MODE+B cycles): 0 = off, 1 = FULL (whole map, north-up,
+ * arrow rotates), 2 = ROTATE (player fixed at center pointing screen-up, the
+ * world rotating around the reticle in real time). d32xr-style vectors, but
+ * composited in red OVER the live yellow view instead of a dedicated screen. */
+static uint8_t g_automap_on = 0;
+/* Continuous zoom, px-per-cell in 16.16: HOLDING MODE+UP/DOWN ramps the
+ * target exponentially (~2s across the full range), and the drawn scale
+ * eases a quarter of the gap per frame — phone-style pinch feel on a d-pad.
+ * Range: 2 px/cell (tiny) .. 64 px/cell (one cell ~30% of the screen). */
+static fx_t am_s_tgt = 4 << 16;
+static fx_t am_s_cur = 4 << 16;
+
+/* Which custom_maps[] entry is currently loaded; -1 = procgen/fixed/lobby.
+ * The exit-door portal reads its next_map to walk story chains. */
+static int g_custom_current = -1;
+/* Seed of the procgen level currently loaded — its entire identity. The
+ * automap footer derives the level's "name" from it (stable per level). */
+static uint32_t g_procgen_seed = 0;
+
 
 /* Pause-menu MAPS tab -> warp request. -1 = none; else a custom_maps[] index.
  * The menu (menu.c) sets it; the main loop drains it into portal_to_custom. */
 volatile int g_warp_request = -1;
 static void metrics_mode_check(uint16_t pad) {
     static uint16_t prev = 0xFFFF;
-    if ((pad & SEGA_CTRL_MODE) && !(prev & SEGA_CTRL_MODE)) g_metrics_on ^= 1;
-    /* X cycles the WALLS res mode FULL/HALF/AUTO (also in the VISUALS menu tab). */
-    if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
-        SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 3);
+    /* Debug shortcuts live behind a HELD-MODE modifier: bare X used to cycle
+     * the wall res while ALSO acting as a menu commit, and emulators with
+     * loose six-button mappings fire phantom X/MODE singles. MODE alone now
+     * does nothing (pure modifier); the combo edge-triggers on the second
+     * button. The VISUALS pause-menu tab remains the discoverable path. */
+    if (pad & SEGA_CTRL_MODE) {
+        if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
+            SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 3);
+        if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y))
+            g_metrics_on ^= 1;
+        if ((pad & SEGA_CTRL_B) && !(prev & SEGA_CTRL_B))
+            g_automap_on = (uint8_t)((g_automap_on + 1) % 3);
+        if (g_automap_on) {
+            if (pad & SEGA_CTRL_UP) {                    /* held: ramp in */
+                am_s_tgt += am_s_tgt >> 4;
+                if (am_s_tgt > (64 << 16)) am_s_tgt = 64 << 16;
+            }
+            if (pad & SEGA_CTRL_DOWN) {                  /* held: ramp out */
+                am_s_tgt -= am_s_tgt >> 4;
+                if (am_s_tgt < (2 << 16)) am_s_tgt = 2 << 16;
+            }
+        }
+    }
     prev = pad;
 }
 
@@ -162,6 +201,151 @@ static void prof_sample_and_draw(uint8_t *fb) {
     }
 }
 
+/* ---- Automap overlay ------------------------------------------------- *
+ * Vector map over the live render: red boundary lines for every wall face
+ * that touches open floor (voids stay open = exits read as gaps), partitions
+ * as their true segments, the player in bright red.
+ *   FULL:   whole 32x32 grid, north-up, fixed 4px/cell, arrow rotates.
+ *   ROTATE: player pinned at screen center pointing screen-up; every segment
+ *           is translated player-relative and rotated by (192 - angle) --
+ *           the rotation that maps the facing vector onto -Y (up). */
+#define AM_CX     (SCREEN_W / 2)
+#define AM_CY     (SCREEN_H / 2)
+
+static void am_line(uint8_t *fb, int x0, int y0, int x1, int y1, uint8_t c) {
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1;
+    int dy = y1 > y0 ? y1 - y0 : y0 - y1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        if ((unsigned)x0 < SCREEN_W && (unsigned)y0 < SCREEN_H)
+            fb[y0 * SCREEN_W + x0] = c;
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = err * 2;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Per-frame transform state (set by automap_draw, read by am_pt). */
+static fx_t am_rc, am_rs, am_px, am_py;
+static int  am_rotate, am_ax, am_ay;
+
+/* World FX * scale FX -> screen pixels ((2^16 x)(2^16 s) >> 32 = x*s). */
+#define AM_PX(v) ((int)(((int64_t)(v) * am_s_cur) >> 32))
+
+static void am_pt(fx_t wx, fx_t wy, int *ox, int *oy) {
+    if (!am_rotate) {
+        *ox = am_ax + AM_PX(wx);
+        *oy = am_ay + AM_PX(wy);
+        return;
+    }
+    fx_t dx = wx - am_px, dy = wy - am_py;
+    fx_t rx = FX_MUL(dx, am_rc) - FX_MUL(dy, am_rs);
+    fx_t ry = FX_MUL(dx, am_rs) + FX_MUL(dy, am_rc);
+    *ox = AM_CX + AM_PX(rx);
+    *oy = AM_CY + AM_PX(ry);
+}
+
+static void am_emit(uint8_t *fb, fx_t wx0, fx_t wy0, fx_t wx1, fx_t wy1, uint8_t c) {
+    int x0, y0, x1, y1;
+    am_pt(wx0, wy0, &x0, &y0);
+    am_pt(wx1, wy1, &x1, &y1);
+    am_line(fb, x0, y0, x1, y1, c);
+}
+
+/* Automap footer: the current map's name, static, bottom-center, in red.
+ * Authored maps use their real name; a procgen level derives a pronounceable
+ * 8-char name from its SEED (consonant-vowel syllables) — deterministic, so
+ * a level keeps its name for as long as you wander it. */
+static void am_footer(uint8_t *fb) {
+    char name[18];
+    int n = 0;
+    if (g_custom_current >= 0) {
+        for (const char *p = custom_maps[g_custom_current].name; *p && n < 16; p++)
+            name[n++] = *p;
+    } else {
+        static const char CONS[] = "BDKLMNPRSTVZ";   /* 12 */
+        static const char VOWS[] = "AEIOU";          /*  5 */
+        uint32_t h = g_procgen_seed * 2654435761u;   /* Knuth mix */
+        for (int i = 0; i < 4; i++) {
+            name[n++] = CONS[h % 12]; h /= 12;
+            name[n++] = VOWS[h % 5];  h /= 5;
+            h ^= h >> 7;
+        }
+    }
+    name[n] = 0;
+    int y = g_metrics_on ? (SCREEN_H - 36) : (SCREEN_H - 12);
+    font_draw_string(fb, (SCREEN_W - n * 8) / 2, y, name, AMAP_RED_BRIGHT);
+}
+
+static void automap_draw(uint8_t *fb) {
+    am_rotate = (g_automap_on == 2);
+    /* Glide the drawn scale toward the target (quarter-gap per frame). */
+    fx_t d = am_s_tgt - am_s_cur;
+    am_s_cur += (d > 255 || d < -255) ? (d >> 2) : d;
+    if (am_rotate) {
+        uint8_t th = (uint8_t)(192 - (uint8_t)player.angle);
+        am_rc = COS_FX(th); am_rs = SIN_FX(th);
+        am_px = player.x;   am_py = player.y;
+    } else {
+        /* North-up camera, per-axis: centered while that axis of the map fits
+         * the screen; once it outgrows it, follow the player, clamped so the
+         * map edge never leaves a gap. The clamp range collapses exactly at
+         * the fits/doesn't boundary, so zoom glides through with no pop. */
+        int map_w = AM_PX((fx_t)MAP_W << FX_SHIFT);
+        int map_h = AM_PX((fx_t)MAP_H << FX_SHIFT);
+        if (map_w <= SCREEN_W) {
+            am_ax = (SCREEN_W - map_w) / 2;
+        } else {
+            am_ax = AM_CX - AM_PX(player.x);
+            if (am_ax > 0) am_ax = 0;
+            if (am_ax < SCREEN_W - map_w) am_ax = SCREEN_W - map_w;
+        }
+        if (map_h <= SCREEN_H) {
+            am_ay = (SCREEN_H - map_h) / 2;
+        } else {
+            am_ay = AM_CY - AM_PX(player.y);
+            if (am_ay > 0) am_ay = 0;
+            if (am_ay < SCREEN_H - map_h) am_ay = SCREEN_H - map_h;
+        }
+    }
+    /* Grid: each wall cell's faces that border walkable floor. A few hundred
+     * short segments, only while the overlay is on. */
+    for (int cy = 0; cy < MAP_H; cy++) {
+        for (int cx = 0; cx < MAP_W; cx++) {
+            if (world_map[cy][cx] != 1) continue;
+            fx_t x0 = (fx_t)cx << FX_SHIFT,  y0 = (fx_t)cy << FX_SHIFT;
+            fx_t x1 = x0 + FX_ONE,           y1 = y0 + FX_ONE;
+            if (cy > 0         && world_map[cy - 1][cx] == 0) am_emit(fb, x0, y0, x1, y0, AMAP_RED);
+            if (cy < MAP_H - 1 && world_map[cy + 1][cx] == 0) am_emit(fb, x0, y1, x1, y1, AMAP_RED);
+            if (cx > 0         && world_map[cy][cx - 1] == 0) am_emit(fb, x0, y0, x0, y1, AMAP_RED);
+            if (cx < MAP_W - 1 && world_map[cy][cx + 1] == 0) am_emit(fb, x1, y0, x1, y1, AMAP_RED);
+        }
+    }
+    for (int i = 0; i < num_partitions; i++)
+        am_emit(fb, partitions[i].x1, partitions[i].y1,
+                    partitions[i].x2, partitions[i].y2, AMAP_RED);
+
+    if (am_rotate) {
+        /* Fixed reticle: center arrow always pointing screen-up. */
+        am_line(fb, AM_CX, AM_CY + 3, AM_CX, AM_CY - 5, AMAP_RED_BRIGHT);
+        am_line(fb, AM_CX, AM_CY - 5, AM_CX - 3, AM_CY - 1, AMAP_RED_BRIGHT);
+        am_line(fb, AM_CX, AM_CY - 5, AM_CX + 3, AM_CY - 1, AMAP_RED_BRIGHT);
+    } else {
+        /* FULL mode: the arrow lives on the map and rotates with the view. */
+        int px = am_ax + AM_PX(player.x);
+        int py = am_ay + AM_PX(player.y);
+        int fx = (int)((COS_FX((uint8_t)player.angle) * 6) >> FX_SHIFT);
+        int fy = (int)((SIN_FX((uint8_t)player.angle) * 6) >> FX_SHIFT);
+        am_line(fb, px - fx / 2, py - fy / 2, px + fx, py + fy, AMAP_RED_BRIGHT);
+        int bx = (-fx - fy) / 3, by = (fx - fy) / 3;
+        am_line(fb, px + fx, py + fy, px + fx + bx, py + fy + by, AMAP_RED_BRIGHT);
+        bx = (-fx + fy) / 3; by = (-fx - fy) / 3;
+        am_line(fb, px + fx, py + fy, px + fx + bx, py + fy + by, AMAP_RED_BRIGHT);
+    }
+    am_footer(fb);
+}
+
 /* Top-left position + angle overlay for debugging map locations.
  * Line 1: "X:NN.N Y:NN.N" — integer cell + one decimal.
  * Line 2: "A:NNN"          — raw uint8 angle.
@@ -239,21 +423,19 @@ static void lobby_hl_bar(uint8_t *fb, int x, int y, int w) {
 
 /* Start-menu picker row: "> [ NAME ]" — brackets always (so the current pick
  * reads), cursor + blinking bar when selected. Drawn at box-pixel (x,y). */
-static void lobby_picker_row(uint8_t *fb, int x, int y, int sel, const char *name) {
-    char line[24]; int p = 0;
-    line[p++] = sel ? '>' : ' ';
-    line[p++] = ' '; line[p++] = '['; line[p++] = ' ';
-    for (const char *nm = name; *nm && p < 21; nm++) line[p++] = *nm;
-    line[p++] = ' '; line[p++] = ']';
-    line[p] = '\0';
-    if (sel && (SHARED_UC->frame_count % 6) < 3) {
-        int nl = 0; while (name[nl]) nl++;
-        lobby_hl_bar(fb, x + 2 * 8, y, (nl + 4) * 8);
+/* Start-menu action row: "> LABEL" — cursor + blinking bar when selected. */
+/* Translucent dark panel behind the start-menu text: a 50% checkerboard of
+ * the pause menu's dark eggshell (index 46) over the live lobby render — on a
+ * CRT/scaler the dither reads as a smoked-glass box, and the halved contrast
+ * behind the glyphs makes the white text pop. Solid would hide the lobby;
+ * this keeps it breathing through. */
+static void lobby_menu_panel(uint8_t *fb, int x0, int y0, int x1, int y1) {
+    for (int yy = y0; yy < y1; yy++) {
+        uint8_t *row = fb + yy * SCREEN_W;
+        for (int xx = x0 + (yy & 1); xx < x1; xx += 2) row[xx] = 46;
     }
-    font_draw_string(fb, x, y, line, 49);
 }
 
-/* Start-menu action row: "> LABEL" — cursor + blinking bar when selected. */
 static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *label) {
     char line[20]; int p = 0;
     line[p++] = sel ? '>' : ' ';
@@ -279,7 +461,7 @@ static void show_controls_screen(void) {
         uint16_t pad = MARS_SYS_COMM8;
         uint16_t pressed = (uint16_t)(pad & ~prev);
         prev = pad;
-        if (pressed & BTNS) break;
+        if ((pressed & BTNS) && !(pad & SEGA_CTRL_MODE)) break;
         SHARED_UC->frame_count++;
         raycast_render();
         uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
@@ -288,8 +470,9 @@ static void show_controls_screen(void) {
         font_draw_string(fb, LEG_X, 78,  "RUN / INTERACT: A", 49);
         font_draw_string(fb, LEG_X, 92,  "LOOK: C",           49);
         font_draw_string(fb, LEG_X, 106, "CROUCH: A+B",       49);
-        font_draw_string(fb, LEG_X, 120, "DEBUG STATS: MODE", 49);
-        font_draw_string(fb, LEG_X, 134, "RESOLUTION: X",     49);
+        font_draw_string(fb, LEG_X, 120, "DEBUG STATS: MODE+Y", 49);
+        font_draw_string(fb, LEG_X, 134, "RESOLUTION: MODE+X",  49);
+        font_draw_string(fb, LEG_X, 148, "AUTOMAP: MODE+B U/D ZOOM", 49);
         font_draw_string(fb, (SCREEN_W - 16 * 8) / 2, 170, "ANY BUTTON: BACK", 49);
         swapBuffers();
     }
@@ -299,8 +482,10 @@ static void show_controls_screen(void) {
  * map, drop the player at the standard spawn, fade back up. The "way out" only
  * loops you deeper into the backrooms. Mirrors the lobby walk-through fade. */
 static void portal_to_procgen(void) {
+    g_custom_current = -1;
     for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
-    procgen_run(SHARED_UC->frame_count * 1000003u + (uint32_t)player.x);
+    g_procgen_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
+    procgen_run(g_procgen_seed);
     player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
     raycast_init();                 /* rebuilds full-bright palette... */
     raycast_set_brightness(0);      /* ...held black until the fade-in */
@@ -312,6 +497,7 @@ static void portal_to_procgen(void) {
  * jump to any compiled-in map mid-session — the editor test-loop + an escape
  * hatch when the player gets stuck or is done with a map. */
 static void portal_to_custom(int idx) {
+    g_custom_current = idx;
     for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
     raycast_load_custom(idx);
     raycast_init();
@@ -397,17 +583,48 @@ int m_main(void) {
      * dismisses the menu). Phase B: the menu is gone and the choice is
      * locked — you wander the lobby and walk forward into the backrooms
      * to enter the level you picked. */
-    int menu_row = 0;             /* cursor row */
-    int core_idx = 0;             /* core map pick:      custom_maps[0 .. custom_core_count)  */
-    int comm_off = 0;             /* community map pick: offset into [core, pick) span        */
-    /* Row layout: 0 = core map picker, 1 = procedural, [2 = community picker if
-     * any community maps], last = show controls. */
-    const int n_core   = custom_core_count;
-    const int n_comm   = custom_pick_count - custom_core_count;
-    const int has_comm = (n_comm > 0);
-    const int ROW_PROC = 1;
-    const int ROW_COMM = has_comm ? 2 : -1;
-    const int ROW_CTRL = has_comm ? 3 : 2;
+    /* ---- Unified start list ----------------------------------------------
+     * Every destination is ONE row in ONE list. COMMUNITY and STORIES are
+     * FOLDING groups: their headers are selectable rows ('>' folded,
+     * '|' unrolled); RIGHT unrolls, LEFT folds, confirm toggles. The list is
+     * REBUILT whenever a fold changes, and the unroll is animated by a damped
+     * integer spring — rows slide out from under the header (clipped until
+     * they emerge) and the rows below visibly bounce as the spring settles. */
+    enum { IT_MAP, IT_PROC, IT_SEP, IT_FOLD, IT_CTRL };
+    struct { uint8_t kind; uint8_t map; const char *label; } items[40];
+    int n_items = 0;
+    const int n_core  = custom_core_count;
+    const int n_comm  = custom_pick_count - custom_core_count;
+    const int n_start = custom_start_count;
+
+    /* Story chains (next_map links): a community map someone links TO is a
+     * CHAPTER — hidden from the flat list (you start a story at its head, not
+     * mid-book; the pause MAPS tab still warps anywhere as the escape hatch).
+     * A community map with a next-link that nobody links to is a story HEAD —
+     * listed under STORIES. Core maps always list normally. */
+    uint8_t has_in[64] = {0};
+    for (int i2 = 0; i2 < custom_pick_count; i2++) {
+        int nm2 = custom_maps[i2].next_map;
+        if (nm2 >= 0 && nm2 < 64) has_in[nm2] = 1;
+    }
+
+    int fold_grp[3] = { 1, 1, 1 };  /* 0=COMMUNITY, 1=STORIES, 2=TEST; 1 = folded */
+    int rebuild_items = 1;          /* build on first frame + after toggles */
+    int refocus_grp = -1;           /* after rebuild, park cursor on this header */
+    int pending_open = -1;          /* group just unfolded: arm the unroll anim */
+    int anim_hdr = -1, anim_n = 0;  /* animating header index + its child count */
+    int gap_cur = 0, gap_vel = 0, gap_tgt = 0, anim_closing = 0;
+    int anim_grp_closing = 0;
+    int cur = 0;
+
+    /* Smooth pixel scroll, smartphone-style: the window eases toward keeping
+     * the cursor CENTERED, clamped at the list ends — so riding back up parks
+     * the -- START MAPS -- header at the top instead of hiding it, and every
+     * step glides instead of jumping a row. */
+    const int VIS = 7;            /* visible rows in the window */
+    const int ROW_H = 14, LIST_Y = 52, LIST_H = VIS * ROW_H;
+    int scroll_px = 0;
+    int nav_hold = 0;             /* frames UP/DOWN held, for key-repeat */
     uint32_t frame = 0;           /* time-in-lobby — entropy for procgen */
     const uint16_t LOBBY_COMMIT = SEGA_CTRL_START | SEGA_CTRL_A | SEGA_CTRL_B |
                                   SEGA_CTRL_C | SEGA_CTRL_X | SEGA_CTRL_Y | SEGA_CTRL_Z;
@@ -420,26 +637,127 @@ int m_main(void) {
             uint16_t pad = MARS_SYS_COMM8;
             uint16_t pressed = (uint16_t)(pad & ~prev_pad);
             prev_pad = pad;
-            /* UP/DOWN move the cursor between the rows. LEFT/RIGHT cycle the
-             * map on whichever PICKER row the cursor is on (core or community). */
-            if ((pressed & SEGA_CTRL_UP)   && menu_row > 0)        menu_row--;
-            if ((pressed & SEGA_CTRL_DOWN) && menu_row < ROW_CTRL) menu_row++;
-            if (menu_row == 0 && n_core > 0) {
-                if (pressed & SEGA_CTRL_LEFT)  core_idx = (core_idx + n_core - 1) % n_core;
-                if (pressed & SEGA_CTRL_RIGHT) core_idx = (core_idx + 1) % n_core;
-            } else if (menu_row == ROW_COMM && n_comm > 0) {
-                if (pressed & SEGA_CTRL_LEFT)  comm_off = (comm_off + n_comm - 1) % n_comm;
-                if (pressed & SEGA_CTRL_RIGHT) comm_off = (comm_off + 1) % n_comm;
+
+            if (rebuild_items) {
+                rebuild_items = 0;
+                n_items = 0;
+                items[n_items].kind = IT_SEP; items[n_items].map = 0;
+                items[n_items].label = "-- START MAPS --"; n_items++;
+                for (int i = 0; i < n_start && n_items < 34; i++) {
+                    items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)i;
+                    items[n_items].label = custom_maps[i].name; n_items++;
+                }
+                items[n_items].kind = IT_PROC; items[n_items].map = 0;
+                items[n_items].label = "PROCEDURAL"; n_items++;
+                int any_plain = 0, any_head = 0;
+                for (int i = 0; i < n_comm; i++) {
+                    int mi = n_core + i;
+                    if (has_in[mi]) continue;
+                    if (custom_maps[mi].next_map >= 0) any_head = 1; else any_plain = 1;
+                }
+                if (any_plain) {
+                    items[n_items].kind = IT_FOLD; items[n_items].map = 0;
+                    items[n_items].label = "-- COMMUNITY --"; n_items++;
+                    if (!fold_grp[0])
+                        for (int i = 0; i < n_comm && n_items < 37; i++) {
+                            int mi = n_core + i;
+                            if (has_in[mi] || custom_maps[mi].next_map >= 0) continue;
+                            items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)mi;
+                            items[n_items].label = custom_maps[mi].name; n_items++;
+                        }
+                }
+                if (any_head) {
+                    items[n_items].kind = IT_FOLD; items[n_items].map = 1;
+                    items[n_items].label = "-- STORIES --"; n_items++;
+                    if (!fold_grp[1])
+                        for (int i = 0; i < n_comm && n_items < 37; i++) {
+                            int mi = n_core + i;
+                            if (has_in[mi] || custom_maps[mi].next_map < 0) continue;
+                            items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)mi;
+                            items[n_items].label = custom_maps[mi].name; n_items++;
+                        }
+                }
+                if (n_core > n_start) {
+                    items[n_items].kind = IT_FOLD; items[n_items].map = 2;
+                    items[n_items].label = "-- TEST --"; n_items++;
+                    if (!fold_grp[2])
+                        for (int i = n_start; i < n_core && n_items < 38; i++) {
+                            items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)i;
+                            items[n_items].label = custom_maps[i].name; n_items++;
+                        }
+                }
+                items[n_items].kind = IT_SEP; items[n_items].map = 0;
+                items[n_items].label = ""; n_items++;   /* gap before CONTROLS */
+                items[n_items].kind = IT_CTRL; items[n_items].map = 0;
+                items[n_items].label = "CONTROLS"; n_items++;
+
+                if (refocus_grp >= 0) {
+                    for (int i = 0; i < n_items; i++)
+                        if (items[i].kind == IT_FOLD && items[i].map == refocus_grp) { cur = i; break; }
+                    refocus_grp = -1;
+                }
+                if (cur >= n_items) cur = n_items - 1;
+                while (cur < n_items - 1 && items[cur].kind == IT_SEP) cur++;
+
+                if (pending_open >= 0) {    /* arm the unroll spring */
+                    anim_hdr = -1;
+                    for (int i = 0; i < n_items; i++)
+                        if (items[i].kind == IT_FOLD && items[i].map == pending_open) { anim_hdr = i; break; }
+                    anim_n = 0;
+                    if (anim_hdr >= 0)
+                        while (anim_hdr + 1 + anim_n < n_items &&
+                               items[anim_hdr + 1 + anim_n].kind == IT_MAP) anim_n++;
+                    gap_cur = 0; gap_vel = 0; gap_tgt = anim_n * ROW_H;
+                    anim_closing = 0;
+                    if (anim_n == 0) anim_hdr = -1;
+                    pending_open = -1;
+                }
             }
-            if (pressed & LOBBY_COMMIT) {
-                /* SHOW CONTROLS opens its sub-screen and returns here; the map
-                 * pickers (core/community) and PROCEDURAL confirm and start. */
-                if (menu_row == ROW_CTRL) {
+
+            /* UP/DOWN move the cursor through the list, hopping separators.
+             * Holding a direction auto-repeats after ~a third of a second —
+             * most of what makes a long list feel like flick-scrolling. */
+            if (pad & (SEGA_CTRL_UP | SEGA_CTRL_DOWN)) nav_hold++; else nav_hold = 0;
+            int rep = (nav_hold > 6 && (nav_hold & 1) == 0);
+            if ((pressed & SEGA_CTRL_UP) || (rep && (pad & SEGA_CTRL_UP))) {
+                int c = cur;
+                do { c--; } while (c >= 0 && items[c].kind == IT_SEP);
+                if (c >= 0) cur = c;
+            }
+            if ((pressed & SEGA_CTRL_DOWN) || (rep && (pad & SEGA_CTRL_DOWN))) {
+                int c = cur;
+                do { c++; } while (c < n_items && items[c].kind == IT_SEP);
+                if (c < n_items) cur = c;
+            }
+            /* Folding-group headers: RIGHT unrolls, LEFT folds, confirm
+             * toggles. Collapse keeps the children in the list and springs
+             * the gap shut; the rebuild happens when the spring settles. */
+            if (items[cur].kind == IT_FOLD && anim_hdr < 0) {
+                int g = items[cur].map, open_now = -1;
+                if ((pressed & SEGA_CTRL_RIGHT) && fold_grp[g])  open_now = 1;
+                if ((pressed & SEGA_CTRL_LEFT)  && !fold_grp[g]) open_now = 0;
+                if ((pressed & LOBBY_COMMIT) && !(pad & SEGA_CTRL_MODE))
+                    open_now = fold_grp[g] ? 1 : 0;
+                if (open_now == 1) {
+                    fold_grp[g] = 0;
+                    rebuild_items = 1; refocus_grp = g; pending_open = g;
+                } else if (open_now == 0) {
+                    anim_hdr = cur; anim_n = 0;
+                    while (cur + 1 + anim_n < n_items &&
+                           items[cur + 1 + anim_n].kind == IT_MAP) anim_n++;
+                    gap_cur = anim_n * ROW_H; gap_vel = 0; gap_tgt = 0;
+                    anim_closing = 1; anim_grp_closing = g;
+                }
+            } else if ((pressed & LOBBY_COMMIT) && !(pad & SEGA_CTRL_MODE)) {
+                /* CONTROLS opens its sub-screen and returns here; a map row or
+                 * PROCEDURAL confirms and starts. MODE-held presses are debug
+                 * combos (MODE+X/Y), not commits. */
+                if (items[cur].kind == IT_CTRL) {
                     show_controls_screen();
                     prev_pad = 0xFFFF;       /* swallow the still-held button */
                     continue;
                 }
-                break;
+                if (items[cur].kind != IT_FOLD) break;
             }
             metrics_mode_check(pad);
             frame++;
@@ -447,34 +765,82 @@ int m_main(void) {
             SHARED_UC->frame_count++;
             raycast_render();                    /* stationary lobby view */
             uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            /* Smoked-glass panel first, then the text over it. Fixed bounds
+             * cover title, the VIS-row window (+ overflow arrows) and the
+             * hint line, so the box doesn't pump as the list scrolls. */
+            lobby_menu_panel(fb_text, 48, 24, 272, 52 + 7 * 14 + 30);
             /* Title. */
             font_draw_string(fb_text, (SCREEN_W - 13 * 8) / 2, 32,
                              "BACKROOMS 32X", 49);
 
-            /* Start menu: a core map PICKER, PROCEDURAL, an optional COMMUNITY
-             * map picker, and SHOW CONTROLS. The cursor row gets the blinking
-             * highlight bar; picker rows (LEFT/RIGHT) show the pick in brackets. */
-            const int MENU_X = 88;
-            int y = 52;
-            font_draw_string(fb_text, MENU_X, y, "START MAP:", 49);  y += 16;
-            lobby_picker_row(fb_text, MENU_X, y, menu_row == 0,
-                             n_core > 0 ? custom_maps[core_idx].name : "BACKROOMS");
-            y += 16;
-            lobby_action_row(fb_text, MENU_X, y, menu_row == ROW_PROC, "PROCEDURAL");
-            y += 16;
-            if (has_comm) {
-                y += 8;
-                font_draw_string(fb_text, MENU_X, y, "COMMUNITY:", 49);  y += 16;
-                lobby_picker_row(fb_text, MENU_X, y, menu_row == ROW_COMM,
-                                 custom_maps[custom_core_count + comm_off].name);
-                y += 16;
+            /* The unified list, smooth-scrolled: ease scroll_px a quarter of
+             * the remaining distance per frame toward centering the cursor
+             * (clamped at the ends), then draw every row at its pixel offset,
+             * culling rows outside the window. */
+            const int MENU_X = 96;
+            {
+                int max_scroll = n_items * ROW_H - LIST_H;
+                if (max_scroll < 0) max_scroll = 0;
+                int tgt = cur * ROW_H - (LIST_H / 2 - ROW_H / 2);
+                if (tgt < 0) tgt = 0;
+                if (tgt > max_scroll) tgt = max_scroll;
+                int d = tgt - scroll_px;
+                scroll_px += (d > 3 || d < -3) ? (d >> 2) : (d > 0) - (d < 0);
+
+                /* Unroll spring: stiffness 3/4, damping 3/8 per frame — one
+                 * quick overshoot then settle, ~1.5x faster than the first
+                 * cut at the user's ask. When a CLOSE settles, commit the
+                 * fold and rebuild without the children. */
+                int disp = 0, span = 0;
+                if (anim_hdr >= 0) {
+                    gap_vel += ((gap_tgt - gap_cur) * 3) >> 2;
+                    gap_vel -= (gap_vel >> 2) + (gap_vel >> 3);
+                    gap_cur += gap_vel;
+                    span = anim_n * ROW_H;
+                    int settled = (gap_tgt - gap_cur < 2 && gap_cur - gap_tgt < 2 &&
+                                   gap_vel < 2 && gap_vel > -2);
+                    if (settled) {
+                        gap_cur = gap_tgt;
+                        if (anim_closing) {
+                            fold_grp[anim_grp_closing] = 1;
+                            rebuild_items = 1; refocus_grp = anim_grp_closing;
+                        }
+                        anim_hdr = -1;
+                    }
+                    disp = span - gap_cur;
+                }
+                int hdr_ry = (anim_hdr >= 0)
+                           ? LIST_Y + anim_hdr * ROW_H - scroll_px : 0;
+                for (int i = 0; i < n_items; i++) {
+                    int ry = LIST_Y + i * ROW_H - scroll_px;
+                    if (anim_hdr >= 0 && i > anim_hdr) {
+                        ry -= disp;                       /* rows ride the gap */
+                        if (i <= anim_hdr + anim_n && ry <= hdr_ry + 4)
+                            continue;                     /* still under the header */
+                    }
+                    if (ry < LIST_Y - 3 || ry > LIST_Y + LIST_H - 8) continue;
+                    if (items[i].kind == IT_SEP)
+                        font_draw_string(fb_text, MENU_X + 2 * 8, ry, items[i].label, 49);
+                    else if (items[i].kind == IT_FOLD) {
+                        char fl[20]; int p = 0;
+                        fl[p++] = fold_grp[items[i].map] ? '>' : '|';
+                        fl[p++] = ' ';
+                        for (const char *q = items[i].label; *q && p < 19; q++) fl[p++] = *q;
+                        fl[p] = 0;
+                        if (cur == i && (SHARED_UC->frame_count % 6) < 3)
+                            lobby_hl_bar(fb_text, MENU_X, ry, p * 8);
+                        font_draw_string(fb_text, MENU_X, ry, fl, 49);
+                    } else
+                        lobby_action_row(fb_text, MENU_X, ry, cur == i, items[i].label);
+                }
+                /* Up-overflow arrow only — the down arrow kept reading as a
+                 * stray glyph, and the smooth scroll + peeking rows already
+                 * say "there's more below". */
+                if (scroll_px > 0)
+                    font_draw_string(fb_text, 248, LIST_Y + 2, "^", 49);
             }
-            y += 8;
-            lobby_action_row(fb_text, MENU_X, y, menu_row == ROW_CTRL, "SHOW CONTROLS");
-            y += 24;
-            font_draw_string(fb_text, (SCREEN_W - 19 * 8) / 2, y, "ANY BUTTON: CONFIRM", 49);
-            if (menu_row == 0 || menu_row == ROW_COMM)
-                font_draw_string(fb_text, (SCREEN_W - 15 * 8) / 2, y + 14, "L/R: CHANGE MAP", 49);
+            font_draw_string(fb_text, (SCREEN_W - 26 * 8) / 2, LIST_Y + LIST_H + 16,
+                             "U/D: PICK   ANY BUTTON: GO", 49);
 
             /* PAD-type readout (debug, top-left): 6/3/? button handshake. */
             uint16_t ptype = pad & SEGA_CTRL_TYPE;
@@ -491,7 +857,7 @@ int m_main(void) {
      * the player dials the generation mix (or leaves the balanced default)
      * before walking out. UP/DOWN pick a knob, LEFT/RIGHT adjust it, C resets
      * to defaults, START locks it in. Drawn over the live lobby view. */
-    if (menu_row == 1) {
+    if (items[cur].kind == IT_PROC) {
         static const char *const labels[6] = {
             "OPENNESS    ", "PARTITIONS  ", "CRAWLSPACES ",
             "OUTLETS     ", "SPOTTED     ", "SEE-OVER    " };
@@ -553,7 +919,10 @@ int m_main(void) {
             HwMdReadPad(0);
             uint16_t pad = MARS_SYS_COMM8;
             metrics_mode_check(pad);
-            player_update(pad);
+            /* MODE is a combo modifier: while held, UP/DOWN drive the automap
+         * zoom, so they must not also walk the player. */
+        player_update((pad & SEGA_CTRL_MODE)
+                      ? (pad & ~(SEGA_CTRL_UP | SEGA_CTRL_DOWN)) : pad);
             /* Exit when the player's cell sits against a black-void cell (==2),
              * any side. Robust to where on the void edge you arrive — the old
              * fixed x>7 / y<5 box missed the bottom row of the doorway. */
@@ -585,14 +954,16 @@ int m_main(void) {
         lastTick = MARS_SYS_COMM12;
     }
 
-    if (menu_row == ROW_PROC) {
-        procgen_run((uint32_t)frame * 1000003u + (uint32_t)player.x);
+    if (items[cur].kind == IT_PROC) {
+        g_custom_current = -1;
+        g_procgen_seed = (uint32_t)frame * 1000003u + (uint32_t)player.x;
+        procgen_run(g_procgen_seed);
         player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
-    } else if (menu_row == ROW_COMM) {
-        raycast_load_custom(custom_core_count + comm_off);  /* community pick; sets its own spawn */
-    } else if (n_core > 0) {
-        raycast_load_custom(core_idx);                      /* core pick; sets its own spawn */
+    } else if (custom_pick_count > 0) {
+        g_custom_current = items[cur].map;
+        raycast_load_custom(items[cur].map);   /* core or community; sets its own spawn */
     } else {
+        g_custom_current = -1;
         raycast_load_fixed();
     }
     raycast_init();                 /* rebuilds full-bright palette... */
@@ -624,15 +995,28 @@ int m_main(void) {
         }
         metrics_mode_check(pad);
         if (!menu_is_active()) {
-            player_update(pad);
-            /* Stepped into the open EXIT door -> portal into a fresh procgen map. */
-            if (raycast_door_portal_check()) { portal_to_procgen(); continue; }
+            /* MODE is a combo modifier: while held, UP/DOWN drive the automap
+         * zoom, so they must not also walk the player. */
+        player_update((pad & SEGA_CTRL_MODE)
+                      ? (pad & ~(SEGA_CTRL_UP | SEGA_CTRL_DOWN)) : pad);
+            /* Stepped into the open EXIT door. On a story map (next: set) the
+             * door is the CHAPTER TRANSITION — jump to the linked map. Anywhere
+             * else it falls through to the endless procgen backrooms (which is
+             * also how every story ultimately ends). */
+            if (raycast_door_portal_check()) {
+                int nx = (g_custom_current >= 0)
+                       ? custom_maps[g_custom_current].next_map : -1;
+                if (nx >= 0 && nx < custom_map_count) portal_to_custom(nx);
+                else                                  portal_to_procgen();
+                continue;
+            }
         }
         /* Tick the shared frame counter before render so both CPUs
          * read the same value when computing the distant-wall strobe. */
         SHARED_UC->frame_count++;
         raycast_render();
         uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        if (g_automap_on) automap_draw(fb_text);   /* red vectors under the text */
         menu_render(fb_text);
         if (g_metrics_on) {
             prof_sample_and_draw(fb_text);

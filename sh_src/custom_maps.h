@@ -36,11 +36,17 @@ typedef struct {
     uint8_t               lobby_ceiling;     /* 0 = auto fixture grid (normal)   */
     uint8_t               place_outlets;     /* >0: raycast_place_outlets(N) too */
     uint8_t               place_exit_door;   /* 1: BFS-place the exit door too   */
+    int8_t                next_map;          /* story chain: exit door leads to
+                                              * custom_maps[next_map]; -1 = none
+                                              * (door falls through to procgen).
+                                              * Codegen resolves the .map file's
+                                              * `next: NAME` to this index.     */
 } custom_map_t;
 
 extern const custom_map_t custom_maps[];
 extern const int          custom_map_count;   /* total, incl. lobby (load bounds) */
 extern const int          custom_pick_count;  /* selectable maps (pickable roles), ordered first */
+extern const int          custom_start_count; /* starter maps: [0, start); play/test: [start, core) */
 extern const int          custom_core_count;  /* core (starter/play) pickable; community span = [core, pick) */
 
 #endif /* CUSTOM_MAPS_H */

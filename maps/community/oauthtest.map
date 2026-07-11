@@ -2,7 +2,7 @@
 name: OAUTHTEST
 size: 32x32
 spawn: 24.5, 15.5 facing=W
-role: community
+role: test
 author: mike
 
 [grid]
