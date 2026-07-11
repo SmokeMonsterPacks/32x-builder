@@ -23,6 +23,9 @@ sh_src/version.h
 # Codegen'd from maps/*.map by tools/gen_maps.py every build
 sh_src/custom_maps.c
 
+# Codegen'd from registry.json "assets" by tools/gen_assets.py every build
+sh_src/sprite_defs.h
+
 # Debug capture artifacts (snapshotted to share with reviewers, not history)
 screenshots/
 
@@ -49,3 +52,4 @@ srcref/
 # Python bytecode (map editor)
 __pycache__/
 *.pyc
+.env

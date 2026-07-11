@@ -214,6 +214,14 @@ sh_src/custom_maps.c: $(wildcard maps/*.map maps/core/*.map maps/community/*.map
                       registry.json tools/gen_maps.py tools/mapfmt.py tools/lint_maps.py
 	@python3 tools/gen_maps.py
 
+# sh_src/sprite_defs.h — the data-driven sprite table, codegen'd from
+# registry.json "assets" + the referenced _tex.h (tools/gen_assets.py). raycast.c
+# includes it; generated + gitignored, so the explicit raycast.o dep below makes a
+# clean build emit it first (same pattern as md_start.bin).
+sh_src/sprite_defs.h: registry.json tools/gen_assets.py $(wildcard sh_src/*_tex.h)
+	@python3 tools/gen_assets.py
+sh_src/raycast.o: sh_src/sprite_defs.h
+
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
 lint:
 	@python3 tools/lint_maps.py
@@ -235,4 +243,5 @@ clean:
 	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
 	rm -f m68k_crt0.bin.o m68k_crt0.bin
 	rm -f sh_src/md_start.bin
+	rm -f sh_src/sprite_defs.h
 	rm -f sh_src/version.h sh_src/version.h.tmp

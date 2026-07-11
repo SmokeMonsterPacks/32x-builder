@@ -175,6 +175,12 @@ uint8_t world_map[MAP_H][MAP_W];
                              * (dark..light, +4 lit) so the frame darkens with distance
                              * like the walls while staying less tan than the door */
 
+/* The data-driven sprite table (codegen'd from registry.json "assets"). Indexed
+ * by decal/standup kind; carries each asset's texture(s), dims, palette base,
+ * world size and flags so renderers read DATA instead of per-kind #defines.
+ * Included here — after the *_BASE macros it references. */
+#include "sprite_defs.h"
+
 /* Wall texture comes from wall_tex.h (generated from images/walltile.jpg). */
 #define TEX_W WALL_TEX_WIDTH
 #define TEX_H WALL_TEX_HEIGHT
@@ -324,6 +330,7 @@ typedef struct {
     fx_t x, y;
     uint8_t facing_angle;
     uint8_t silhouette;
+    uint8_t kind;             /* sprite_defs[] index — the billboard's art/dims/base */
 } standup_t;
 
 static const standup_t standups[] = {
@@ -331,7 +338,7 @@ static const standup_t standups[] = {
      * flat wall (x=16 face) so it stands against the wall and leaves the east
      * side of the col-16 corridor walkable. Solid (collides), the "iconic
      * Backrooms cardboard cutout" moment. Audio via the Voyager hello loop. */
-    { FX(16.3), FX(23.5), 64,  0 },
+    { FX(16.3), FX(23.5), 64,  0, 2 },   /* kind 2 = neanderthal */
 };
 
 /* Wall-mounted decals (currently just the lobby outlet): small billboards
@@ -898,6 +905,10 @@ static inline uint8_t *fb_pixels(void) {
 static uint8_t wall_tex_hi_ram[WALL_TEX_HI_WIDTH][WALL_TEX_HI_HEIGHT];
 static uint8_t partition_tex_ram[PARTITION_TEX_WIDTH][PARTITION_TEX_HEIGHT];
 static uint8_t wall_tex_ram[WALL_TEX_WIDTH][WALL_TEX_HEIGHT];
+/* Door too (8KB): a nearby open/closed door covers 100+ columns and its
+ * per-pixel dlut[col_base[oty]] reads touch the whole texture every frame —
+ * cache-miss refills from cart ROM were the door-open frame drop. */
+static uint8_t door_tex_ram[DOOR_TEX_WIDTH][DOOR_TEX_HEIGHT];
 
 static void stage_textures_to_sdram(void) {
     static int done = 0;
@@ -910,6 +921,8 @@ static void stage_textures_to_sdram(void) {
     n = (int)sizeof(partition_tex); for (i = 0; i < n; i++) d[i] = s[i];
     s = (const uint8_t *)wall_tex;      d = (uint8_t *)wall_tex_ram;
     n = (int)sizeof(wall_tex);      for (i = 0; i < n; i++) d[i] = s[i];
+    s = (const uint8_t *)door_tex;      d = (uint8_t *)door_tex_ram;
+    n = (int)sizeof(door_tex);      for (i = 0; i < n; i++) d[i] = s[i];
 }
 
 void raycast_init(void) {
@@ -1606,12 +1619,13 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         fx_t fwdX = COS_FX(standups[i].facing_angle);
         fx_t fwdY = SIN_FX(standups[i].facing_angle);
         int is_front = (FX_MUL(sx, fwdX) + FX_MUL(sy, fwdY)) < 0;
-        uint8_t back_color = NEANDER_BASE + 0;
+        const sprite_def_t *sd = &sprite_defs[standups[i].kind];
+        uint8_t back_color = sd->base + 0;
         /* Watcher silhouette: every non-transparent texture pixel becomes
          * the darkest figure shade. No front/back distinction — just a
          * flat dark outline against the wallpaper. */
         int is_silhouette = standups[i].silhouette;
-        uint8_t silhouette_color = NEANDER_BASE + 1;
+        uint8_t silhouette_color = sd->base + 1;
 
         /* LOD: swap to the 128x256 hi-res texture when the sprite is
          * close enough that the 32x64 lo-res starts showing block
@@ -1628,16 +1642,16 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * column-major (sequential), tex_w for row-major (strided). */
         const uint8_t *tex;
         int tex_w, tex_h, col_step;
-        if (transformY < FX(3)) {
-            tex      = (const uint8_t *)neander_tex_hi;
-            tex_w    = NEANDER_TEX_HI_WIDTH;
-            tex_h    = NEANDER_TEX_HI_HEIGHT;
-            col_step = 1;                 /* column-major */
+        if (transformY < FX(3) && sd->tex_hi) {
+            tex      = sd->tex_hi;
+            tex_w    = sd->w_hi;
+            tex_h    = sd->h_hi;
+            col_step = 1;                 /* hi-res stored column-major */
         } else {
-            tex      = (const uint8_t *)neander_tex;
-            tex_w    = NEANDER_TEX_WIDTH;
-            tex_h    = NEANDER_TEX_HEIGHT;
-            col_step = NEANDER_TEX_WIDTH; /* row-major: next row is W bytes */
+            tex      = sd->tex;
+            tex_w    = sd->w;
+            tex_h    = sd->h;
+            col_step = sd->w;             /* lo-res row-major: next row is W bytes */
         }
 
         /* Precompute texY increment per screen row — same trick as wall
@@ -1663,6 +1677,10 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
 
             uint8_t *p = fb + drawStartY * SCREEN_W + stripe;
             fx_t tex_pos = texY_start_v;
+            /* front_base in a local: the framebuffer store is a char store,
+             * which may-alias anything — without the hoist the compiler can
+             * reload sd->base from the ROM table every pixel. */
+            uint8_t front_base = sd->base;
             /* texY can only overshoot the bottom of the texture (not go
              * negative — tex_pos starts >= 0 and step is positive). */
             for (int y = drawStartY; y <= drawEndY; y++) {
@@ -1671,7 +1689,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 uint8_t v = col_base[texY * col_step];
                 if (v != 0) {
                     *p = is_silhouette ? silhouette_color
-                       : is_front      ? (NEANDER_BASE + v)
+                       : is_front      ? (uint8_t)(front_base + v)
                                        : back_color;
                 }
                 p += SCREEN_W;
@@ -1770,6 +1788,7 @@ static void partition_build_faces(void) {
             PFACE_CRAWL(k)  = partition_crawl[i];
         }
     }
+
     PFACE_COUNT = n;
 }
 
@@ -2571,7 +2590,7 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
     int otx = (int)(((int64_t)along * DOOR_TEX_WIDTH) / (2 * DECAL_DOOR_HW));
     if (otx < 0) otx = 0; else if (otx >= DOOR_TEX_WIDTH) otx = DOOR_TEX_WIDTH - 1;
     if (flip) otx = DOOR_TEX_WIDTH - 1 - otx;
-    const uint8_t *col_base = door_tex[otx];   /* static (frame/sign) column */
+    const uint8_t *col_base = door_tex_ram[otx];   /* static (frame/sign) column — SDRAM-staged */
 
     /* DISTANCE/LIGHT FADE: like the walls + the outlet decal, the door darkens
      * with wall_shade — each material ramp shifts down by `door_shade`. The 9-step
@@ -2651,7 +2670,7 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
             int src_lx = LEAF_X0 + (otx - latch_now) * leaf_w / vis_w;
             if (src_lx < LEAF_X0) src_lx = LEAF_X0;
             else if (src_lx > LEAF_X1) src_lx = LEAF_X1;
-            leaf_base = door_tex[src_lx];
+            leaf_base = door_tex_ram[src_lx];
             int p_num = LEAF_X1 - otx;
             fx_t openf = ((fx_t)dopen << FX_SHIFT) / DOOR_OPEN_MAX;
             fx_t taper = FX_MUL(openf, FX(0.45));
@@ -3429,7 +3448,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 fx_t dH  = dk ? DECAL_DOOR_H  : DECAL_OUTLET_H;
                 int dtw  = dk ? DOOR_TEX_WIDTH  : OUTLET_TEX_WIDTH;
                 int dth  = dk ? DOOR_TEX_HEIGHT : OUTLET_TEX_HEIGHT;
-                const uint8_t *dtex = dk ? (const uint8_t *)door_tex
+                const uint8_t *dtex = dk ? (const uint8_t *)door_tex_ram
                                          : (const uint8_t *)outlet_tex;
 
                 fx_t along;
