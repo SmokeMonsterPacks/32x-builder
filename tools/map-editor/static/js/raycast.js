@@ -302,7 +302,8 @@ window.RC = (function () {
         distShade = shadeIdx(dist, ph.side === 1 ? 2 : 0, 0);
         const segLen = Math.hypot(ph.seg.x2 - ph.seg.x1, ph.seg.y2 - ph.seg.y1) || 1;
         tu = Math.floor(((ph.u * segLen * TILE) % 1) * tex.w);
-        if (ph.height === 'low') hfrac = 0.75;
+        const hv = (window.ME.reg.partition.height[ph.height] | 0);
+        if (hv > 0) hfrac = hv / 256;      /* registry-driven: low=0.75, half=0.375 */
       } else if (val === 2) {
         voidCol = true;                            // black-exit void
       } else {

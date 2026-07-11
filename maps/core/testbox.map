@@ -27,6 +27,7 @@ role: play
 
 [partitions]                     # x1,y1 -> x2,y2  style=  height=  crawl=
 6,9 -> 10,9  style=spotted height=low
+6,6 -> 10,6  style=chevron height=half
 
 [decals]                         # face=N|S|E|W picks the wall plane
 outlet 1.0,12.5 face=W z=0.20

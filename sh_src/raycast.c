@@ -171,6 +171,10 @@ uint8_t world_map[MAP_H][MAP_W];
                              * baked stipple dots, a soft almost-imperceptible dapple */
 #define HANDLE_BASE   113   /* 4 entries: warm gold/brass for the door handle hardware
                              * (dark, mid, light, highlight) so it reads as metal not tan */
+#define WOODTOP_BASE  124   /* 8 entries: countertop wood, jamb-brown fading into
+                             * the FOG color — the half-height top plane's own
+                             * distance ramp (the 4-step jamb ramp never reached
+                             * fog, so far countertops read as floating planks) */
 #define FRAME_BASE    117   /* 5 entries: the door jamb/casing — a muted-brown ramp
                              * (dark..light, +4 lit) so the frame darkens with distance
                              * like the walls while staying less tan than the door */
@@ -242,6 +246,11 @@ static fx_t pface_ub[MAX_PARTITION_FACES];
 static uint8_t pface_style[MAX_PARTITION_FACES];   /* 0=chevron, 1=spotted */
 static uint8_t pface_height[MAX_PARTITION_FACES];  /* 0=full, 1..255 = fraction*256 */
 static uint8_t pface_crawl[MAX_PARTITION_FACES];   /* 1 = crawl-under (gap at foot) */
+static fx_t pface_depth[MAX_PARTITION_FACES];      /* AABB extent along the face
+                                                    * normal: 0.3 for long faces,
+                                                    * the full length for END faces
+                                                    * — the countertop's crossing
+                                                    * depth (end-on long-top view) */
 static int  pface_count = 0;
 /* pface_* are now read CACHED (no 0x20000000 alias). They're written once per
  * frame by the primary in partition_build_faces, then read thousands of times
@@ -259,6 +268,7 @@ static int  pface_count = 0;
 #define PFACE_STYLE(i) (((volatile uint8_t *)pface_style)[i])
 #define PFACE_HEIGHT(i)(((volatile uint8_t *)pface_height)[i])
 #define PFACE_CRAWL(i) (((volatile uint8_t *)pface_crawl)[i])
+#define PFACE_DEPTH(i) (((volatile fx_t *)pface_depth)[i])
 #define PFACE_COUNT    (*(volatile int *)&pface_count)
 
 /* Purge a byte range from the SH-2 cache via the 0x40000000 alias (one store
@@ -280,6 +290,7 @@ void raycast_purge_partition_cache(void) {
     purge_cache_range(pface_style,  sizeof pface_style);
     purge_cache_range(pface_height, sizeof pface_height);
     purge_cache_range(pface_crawl,  sizeof pface_crawl);
+    purge_cache_range(pface_depth,  sizeof pface_depth);
     purge_cache_range(&pface_count, sizeof pface_count);
 }
 
@@ -758,6 +769,12 @@ void raycast_set_brightness(int lvl) {
         static const uint8_t fr[5][3] = { {9,8,7},{12,11,9},{15,13,11},{18,16,13},{21,18,15} };
         for (int i = 0; i < 5; i++)
             Hw32xSetBGColor(FRAME_BASE + i, fr[i][0]*lvl/FADE_STEPS, fr[i][1]*lvl/FADE_STEPS, fr[i][2]*lvl/FADE_STEPS);
+        /* Countertop wood -> fog, fade-scaled like everything else. */
+        for (int i = 0; i < 8; i++)
+            Hw32xSetBGColor(WOODTOP_BASE + i,
+                ((18 * (7 - i) + FOG_R * i) / 7) * lvl / FADE_STEPS,
+                ((16 * (7 - i) + FOG_G * i) / 7) * lvl / FADE_STEPS,
+                ((13 * (7 - i) + FOG_B * i) / 7) * lvl / FADE_STEPS);
     }
     for (int i = 0; i < SHADE_LEVELS; i++) {
         Hw32xSetBGColor(PARTITION_BASE + i,
@@ -771,6 +788,12 @@ static void build_palette(void) {
      * so no fog/shade math ever lands on them. */
     Hw32xSetBGColor(AMAP_RED,        22, 3, 3);
     Hw32xSetBGColor(AMAP_RED_BRIGHT, 31, 6, 6);
+    /* Countertop wood -> fog (see WOODTOP_BASE). */
+    for (int i = 0; i < 8; i++)
+        Hw32xSetBGColor(WOODTOP_BASE + i,
+                        (18 * (7 - i) + FOG_R * i) / 7,
+                        (16 * (7 - i) + FOG_G * i) / 7,
+                        (13 * (7 - i) + FOG_B * i) / 7);
     /* Walls: milky cream-yellow. Desaturated from the old gold (30,27,13,
      * R-B gap 17) by lifting B to 18 (gap 12, sat ~0.40) — reads as pale
      * old wallpaper under fluorescent light rather than school-bus gold,
@@ -1764,12 +1787,14 @@ static void partition_build_faces(void) {
             PFACE_AX(n) = xmin; PFACE_AY(n) = ymin;
             PFACE_BX(n) = xmin; PFACE_BY(n) = ymax;
             PFACE_UA(n) = ymin; PFACE_UB(n) = ymax;
+            PFACE_DEPTH(n) = xmax - xmin;
             n++;
         }
         if (show_east && n < MAX_PARTITION_FACES) {
             PFACE_AX(n) = xmax; PFACE_AY(n) = ymin;
             PFACE_BX(n) = xmax; PFACE_BY(n) = ymax;
             PFACE_UA(n) = ymin; PFACE_UB(n) = ymax;
+            PFACE_DEPTH(n) = xmax - xmin;
             n++;
         }
         if (show_north && n < MAX_PARTITION_FACES) {
@@ -1777,12 +1802,14 @@ static void partition_build_faces(void) {
             PFACE_AX(n) = xmin; PFACE_AY(n) = ymin;
             PFACE_BX(n) = xmax; PFACE_BY(n) = ymin;
             PFACE_UA(n) = xmin; PFACE_UB(n) = xmax;
+            PFACE_DEPTH(n) = ymax - ymin;
             n++;
         }
         if (show_south && n < MAX_PARTITION_FACES) {
             PFACE_AX(n) = xmin; PFACE_AY(n) = ymax;
             PFACE_BX(n) = xmax; PFACE_BY(n) = ymax;
             PFACE_UA(n) = xmin; PFACE_UB(n) = xmax;
+            PFACE_DEPTH(n) = ymax - ymin;
             n++;
         }
         /* Tag every face of this partition with its wallpaper style. */
@@ -2935,8 +2962,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * the main column draw, so a surface behind it (e.g. the lobby T-stem)
          * shows above it. A beam (fg_beam) floats between BEAM_LOW and BEAM_HIGH;
          * a partial divider is floor-anchored. */
-        int  fg_hit = 0, fg_style = 0, fg_height = 0, fg_side = 0, fg_beam = 0;
-        fx_t fg_t = 0, fg_wallhit = 0;
+        int  fg_n = 0;                     /* partials kept: 0..2, sorted near->far —
+                                            * two slots so a counter doesn't erase the
+                                            * divider visible over its top */
+        int  fg_style[2] = {0,0}, fg_height[2] = {0,0};
+        int  fg_side[2]  = {0,0}, fg_beam[2]  = {0,0};
+        fx_t fg_t[2] = {0,0}, fg_wallhit[2] = {0,0};
+        int  fg_fi[2] = {0,0};             /* face index — countertop end clip */
         int  n_faces = PFACE_COUNT;
         for (int fi = 0; fi < n_faces; fi++) {
             /* Screen-span cull: skip the divide entirely for faces this column
@@ -2962,7 +2994,19 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             if (!beam && fh == 0) {
                 if (t >= perpDist) continue;          /* full: behind the background */
             } else {
-                if (fg_hit && t >= fg_t) continue;    /* partial/beam: not the closest one */
+                if (fg_n == 2 && t >= fg_t[1]) continue;  /* not among the two nearest */
+            }
+            /* Clip against SOLID cells: a partition attached to (or, via
+             * procgen, overlapping) a wall must stop rendering where the wall
+             * begins. Without this, columns whose ray reaches the embedded
+             * part of the segment before the wall's face drew the band + the
+             * see-over view INTO the wall's silhouette (the "notch" bug). */
+            {
+                int hx_ = FX_INT(px + FX_MUL(t, rayDirX));
+                int hy_ = FX_INT(py + FX_MUL(t, rayDirY));
+                if ((unsigned)hx_ < (unsigned)MAP_W &&
+                    (unsigned)hy_ < (unsigned)MAP_H &&
+                    world_map[hy_][hx_] == 1) continue;
             }
             fx_t s_num = FX_MUL(rayDirX, cy) - FX_MUL(rayDirY, cx);
             fx_t s = fx_div_hw(s_num, denom);
@@ -2973,21 +3017,37 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 perpDist = t; partition_wallhit_w = wh; partition_hit = 1;
                 part_style = PFACE_STYLE(fi); side = sd;
             } else {
-                /* Partial divider or floating beam — both draw as a foreground
-                 * overlay band. A beam's band spans BEAM_HIGH-BEAM_LOW and floats
-                 * (fg_beam); a partial's is fg_height tall and floor-anchored. */
-                fg_hit = 1; fg_t = t; fg_wallhit = wh;
-                fg_style = PFACE_STYLE(fi); fg_side = sd;
-                fg_beam  = beam;
-                fg_height = beam ? (BEAM_HIGH - BEAM_LOW) : fh;
+                /* Partial divider or floating beam — overlay bands. Keep the
+                 * TWO nearest (insertion into sorted slots) so stacked
+                 * partials layer instead of the closest erasing the rest. */
+                int slot;
+                if (fg_n == 0 || t < fg_t[0]) {
+                    if (fg_n) {                      /* shift near -> far slot */
+                        fg_t[1] = fg_t[0]; fg_wallhit[1] = fg_wallhit[0];
+                        fg_style[1] = fg_style[0]; fg_side[1] = fg_side[0];
+                        fg_beam[1] = fg_beam[0]; fg_height[1] = fg_height[0];
+                        fg_fi[1] = fg_fi[0];
+                    }
+                    if (fg_n < 2) fg_n++;
+                    slot = 0;
+                } else {
+                    if (fg_n < 2) fg_n++;
+                    slot = 1;
+                }
+                fg_t[slot] = t; fg_wallhit[slot] = wh; fg_fi[slot] = fi;
+                fg_style[slot] = PFACE_STYLE(fi); fg_side[slot] = sd;
+                fg_beam[slot]  = beam;
+                fg_height[slot] = beam ? (BEAM_HIGH - BEAM_LOW) : fh;
             }
         }
-        /* Partial partition only shows if in front of the final background. */
-        if (fg_hit && fg_t >= perpDist) fg_hit = 0;
+        /* Partials only show in front of the final background (sorted, so
+         * truncate at the first one at/behind it). */
+        for (int fk = 0; fk < fg_n; fk++)
+            if (fg_t[fk] >= perpDist) { fg_n = fk; break; }
         int spotted = partition_hit && part_style;
 
         /* Nothing in range — leave the ceiling/floor earlier passes painted. */
-        if (!hit && !partition_hit && !fg_hit) continue;
+        if (!hit && !partition_hit && fg_n == 0) continue;
 
         /* See-over decision. The slow per-pixel overlay is only needed when the
          * background pokes ABOVE the partial (the lobby T-stem behind the low
@@ -2997,11 +3057,23 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * world height h/256 at distance d sits above the horizon ~(h-eye)/d, so
          * the full (h=256) background pokes above the partial (h=fg_height) iff
          * (256-eye)*fg_t > (fg_height-eye)*perpDist. */
-        if (fg_hit && !fg_beam) {
+        if (fg_n == 1 && !fg_beam[0] && fg_height[0] >= STAND_EYE) {
             /* A floating beam ALWAYS overlays — it never fills floor-to-ceiling,
              * so it can't be promoted to the fast main path (that would erase the
              * see-over above and the crawl gap below). Only floor-anchored
-             * partials reach this promote test.
+             * partials whose TOP sits at/above the STANDING eye line (the
+             * true see-over dividers, 192) reach this promote test: the
+             * promoted main path paints CEILING above the band, an
+             * approximation that only reads right when you can't see over
+             * the top by much. A HALF-height counter must NEVER promote at
+             * ANY eye height — it takes the overlay path, whose band math is
+             * exact whether the eye is above the top (standing: you look
+             * down over it at the real room) or below it (crouched: it
+             * occludes the lower band, background visible above). The gate
+             * was briefly eye-RELATIVE (>= eye_h), which flipped counters
+             * onto the promote path the moment the player crouched and
+             * filled the space above them with the unpainted-background
+             * garbage the crouch screenshots caught.
              *
              * See-over ONLY when the background is a FULL-height PARTITION (the
              * lobby T-stem) — not a solid wall. A partial divider with a wall
@@ -3009,13 +3081,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * simple look; revealing the wall over it is unwanted. So require
              * partition_hit (a full partition), and that it pokes above. */
             int bg_pokes = partition_hit &&
-                ((int64_t)(256 - eye_h) * fg_t
-                 > (int64_t)(fg_height - eye_h) * perpDist);
+                ((int64_t)(256 - eye_h) * fg_t[0]
+                 > (int64_t)(fg_height[0] - eye_h) * perpDist);
             if (!bg_pokes) {
-                perpDist = fg_t; partition_wallhit_w = fg_wallhit; partition_hit = 1;
-                part_style = fg_style; part_height = fg_height; side = fg_side;
+                perpDist = fg_t[0]; partition_wallhit_w = fg_wallhit[0]; partition_hit = 1;
+                part_style = fg_style[0]; part_height = fg_height[0]; side = fg_side[0];
                 spotted = part_style;     /* partition_hit is now 1 */
-                fg_hit = 0;               /* drawn by the fast main path; no overlay */
+                fg_n = 0;                 /* drawn by the fast main path; no overlay */
             }
         }
 
@@ -3541,21 +3613,28 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * baseboard so it reads identical — just shorter. Only reached for the
          * see-over case (lobby T-stem); free-standing dividers were promoted to
          * the fast main path above (fg_hit cleared). */
-        if (fg_hit) {
-            /* The band is the nearest solid surface in this column, so the
-             * sprite z-buffer must read its depth — otherwise the ceiling
+        if (fg_n) {
+            /* The nearest band is the closest solid surface in this column, so
+             * the sprite z-buffer must read its depth — otherwise the ceiling
              * lights (drawn later, z-tested per column) bleed through it. */
-            WALL_DIST(col) = fg_t;
-            if (hr) WALL_DIST(col + 1) = fg_t;
-            int flh  = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)fg_t);
-            int fdlh = (flh * fg_height) >> 8;          /* band height in px */
+            WALL_DIST(col) = fg_t[0];
+            if (hr) WALL_DIST(col + 1) = fg_t[0];
+        }
+        /* Draw the kept partials FAR to NEAR (painter's order): the divider
+         * behind a counter renders first, the counter over it. */
+        for (int fk = fg_n - 1; fk >= 0; fk--) {
+            fx_t ft  = fg_t[fk];
+            int  fbm = fg_beam[fk], fht = fg_height[fk];
+            int  fst = fg_style[fk], fsd = fg_side[fk];
+            int flh  = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)ft);
+            int fdlh = (flh * fht) >> 8;                /* band height in px */
             if (fdlh > 0) {
                 /* fbot = bottom edge of the band. A floor-anchored partial sits
                  * on the floor line; a floating beam's underside is lifted to
                  * BEAM_LOW so the crawl gap opens beneath it (carpet shows) and
                  * the band's top edge (BEAM_HIGH) leaves the room visible above. */
                 int fbot = horizon_y + ((flh * eye_h) >> 8);
-                if (fg_beam) fbot -= (flh * BEAM_LOW) >> 8;
+                if (fbm) fbot -= (flh * BEAM_LOW) >> 8;
                 int ftop = fbot - fdlh;
                 int fds  = ftop < 0 ? 0 : ftop;
                 int fde  = fbot >= SCREEN_H ? SCREEN_H - 1 : fbot;
@@ -3563,16 +3642,16 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                  * light cap — matching the wall pass exactly so the arm reads
                  * one step darker than the (E/W-facing) stem, not the same. */
                 int fsh;
-                if (fg_t < FX(2.5)) fsh = (int)((fg_t * 2) / FX(2.5));
-                else { fx_t past = fg_t - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
+                if (ft < FX(2.5)) fsh = (int)((ft * 2) / FX(2.5));
+                else { fx_t past = ft - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
                        fsh = 2 + (int)((past * 13) / span); }
                 if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
                 fsh += 1;
-                if (fg_side) fsh += SIDE_SHADE;
+                if (fsd) fsh += SIDE_SHADE;
                 if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
                 {
-                    int lx = FX_INT(px + FX_MUL(fg_t, rayDirX));
-                    int ly = FX_INT(py + FX_MUL(fg_t, rayDirY));
+                    int lx = FX_INT(px + FX_MUL(ft, rayDirX));
+                    int ly = FX_INT(py + FX_MUL(ft, rayDirY));
                     if ((unsigned)lx < (unsigned)MAP_W && (unsigned)ly < (unsigned)MAP_H) {
                         int lit = CELL_LIGHT(ly, lx);
                         if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap; }
@@ -3580,23 +3659,41 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 }
                 /* Texture + detail (spotted dots fade with distance). */
                 const uint8_t *ftex; int ftw, fth, ftlx, ftly, fdetail;
-                if (fg_style) {
+                if (fst) {
                     ftex = (const uint8_t *)partition_tex_ram;
                     ftw = PARTITION_TEX_WIDTH;  fth = PARTITION_TEX_HEIGHT;
                     ftlx = PARTITION_TILE_X;    ftly = PARTITION_TILE_Y;
-                    if (fg_t < FX(2))        fdetail = PARTITION_DETAIL;
-                    else if (fg_t < FX(3.5)) { fdetail = (int)(((FX(3.5) - fg_t) * PARTITION_DETAIL) / FX(1.5)); if (fdetail < 0) fdetail = 0; }
+                    if (ft < FX(2))        fdetail = PARTITION_DETAIL;
+                    else if (ft < FX(3.5)) { fdetail = (int)(((FX(3.5) - ft) * PARTITION_DETAIL) / FX(1.5)); if (fdetail < 0) fdetail = 0; }
                     else                     fdetail = 0;
-                } else if (fg_t < WALL_LOD_THRESHOLD) {
-                    ftex = (const uint8_t *)wall_tex_hi_ram;
-                    ftw = WALL_TEX_HI_WIDTH;    fth = WALL_TEX_HI_HEIGHT;
-                    ftlx = WALL_TILE_HI_X;      ftly = WALL_TILE_HI_Y; fdetail = 0;
                 } else {
-                    ftex = (const uint8_t *)wall_tex_ram;
-                    ftw = WALL_TEX_WIDTH;       fth = WALL_TEX_HEIGHT;
-                    ftlx = WALL_TILE_X;         ftly = WALL_TILE_Y;    fdetail = 0;
+                    /* Chevron: same texture pick AND the same detail ramp as
+                     * the main wall pass. This branch used to hardcode
+                     * fdetail = 0 — invisible while every tall chevron
+                     * divider PROMOTED to the main path, but half-height
+                     * counters always render here, and theirs was the
+                     * "bare wallpaper up close" bug: zero detail maps every
+                     * texel to one flat shade. */
+                    if (ft < WALL_LOD_THRESHOLD) {
+                        ftex = (const uint8_t *)wall_tex_hi_ram;
+                        ftw = WALL_TEX_HI_WIDTH; fth = WALL_TEX_HI_HEIGHT;
+                        ftlx = WALL_TILE_HI_X;   ftly = WALL_TILE_HI_Y;
+                    } else {
+                        ftex = (const uint8_t *)wall_tex_ram;
+                        ftw = WALL_TEX_WIDTH;    fth = WALL_TEX_HEIGHT;
+                        ftlx = WALL_TILE_X;      ftly = WALL_TILE_Y;
+                    }
+                    if (ft < FX(2)) {
+                        fdetail = WALL_PATTERN_MAX;
+                    } else if (ft < FX(3.5)) {
+                        fdetail = (int)(((FX(3.5) - ft) * WALL_PATTERN_MAX) / FX(1.5));
+                        if (fdetail < 0) fdetail = 0;
+                        if (fdetail > WALL_PATTERN_MAX) fdetail = WALL_PATTERN_MAX;
+                    } else {
+                        fdetail = 0;
+                    }
                 }
-                fx_t fwh = fg_wallhit - ((fx_t)FX_INT(fg_wallhit) << FX_SHIFT);
+                fx_t fwh = fg_wallhit[fk] - ((fx_t)FX_INT(fg_wallhit[fk]) << FX_SHIFT);
                 int ftexX = (int)(((uint32_t)fwh * (uint32_t)(ftw * ftlx)) >> FX_SHIFT) & (ftw - 1);
                 const uint8_t *fcol = ftex + ftexX * fth;
                 uint8_t flut[5];
@@ -3628,6 +3725,75 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 for (; y <= fde; y++) {
                     if (hr) *(uint16_t *)fp = WDUP(fmold); else *fp = fmold;
                     fp += SCREEN_W;
+                }
+
+                /* COUNTERTOP: a partial whose top sits below the eye shows its
+                 * horizontal top face. Project the top edge at the BACK of the
+                 * partition's thickness (0.3 cells along the ray) and fill the
+                 * strip between the back and front top edges with WOOD — the
+                 * muted-brown door-jamb ramp, distance-faded. Skipped at
+                 * grazing angles where the thickness projection degenerates. */
+                if (!fbm && fht < eye_h) {
+                    /* Ray depth to the top face's BACK edge: crossing the
+                     * 0.3-cell thickness (÷ the across-component), CLIPPED at
+                     * the counter's END (remaining segment length ÷ the
+                     * along-component). Without the end clip, a ray grazing
+                     * along the counter painted the top as if the counter
+                     * were endless — the giant wood wedge in the screenshots.
+                     * The two components can't both be small (|ray| ~ 1), so
+                     * the min is naturally bounded in every direction. */
+                    fx_t dirU  = fsd ? rayDirX : rayDirY;   /* along the counter */
+                    fx_t dirN  = fsd ? rayDirY : rayDirX;   /* across the thickness */
+                    fx_t adirN = FX_ABS(dirN), adirU = FX_ABS(dirU);
+                    int  fi2   = fg_fi[fk];
+                    fx_t whU   = fg_wallhit[fk];
+                    fx_t rem   = (dirU >= 0) ? (PFACE_UB(fi2) - whU)
+                                             : (whU - PFACE_UA(fi2));
+                    if (rem < 0) rem = 0;
+                    fx_t dtn = (adirN > 64) ? fx_div_hw(PFACE_DEPTH(fi2), adirN)
+                                            : (fx_t)FX(16);
+                    fx_t dte = (adirU > 64) ? fx_div_hw(rem, adirU)     : (fx_t)FX(16);
+                    fx_t dt  = dtn < dte ? dtn : dte;
+                    if (dt > 0) {
+                        int flh_b = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
+                                                  (uint32_t)(ft + dt));
+                        int ftop_b = horizon_y + ((flh_b * (eye_h - fht)) >> 8);
+                        int cs0 = ftop_b < 0 ? 0 : ftop_b;
+                        int ce0 = (ftop <= fde ? ftop : fde) - 1;
+                        if (ce0 >= SCREEN_H) ce0 = SCREEN_H - 1;
+                        /* Distance-gradient across the top: the strip spans
+                         * depths ft (front edge, bottom rows) .. ft+dt (back
+                         * edge, top rows). Run the wall fog ramp at both ends
+                         * and step the wood shade linearly row-by-row, so the
+                         * countertop fades into the fog like the surfaces
+                         * around it instead of reading as one flat slab. */
+                        int s0 = fsh;                     /* front-edge shade */
+                        int s1;                           /* back-edge shade  */
+                        {
+                            fx_t tb = ft + dt;
+                            if (tb < FX(2.5)) s1 = (int)((tb * 2) / FX(2.5));
+                            else { fx_t past = tb - FX(2.5);
+                                   fx_t span = FOG_RAMP_DIST - FX(2.5);
+                                   s1 = 2 + (int)((past * 13) / span); }
+                            s1 += 1;
+                            if (s1 > SHADE_LEVELS - 1) s1 = SHADE_LEVELS - 1;
+                            if (s1 < s0) s1 = s0;         /* back never brighter */
+                        }
+                        int rows  = ce0 - cs0;
+                        int sfx   = s1 << 8;              /* 8.8 shade walker  */
+                        int sstep = rows > 0 ? (((s0 - s1) << 8) / rows) : 0;
+                        uint8_t *cp = (uint8_t *)fb + col + cs0 * SCREEN_W;
+                        for (int cy2 = cs0; cy2 <= ce0; cy2++) {
+                            int w = sfx >> 9;              /* shade 0..15 -> wood 0..7 */
+                            /* (Speckle experiment reverted: at this resolution
+                             * the specks read as hollow noise, not texture —
+                             * the clean fog gradient sells the surface better.) */
+                            if (w < 0) w = 0; else if (w > 7) w = 7;
+                            uint8_t wood = (uint8_t)(WOODTOP_BASE + w);
+                            if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
+                            cp += SCREEN_W; sfx += sstep;
+                        }
+                    }
                 }
             }
         }

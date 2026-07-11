@@ -115,7 +115,7 @@ function draw() {
   for (const p of ME.model.partitions) {                   /* partitions */
     ctx.strokeStyle = p.style === 'spotted' ? '#9aa84a' : '#caa84a';
     ctx.lineWidth = 4;
-    ctx.setLineDash(p.height === 'low' ? [6, 4] : []);
+    ctx.setLineDash(p.height !== 'full' ? [6, 4] : []);
     ctx.beginPath(); ctx.moveTo(p.x1 * cs, p.y1 * cs); ctx.lineTo(p.x2 * cs, p.y2 * cs); ctx.stroke();
     ctx.setLineDash([]);
     dot(p.x1, p.y1, '#000'); dot(p.x2, p.y2, '#000');

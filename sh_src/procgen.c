@@ -268,11 +268,15 @@ static void scatter_partitions(int add) {
 }
 
 /* Assign per-partition decor from the weights: spotted-vs-chevron wallpaper and
- * full-vs-partial (see-over) height, rolled independently for each divider. */
+ * full-vs-partial height, rolled independently for each divider. A partial
+ * divider sub-rolls low (192, see-over cubicle) vs half (96, counter/desk) at
+ * 2:1 — counters read as furniture, so they stay the rarer of the two. Both
+ * heights ride the same SEE-OVER tuning knob. */
 static void assign_partition_decor(void) {
     for (int i = 0; i < num_partitions; i++) {
         partition_style[i]  = prob(g_procgen_params.spotted) ? 1 : 0;
-        partition_height[i] = prob(g_procgen_params.lowdivs) ? 192 : 0;
+        partition_height[i] = prob(g_procgen_params.lowdivs)
+                            ? ((xs32() % 3 == 0) ? 96 : 192) : 0;
     }
 }
 

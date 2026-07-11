@@ -615,6 +615,7 @@ int m_main(void) {
     int anim_hdr = -1, anim_n = 0;  /* animating header index + its child count */
     int gap_cur = 0, gap_vel = 0, gap_tgt = 0, anim_closing = 0;
     int anim_grp_closing = 0;
+    int anim_ticks = 0;           /* failsafe: snap the spring after ~20 frames */
     int cur = 0;
 
     /* Smooth pixel scroll, smartphone-style: the window eases toward keeping
@@ -708,7 +709,7 @@ int m_main(void) {
                         while (anim_hdr + 1 + anim_n < n_items &&
                                items[anim_hdr + 1 + anim_n].kind == IT_MAP) anim_n++;
                     gap_cur = 0; gap_vel = 0; gap_tgt = anim_n * ROW_H;
-                    anim_closing = 0;
+                    anim_closing = 0; anim_ticks = 0;
                     if (anim_n == 0) anim_hdr = -1;
                     pending_open = -1;
                 }
@@ -746,7 +747,7 @@ int m_main(void) {
                     while (cur + 1 + anim_n < n_items &&
                            items[cur + 1 + anim_n].kind == IT_MAP) anim_n++;
                     gap_cur = anim_n * ROW_H; gap_vel = 0; gap_tgt = 0;
-                    anim_closing = 1; anim_grp_closing = g;
+                    anim_closing = 1; anim_grp_closing = g; anim_ticks = 0;
                 }
             } else if ((pressed & LOBBY_COMMIT) && !(pad & SEGA_CTRL_MODE)) {
                 /* CONTROLS opens its sub-screen and returns here; a map row or
@@ -793,12 +794,19 @@ int m_main(void) {
                  * fold and rebuild without the children. */
                 int disp = 0, span = 0;
                 if (anim_hdr >= 0) {
-                    gap_vel += ((gap_tgt - gap_cur) * 3) >> 2;
-                    gap_vel -= (gap_vel >> 2) + (gap_vel >> 3);
+                    /* Symmetric integer spring: TRUE division truncates toward
+                     * zero for both signs — arithmetic >> floors negatives,
+                     * which let the CLOSING spring ring in a small limit cycle
+                     * that never hit the settle window and left the header
+                     * deaf to input (the expand-after-collapse lockup). The
+                     * tick failsafe guarantees settle even so. */
+                    gap_vel += (gap_tgt - gap_cur) * 3 / 4;
+                    gap_vel -= gap_vel * 3 / 8;
                     gap_cur += gap_vel;
                     span = anim_n * ROW_H;
-                    int settled = (gap_tgt - gap_cur < 2 && gap_cur - gap_tgt < 2 &&
-                                   gap_vel < 2 && gap_vel > -2);
+                    anim_ticks++;
+                    int settled = (gap_tgt - gap_cur < 3 && gap_cur - gap_tgt < 3 &&
+                                   gap_vel < 3 && gap_vel > -3) || anim_ticks > 20;
                     if (settled) {
                         gap_cur = gap_tgt;
                         if (anim_closing) {

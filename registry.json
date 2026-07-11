@@ -20,7 +20,7 @@
   "partition": {
     "_doc": "free-standing wallpaper divider: a line segment with decor enums",
     "style":  { "chevron": 0, "spotted": 1 },
-    "height": { "full": 0, "low": 192 },
+    "height": { "full": 0, "low": 192, "half": 96 },
     "crawl":  { "no": 0, "yes": 1 }
   },
 
