@@ -41,9 +41,15 @@ extern uint8_t world_map[MAP_H][MAP_W];
 
 /* Free-standing wallpaper partitions. Same data shape as in raycast.c.
  * procgen writes into partitions[] / sets num_partitions at boot. */
-#define NUM_PARTITIONS_MAX  32
+#define NUM_PARTITIONS_MAX  64
 typedef struct { fx_t x1, y1, x2, y2; } partition_t;
 extern partition_t partitions[NUM_PARTITIONS_MAX];
+/* First-class edge partitions (see raycast.c): per-cell-edge flag bytes. */
+extern uint8_t pedge_w[MAP_H][MAP_W + 1];
+extern uint8_t pedge_n[MAP_H + 1][MAP_W];
+extern int g_pedge_any;
+void pedge_clear(void);
+void raycast_stamp_partition_edges(void);
 extern int num_partitions;
 /* Per-partition wallpaper: 0 = chevron (like the walls), 1 = spotted olive. */
 extern uint8_t partition_style[NUM_PARTITIONS_MAX];
@@ -52,7 +58,6 @@ extern uint8_t partition_style[NUM_PARTITIONS_MAX];
 extern uint8_t partition_height[NUM_PARTITIONS_MAX];
 /* Per-partition crawl-under: 1 = open gap at the foot, solid above; collides
  * only when standing (crouch low to crawl under). */
-extern uint8_t partition_crawl[NUM_PARTITIONS_MAX];
 /* When set, the ceiling uses the lobby's hand-authored fluorescent runs. */
 extern int g_lobby_ceiling;
 /* When set, at least one low-ceiling crawlspace cell exists this map. */
@@ -97,7 +102,6 @@ void raycast_draw_carpet(int col_start, int col_end);
 void raycast_draw_walls(int col_start, int col_end);
 /* Secondary CPU: drop stale partition-face cache lines before the wall pass so
  * it re-reads the primary's fresh per-frame writes. Primary never calls this. */
-void raycast_purge_partition_cache(void);
 /* Secondary CPU: purge cell_light once per map-load (gen change) before walls. */
 void raycast_purge_cell_light(void);
 void raycast_clear_half(int col_start, int col_end);

@@ -28,7 +28,7 @@ author: mike
 12,8 -> 14,8  style=spotted height=half crawl=no
 3,8 -> 7,8  style=spotted height=low crawl=no
 13,11 -> 13,14  style=chevron height=full crawl=no
-4,2 -> 4,4  style=spotted height=full crawl=yes
+4,2 -> 4,4  style=spotted height=full crawl=no
 
 [decals]
 door   8.5,1 face=N

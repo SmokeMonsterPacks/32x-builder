@@ -111,6 +111,10 @@ def lint_model(m, base, folder, reg, seen_names, errs):
                    ("max_crawl_runs", "crawls")):
         if len(m[k]) > lim[cap]:
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
+    edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
+                     for p in m["partitions"])
+    if edge_total > 255:
+        e("partitions rasterize to %d cell-edges (max 255 per map)" % edge_total)
 
     sp = m["spawn"]; sx, sy = int(sp["x"]), int(sp["y"])
     if _cell(m, glyphs, sx, sy) != 0:
@@ -120,6 +124,18 @@ def lint_model(m, base, folder, reg, seen_names, errs):
         for cx, cy in ((p["x1"], p["y1"]), (p["x2"], p["y2"])):
             if not (0 <= cx <= m["w"] and 0 <= cy <= m["h"]):
                 e("partition endpoint (%g,%g) out of bounds" % (cx, cy))
+        if str(p.get("crawl", "no")).lower() == "yes":
+            e("crawl-under beams are RETIRED (no map ever shipped one; crawl "
+              "gameplay lives in the [crawl] duct system) — use height=low/half "
+              "or a duct instead")
+        # First-class (edge) partitions: integer, axis-aligned segments only.
+        if any(v != int(v) for v in (p["x1"], p["y1"], p["x2"], p["y2"])):
+            e("partition (%g,%g)->(%g,%g) has fractional endpoints — partitions "
+              "sit on cell edges (whole-number coordinates)"
+              % (p["x1"], p["y1"], p["x2"], p["y2"]))
+        elif p["x1"] != p["x2"] and p["y1"] != p["y2"]:
+            e("partition (%g,%g)->(%g,%g) is diagonal — partitions are axis-aligned"
+              % (p["x1"], p["y1"], p["x2"], p["y2"]))
 
     for d in m["decals"]:
         if d.get("kind") == "neanderthal":      # free-standing, not wall-mounted

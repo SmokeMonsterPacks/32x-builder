@@ -136,8 +136,8 @@ window.RC = (function () {
     let t = (wx * vx + wy * vy) / L; t = t < 0 ? 0 : t > 1 ? 1 : t;
     return Math.hypot(x - (x1 + t * vx), y - (y1 + t * vy));
   }
-  function partBlocked(x, y) {           // collide against the partition boxes
-    const r = PT_HALF + 0.14;
+  function partBlocked(x, y) {           // collide against the partition slabs
+    const r = PT_HALF + 0.25;            // slab half-thickness + player radius (ROM feel)
     for (const p of window.ME.model.partitions)
       if (distToSeg(x, y, p.x1, p.y1, p.x2, p.y2) < r) return true;
     return false;
@@ -165,25 +165,82 @@ window.RC = (function () {
     if (t <= 0 || u < 0 || u > 1) return null;
     return { dist: t, side: Math.abs(ex) > Math.abs(ey) ? 1 : 0, u: u };
   }
-  const PT_HALF = 0.08;   // partition half-thickness (cells) -> visible depth, not a 1px line
+  const PT_HALF = 0.05;   // slab half-thickness (cells) -> 0.1 total, matches the ROM (PART_HALF_THICK)
+  /* Flush shift (matches the engine): a run collinear with a wall face shifts
+   * so its face lands ON the line instead of centered — no seam jog at the
+   * joint. Returns the signed centerline offset along the perpendicular:
+   * -PT_HALF (slab sits on the + side, face on line), +PT_HALF (- side), or
+   * 0 (centered). Scans the run's cells plus one continuation cell past each
+   * end; a wall on exactly one side votes flush, both sides = tee = centered. */
+  function slabShift(p) {
+    const vertical = Math.round(p.x1) === Math.round(p.x2);
+    const line = vertical ? Math.round(p.x1) : Math.round(p.y1);
+    const a = Math.min(vertical ? p.y1 : p.x1, vertical ? p.y2 : p.x2);
+    const b = Math.max(vertical ? p.y1 : p.x1, vertical ? p.y2 : p.x2);
+    let neg = false, pos = false;   // wall on the - / + side of the line
+    for (let t = Math.floor(a) - 1; t <= Math.ceil(b); t++) {
+      const cLo = vertical ? cellVal(line - 1, t) : cellVal(t, line - 1);
+      const cHi = vertical ? cellVal(line, t)     : cellVal(t, line);
+      if (cLo && cHi) continue;     // tee / wall both sides
+      if (cLo) neg = true;
+      if (cHi) pos = true;
+    }
+    if (neg && !pos) return  PT_HALF;   // wall on - side -> slab on + side, face on line
+    if (pos && !neg) return -PT_HALF;
+    return 0;
+  }
   function partitionHit(rx, ry, maxd) {
     const parts = window.ME.model.partitions; let best = null;
     for (const p of parts) {
       const dx = p.x2 - p.x1, dy = p.y2 - p.y1, len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len * PT_HALF, ny = dx / len * PT_HALF;     // perpendicular offset
-      const ax = p.x1 + nx, ay = p.y1 + ny, bx = p.x2 + nx, by = p.y2 + ny;   // a thin box:
-      const cx2 = p.x2 - nx, cy2 = p.y2 - ny, ex = p.x1 - nx, ey = p.y1 - ny; // 2 faces + 2 caps
+      const ux = dx / len, uy = dy / len;              // along the run
+      const px0 = -uy, py0 = ux;                       // unit perpendicular
+      const sh = (p._shift !== undefined ? p._shift : (p._shift = slabShift(p)));
+      const cxL = p.x1 + px0 * sh, cyL = p.y1 + py0 * sh;   // shifted centerline
+      const cx1 = p.x2 + px0 * sh, cy1 = p.y2 + py0 * sh;
+      const nx = px0 * PT_HALF, ny = py0 * PT_HALF;    // slab half-thickness offset
+      const ax = cxL + nx, ay = cyL + ny, bx = cx1 + nx, by = cy1 + ny;   // thin box:
+      const cx2 = cx1 - nx, cy2 = cy1 - ny, ex = cxL - nx, ey = cyL - ny; // 2 faces + 2 caps
       const edges = [[ax, ay, bx, by], [bx, by, cx2, cy2], [cx2, cy2, ex, ey], [ex, ey, ax, ay]];
       for (const e of edges) {
         const h = raySeg(px, py, rx, ry, e[0], e[1], e[2], e[3]);
         if (h && h.dist < maxd && (!best || h.dist < best.dist)) {
           const hx = px + rx * h.dist, hy = py + ry * h.dist;
           const u = ((hx - p.x1) * dx + (hy - p.y1) * dy) / (len * len);   // along the divider
-          best = { dist: h.dist, side: h.side, style: p.style, height: p.height, u: u, seg: p, len: len };
+          best = { dist: h.dist, side: h.side, style: p.style, height: p.height,
+                   u: u, seg: p, len: len, shift: sh, ux: ux, uy: uy };
         }
       }
     }
     return best;
+  }
+  /* Countertop top: the flat horizontal wood plane capping a half/low
+   * partition, drawn the crawl-ceiling way — walk screen rows up from the
+   * band's top edge, map each to a distance on the height plane, and lay
+   * wood while the sampled point is inside the slab's footprint (thickness
+   * band x run extent). Mirrors the ROM's sampled-plane countertop. */
+  function drawCountertop(data, x, ph, hfrac, bandTopY, dirRx, dirRy) {
+    const B = A().bases, P = A().palette;
+    const woodBase = B.WOODTOP_BASE; if (woodBase === undefined) return;
+    const eh = eyeH; if (hfrac >= (1 - 1e-3) || hfrac <= eh) return;  // top must be below the eye
+    const seg = ph.seg, sh = ph.shift, ux = ph.ux, uy = ph.uy;
+    const px0 = -uy, py0 = ux;
+    const lineX = (seg.x1 + px0 * sh), lineY = (seg.y1 + py0 * sh);   // a point on the centerline
+    const ua = 0, ub = ph.len;                                        // run extent (param along u)
+    const sl1 = SL() - 1;
+    for (let y = bandTopY - 1; y > MID; y--) {
+      const d = (eh - hfrac) * H / (MID - y);          // row -> distance on the hfrac plane
+      if (d <= 0) break;
+      const wx = px + dirRx * d, wy = py + dirRy * d;
+      const un = (wx - lineX) * px0 + (wy - lineY) * py0;              // perpendicular offset
+      const uu = (wx - seg.x1) * ux + (wy - seg.y1) * uy;             // along the run
+      if (un < -PT_HALF || un > PT_HALF || uu < ua || uu > ub) break; // left the footprint
+      let s = shadeIdx(d, 0, lit(Math.floor(wx), Math.floor(wy)));
+      if (s > 7) s = 7;                                 // wood ramp is 8 entries
+      const c = P[woodBase + s] || [0, 0, 0];
+      const o = (y * W + x) * 4;
+      data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+    }
   }
   /* wallpaper texel (0..4 shade offset). Textures are x-major: data[x*h+y]. */
   const TILE = 2;   // texture repeats per cell (tunable feel)
@@ -206,6 +263,9 @@ window.RC = (function () {
 
   function render() {
     const data = img.data, B = A().bases;
+    /* Recompute flush shifts each frame so wall edits between preview opens
+     * are reflected (cheap — a handful of partitions). */
+    for (const p of window.ME.model.partitions) p._shift = slabShift(p);
     const dirX = Math.cos(pa), dirY = Math.sin(pa);
     const planeX = -dirY * 0.66, planeY = dirX * 0.66;
     const rdxL = dirX - planeX, rdyL = dirY - planeY;
@@ -333,6 +393,9 @@ window.RC = (function () {
         }
         data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
       }
+
+      /* Countertop: a half/low partition shows its flat wood top above the band. */
+      if (ph && hfrac < 1) drawCountertop(data, x, ph, hfrac, y0, rx, ry);
 
       /* Crawlspace mouth header (lintel): the solid band from the lowered slab
        * up to the full ceiling at the crawl boundary — makes the dropped ceiling

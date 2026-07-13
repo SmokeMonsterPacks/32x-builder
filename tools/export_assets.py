@@ -17,7 +17,8 @@ ROOT = os.path.dirname(HERE)
 # base-index constants the JS raycaster references by name
 WANT_BASES = ["WALL_BASE", "FLOOR_BASE", "CEIL_BASE", "LIGHT_BASE", "NEANDER_BASE",
               "OUTLET_BASE", "PARTITION_BASE", "DOOR_BASE", "DOOR_DARK_BASE",
-              "STIPPLE_BASE", "HANDLE_BASE", "FRAME_BASE", "LOWCEIL_COLOR",
+              "STIPPLE_BASE", "HANDLE_BASE", "FRAME_BASE", "WOODTOP_BASE",
+              "LOWCEIL_COLOR",
               "LOWCEIL_SEAM", "SHADE_LEVELS", "CEIL_GRID_DENSITY",
               "LIGHT_BOOST_MAX", "CRAWL_CEIL_H", "CEIL_H_FULL"]
 
@@ -72,6 +73,21 @@ def build_palette(src):
             pal[base + i] = [(br * (SL - i) + FOG[0] * i) // SL,
                              (bg * (SL - i) + FOG[1] * i) // SL,
                              (bb * (SL - i) + FOG[2] * i) // SL]
+
+    # Countertop wood ramp: Hw32xSetBGColor(WOODTOP_BASE + i, (R*(7-i)+FOG_R*i)/7, ...)
+    # 8 entries, a distinct /7 blend the generic MIX loop above doesn't match.
+    wm = re.search(
+        r'Hw32xSetBGColor\(\s*WOODTOP_BASE\s*\+\s*i,\s*'
+        r'\((\d+)\s*\*\s*\(7\s*-\s*i\)\s*\+\s*FOG_R\s*\*\s*i\)\s*/\s*7,\s*'
+        r'\((\d+)\s*\*\s*\(7\s*-\s*i\)\s*\+\s*FOG_G\s*\*\s*i\)\s*/\s*7,\s*'
+        r'\((\d+)\s*\*\s*\(7\s*-\s*i\)\s*\+\s*FOG_B\s*\*\s*i\)\s*/\s*7\)', body)
+    wbase = d.get("WOODTOP_BASE")
+    if wm and wbase is not None:
+        wr, wg, wb = int(wm.group(1)), int(wm.group(2)), int(wm.group(3))
+        for i in range(8):
+            pal[wbase + i] = [(wr * (7 - i) + FOG[0] * i) // 7,
+                              (wg * (7 - i) + FOG[1] * i) // 7,
+                              (wb * (7 - i) + FOG[2] * i) // 7]
 
     # 32X CRAM is 5-bit/channel -> scale to 8-bit
     return [[min(255, c * 255 // 31) for c in rgb] for rgb in pal]

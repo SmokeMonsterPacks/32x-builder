@@ -8,7 +8,7 @@ const ME = {
   layer: 'grid',
   brush: 1,                  // grid cell value to paint
   decalKind: 'outlet',
-  partStyle: 'chevron', partHeight: 'full', partCrawl: 'no',
+  partStyle: 'chevron', partHeight: 'full', partCrawl: 'no', partPreset: 'freehand', partHover: null,
   partPending: null, crawlPending: null,
   cell: 22,
   glyphForVal: {}, colorForVal: {},
@@ -128,6 +128,42 @@ function draw() {
   }
   drawSpawn(ME.model.spawn);
 
+  /* Partition authoring aids: flush-run hint, rubber-band + length, preset ghost. */
+  if (ME.layer === 'partition') {
+    ctx.save();
+    /* cyan tint any placed run the engine will flush-align to a wall */
+    for (const p of ME.model.partitions) {
+      if (p.x1 === p.x2 || p.y1 === p.y2) {
+        if (runIsFlush(p.x1, p.y1, p.x2, p.y2)) {
+          ctx.strokeStyle = '#33d6ff'; ctx.lineWidth = 2; ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(p.x1 * cs, p.y1 * cs); ctx.lineTo(p.x2 * cs, p.y2 * cs); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+    const hv = ME.partHover;
+    if (hv && (!ME.partPreset || ME.partPreset === 'freehand')) {
+      if (ME.partPending) {                       // rubber-band from pending point to cursor
+        const a = ME.partPending; let ex = hv.x, ey = hv.y;
+        if (a.x !== ex && a.y !== ey) { if (Math.abs(ex - a.x) >= Math.abs(ey - a.y)) ey = a.y; else ex = a.x; }
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(a.x * cs, a.y * cs); ctx.lineTo(ex * cs, ey * cs); ctx.stroke();
+        ctx.setLineDash([]);
+        const len = Math.abs(ex - a.x) + Math.abs(ey - a.y);
+        if (len > 0) {
+          ctx.fillStyle = '#fff'; ctx.font = '12px monospace';
+          ctx.fillText(len + ' cell' + (len > 1 ? 's' : ''), (ex * cs) + 6, (ey * cs) - 6);
+        }
+      }
+    } else if (hv && ME.partPreset && ME.partPreset !== 'freehand') {
+      const segs = PART_PRESETS[ME.partPreset] || [];   // ghost the preset at cursor
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 3; ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      for (const s of segs) { ctx.moveTo((hv.x + s[0]) * cs, (hv.y + s[1]) * cs); ctx.lineTo((hv.x + s[2]) * cs, (hv.y + s[3]) * cs); }
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
   if (ME.partPending) dot(ME.partPending.x, ME.partPending.y, '#fff');
   if (ME.crawlPending) {
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
@@ -189,12 +225,17 @@ function wireCanvas() {
     draw();
   };
   canvas.onmousemove = e => {
-    const { cx, cy } = evCell(e);
+    const { cx, cy, wx, wy } = evCell(e);
     $('#coords').textContent = cx + ',' + cy;
+    if (ME.layer === 'partition') {                 // live rubber-band / preset ghost
+      ME.partHover = { x: Math.round(wx), y: Math.round(wy) };
+      if (!painting) { draw(); return; }
+    }
     if (!painting) return;
     if (ME.layer === 'grid') { setGridVal(cx, cy, paintVal); draw(); }
     else if (ME.layer === 'lights') { setLight(cx, cy, lightAdd); draw(); }
   };
+  canvas.onmouseleave = () => { if (ME.partHover) { ME.partHover = null; draw(); } };
   window.addEventListener('mouseup', () => { painting = false; });
 }
 function placeDecal(wx, wy) {
@@ -212,11 +253,50 @@ function placeDecal(wx, wy) {
   }[face];
   ME.model.decals.push({ kind: ME.decalKind, x: pos[0], y: pos[1], face });
 }
+/* Premade partition objects: relative axis-aligned segment lists, anchored
+ * at the clicked cell corner and extending +x/+y. Dropped as real segments so
+ * they lint/render exactly like hand-drawn runs. */
+const PART_PRESETS = {
+  freehand: null,
+  counter:  [[0, 0, 4, 0]],
+  L:        [[0, 0, 3, 0], [0, 0, 0, 3]],
+  U:        [[0, 0, 0, 3], [0, 3, 4, 3], [4, 3, 4, 0]],
+  booth:    [[0, 0, 3, 0], [3, 0, 3, 3], [3, 3, 0, 3], [0, 3, 0, 0]],
+};
+function dropPreset(ax, ay) {
+  const segs = PART_PRESETS[ME.partPreset]; if (!segs) return;
+  for (const s of segs)
+    ME.model.partitions.push({
+      x1: ax + s[0], y1: ay + s[1], x2: ax + s[2], y2: ay + s[3],
+      style: ME.partStyle, height: ME.partHeight, crawl: ME.partCrawl
+    });
+}
+/* True if a run on this integer line has a wall on exactly one side (so the
+ * engine will flush-shift it — used for the editor's alignment hint). */
+function runIsFlush(x1, y1, x2, y2) {
+  const vertical = x1 === x2;
+  const line = vertical ? x1 : y1;
+  const a = Math.min(vertical ? y1 : x1, vertical ? y2 : x2);
+  const b = Math.max(vertical ? y1 : x1, vertical ? y2 : x2);
+  let neg = false, pos = false;
+  for (let t = a - 1; t <= b; t++) {
+    const cLo = vertical ? gridVal(line - 1, t) : gridVal(t, line - 1);
+    const cHi = vertical ? gridVal(line, t)     : gridVal(t, line);
+    if (cLo && cHi) continue;
+    if (cLo) neg = true;
+    if (cHi) pos = true;
+  }
+  return (neg && !pos) || (pos && !neg);
+}
 function clickPartition(wx, wy) {
   const px = Math.round(wx), py = Math.round(wy);
+  if (ME.partPreset && ME.partPreset !== 'freehand') { dropPreset(px, py); return; }
   if (!ME.partPending) { ME.partPending = { x: px, y: py }; return; }
   const a = ME.partPending;
   if (a.x !== px || a.y !== py) {
+    if (a.x !== px && a.y !== py) {          // enforce axis-aligned: snap to the longer axis
+      if (Math.abs(px - a.x) >= Math.abs(py - a.y)) py = a.y; else px = a.x;
+    }
     ME.model.partitions.push({
       x1: a.x, y1: a.y, x2: px, y2: py,
       style: ME.partStyle, height: ME.partHeight, crawl: ME.partCrawl
@@ -309,9 +389,15 @@ function buildPalette() {
     }
   } else if (ME.layer === 'partition') {
     t.textContent = 'Partition';
+    p.appendChild(choiceRow('Shape', Object.keys(PART_PRESETS),
+      () => ME.partPreset || 'freehand', v => { ME.partPreset = v; ME.partPending = null; draw(); }));
     p.appendChild(choiceRow('Style', Object.keys(ME.reg.partition.style), () => ME.partStyle, v => ME.partStyle = v));
     p.appendChild(choiceRow('Height', Object.keys(ME.reg.partition.height), () => ME.partHeight, v => ME.partHeight = v));
     p.appendChild(choiceRow('Crawl-under', Object.keys(ME.reg.partition.crawl), () => ME.partCrawl, v => ME.partCrawl = v));
+    const hint = document.createElement('p');
+    hint.style.color = 'var(--ink)'; hint.style.fontSize = '12px';
+    hint.textContent = 'Freehand: click endpoints (chains; right-click ends). Shapes: one click drops the piece. Endpoints snap to the grid; runs along a wall face auto-align flush (cyan hint).';
+    p.appendChild(hint);
   } else if (ME.layer === 'spawn') {
     t.textContent = 'Spawn facing';
     for (const f of ['N', 'E', 'S', 'W'])

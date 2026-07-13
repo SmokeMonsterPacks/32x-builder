@@ -223,53 +223,7 @@ uint8_t world_map[MAP_H][MAP_W];
 static fx_t wall_dist[SCREEN_W];
 #define WALL_DIST(i) (((volatile fx_t *)((uintptr_t)wall_dist | 0x20000000))[i])
 
-/* Per-frame list of visible partition face segments, populated by
- * partition_build_faces() once per frame on primary and consumed by
- * both CPUs in raycast_draw_walls via per-ray ray-segment intersection.
- * Each face is a 2D line segment in world space; ua/ub are the texture-U
- * world coordinates at the two endpoints. Cache-through aliased so the
- * secondary's reads are coherent with primary's per-frame writes.
- *
- * Per-ray (not per-segment-projection) means each column independently
- * tests against each visible face and takes the closest hit — exactly
- * like the cell-wall DDA. No linear inv_z interpolation between
- * endpoints, so no "wedge" artifact at glancing corners. Costs ~1.5ms
- * per frame at 320 cols × 4 faces × ~20 cycles + saturated divides. */
 /* NUM_PARTITIONS_MAX declared in raycast.h so procgen sees the same cap. */
-#define MAX_PARTITION_FACES (NUM_PARTITIONS_MAX * 4)
-static fx_t pface_ax[MAX_PARTITION_FACES];
-static fx_t pface_ay[MAX_PARTITION_FACES];
-static fx_t pface_bx[MAX_PARTITION_FACES];
-static fx_t pface_by[MAX_PARTITION_FACES];
-static fx_t pface_ua[MAX_PARTITION_FACES];
-static fx_t pface_ub[MAX_PARTITION_FACES];
-static uint8_t pface_style[MAX_PARTITION_FACES];   /* 0=chevron, 1=spotted */
-static uint8_t pface_height[MAX_PARTITION_FACES];  /* 0=full, 1..255 = fraction*256 */
-static uint8_t pface_crawl[MAX_PARTITION_FACES];   /* 1 = crawl-under (gap at foot) */
-static fx_t pface_depth[MAX_PARTITION_FACES];      /* AABB extent along the face
-                                                    * normal: 0.3 for long faces,
-                                                    * the full length for END faces
-                                                    * — the countertop's crossing
-                                                    * depth (end-on long-top view) */
-static int  pface_count = 0;
-/* pface_* are now read CACHED (no 0x20000000 alias). They're written once per
- * frame by the primary in partition_build_faces, then read thousands of times
- * in the per-ray partition loop on both CPUs — uncached reads (~12 cyc) were
- * pure waste. Write-through cache pushes the primary's writes to SDRAM; the
- * secondary purges these lines once per frame (raycast_purge_partition_cache)
- * before the wall pass so it re-reads fresh. The primary wrote them this frame,
- * so its cache is already current. */
-#define PFACE_AX(i)    (((volatile fx_t *)pface_ax)[i])
-#define PFACE_AY(i)    (((volatile fx_t *)pface_ay)[i])
-#define PFACE_BX(i)    (((volatile fx_t *)pface_bx)[i])
-#define PFACE_BY(i)    (((volatile fx_t *)pface_by)[i])
-#define PFACE_UA(i)    (((volatile fx_t *)pface_ua)[i])
-#define PFACE_UB(i)    (((volatile fx_t *)pface_ub)[i])
-#define PFACE_STYLE(i) (((volatile uint8_t *)pface_style)[i])
-#define PFACE_HEIGHT(i)(((volatile uint8_t *)pface_height)[i])
-#define PFACE_CRAWL(i) (((volatile uint8_t *)pface_crawl)[i])
-#define PFACE_DEPTH(i) (((volatile fx_t *)pface_depth)[i])
-#define PFACE_COUNT    (*(volatile int *)&pface_count)
 
 /* Purge a byte range from the SH-2 cache via the 0x40000000 alias (one store
  * invalidates a 16-byte line). */
@@ -279,44 +233,15 @@ static inline void purge_cache_range(const void *p, unsigned bytes) {
     for (; a < end; a += 16) *(volatile uint32_t *)(a | 0x40000000) = 0;
 }
 
-/* Secondary calls this before the wall pass to drop its stale pface_* lines. */
-void raycast_purge_partition_cache(void) {
-    purge_cache_range(pface_ax,     sizeof pface_ax);
-    purge_cache_range(pface_ay,     sizeof pface_ay);
-    purge_cache_range(pface_bx,     sizeof pface_bx);
-    purge_cache_range(pface_by,     sizeof pface_by);
-    purge_cache_range(pface_ua,     sizeof pface_ua);
-    purge_cache_range(pface_ub,     sizeof pface_ub);
-    purge_cache_range(pface_style,  sizeof pface_style);
-    purge_cache_range(pface_height, sizeof pface_height);
-    purge_cache_range(pface_crawl,  sizeof pface_crawl);
-    purge_cache_range(pface_depth,  sizeof pface_depth);
-    purge_cache_range(&pface_count, sizeof pface_count);
-}
-
-/* Saturated fixed-point divide: same as FX_DIV but clamps to ±INT32_MAX
- * instead of silently wrapping on overflow. Used in the per-ray ray-
- * segment intersection where denominators can be very small at glancing
- * angles (the same trap that originally pushed us to projection-based
- * partition rendering). */
-static inline fx_t fx_div_sat(fx_t a, fx_t b) {
-    if (b == 0) return 0;
-    int64_t result = ((int64_t)a << FX_SHIFT) / b;
-    if (result > (int64_t)0x7FFFFFFFLL)         return (fx_t)0x7FFFFFFF;
-    if (result < (int64_t)0xFFFFFFFF80000000LL) return (fx_t)0x80000000;
-    return (fx_t)result;
-}
 
 /* Hardware (a<<16)/b in 16.16 — signed 64÷32 on the SH-2 divide unit at
- * 0xFFFFFF00, ~39 cycles vs ~250 for the libgcc software int64 divide that
- * fx_div_sat compiles to. The 48-bit dividend (a<<16) is fed as DVDNTH:DVDNTL
- * with the high word sign-extended; the unit divides signed natively and the
- * read of DVDNTL stalls until the divide completes.
+ * 0xFFFFFF00, ~39 cycles vs ~250 for a libgcc software int64 divide. The
+ * 48-bit dividend (a<<16) is fed as DVDNTH:DVDNTL with the high word
+ * sign-extended; the unit divides signed natively and the read of DVDNTL
+ * stalls until the divide completes.
  *
- * No saturation: the sole caller (the per-ray partition intersection) gates
- * every divide behind |denom| >= 128, which bounds both quotients inside 32
- * bits — so overflow is impossible here and the libgcc saturation path isn't
- * needed. Used ONLY under that guarantee; for general division use fx_div_sat. */
+ * No saturation: every caller gates the divide behind |denom| >= 64, which
+ * bounds the quotient inside 32 bits — overflow is impossible here. */
 static inline fx_t fx_div_hw(fx_t a, fx_t b) {
     int32_t  hi = a >> 16;               /* sign-extended high word of (a<<16) */
     uint32_t lo = (uint32_t)a << 16;
@@ -391,12 +316,105 @@ static int g_door_open = 0, g_door_target = 0;
 decal_t decals[16];
 int     num_decals = 0;
 
-/* Free-standing wallpaper partitions ("fake walls"). Defined by two
- * world-space endpoints — rendered via per-ray segment intersection
- * (see partition_build_faces and the consumer in raycast_draw_walls),
- * full ceiling-to-floor height. Mutable so procgen can populate them
- * at boot; fixed-map mode keeps the hand-authored pair below.
+/* Free-standing wallpaper partitions ("fake walls") — AUTHORING buffers
+ * only. The lobby/fixed/procgen loaders describe partitions as world-space
+ * segments here, then raycast_stamp_partition_edges() rasterizes them into
+ * the pedge_w/pedge_n cell-edge flags that actually render and collide
+ * (custom maps skip this entirely — the codegen pre-rasterizes).
  * partition_t / NUM_PARTITIONS_MAX are declared in raycast.h. */
+/* ── First-class SLAB partitions ─────────────────────────────────────────
+ * A partition is a THIN SLAB (2*PART_HALF_THICK cells thick) centered on a
+ * CELL-EDGE line, built from one panel per cell — a row of individual
+ * square panels, closed at the run's ends with real cap faces, interior
+ * never rendered. Flags live on the edges: pedge_w[y][x] = a slab on the
+ * vertical line x (the WEST edge of cell x), pedge_n[y][x] = one on the
+ * horizontal line y. The DDA resolves them with no per-column math:
+ *   side faces — crossing a flagged line, the near face sits HALF_THICK
+ *     before it along the crossing axis: t_face = t_line - HALF*deltaDist
+ *     (deltaDist is the walk's own per-axis step — no divides);
+ *   end caps — entering a cell whose perpendicular edge is flagged within
+ *     HALF_THICK of the crossing point, the cap face IS that crossing.
+ * Flags use the cm_pedge_t encoding (custom_maps.h). Populated per map
+ * load; the secondary purges with the same gen-gated path as world_map. */
+#define PART_HALF_THICK FX(0.05)   /* slab = 0.1 cells thick — real office-partition proportions */
+/* Per-flag slab geometry. fo = offset of the slab's LOW face behind the
+ * line: centered = HALF, FLUSH_LO = 0 (band [line, line+2H]), FLUSH_HI =
+ * 2*HALF (band [line-2H, line]). Pullback to the near face for a crossing
+ * is fo (traveling +) or 2H-fo (traveling -); both are 0/1x/2x the
+ * per-column pb constant, so selection needs no multiplies. */
+#define SLAB_FO(f) (((f) & CM_PEDGE_FLUSH_LO) ? 0 : \
+                    ((f) & CM_PEDGE_FLUSH_HI) ? (PART_HALF_THICK * 2) : PART_HALF_THICK)
+#define SLAB_PULL(f, pb, step_pos) \
+    (((f) & CM_PEDGE_FLUSH_LO) ? ((step_pos) ? 0 : ((pb) << 1)) : \
+     ((f) & CM_PEDGE_FLUSH_HI) ? ((step_pos) ? ((pb) << 1) : 0) : (pb))
+uint8_t pedge_w[MAP_H][MAP_W + 1];
+uint8_t pedge_n[MAP_H + 1][MAP_W];
+int g_pedge_any = 0;
+
+/* Convert the authored partitions[] (integer, axis-aligned segments — the
+ * working representation every loader already produces) into first-class
+ * edges, then EMPTY the legacy arrays: after this call the map's dividers
+ * render and collide purely through the DDA edge model. */
+void raycast_stamp_partition_edges(void) {
+    for (int i = 0; i < num_partitions; i++) {
+        int x1 = FX_INT(partitions[i].x1), y1 = FX_INT(partitions[i].y1);
+        int x2 = FX_INT(partitions[i].x2), y2 = FX_INT(partitions[i].y2);
+        uint8_t hc = (partition_height[i] == 192) ? 1
+                   : (partition_height[i] == 96)  ? 2 : 0;
+        uint8_t ef = (uint8_t)(CM_PEDGE_PRESENT
+                   | (partition_style[i] ? CM_PEDGE_SPOTTED : 0)
+                   | (hc << 1));
+        if (x1 == x2) {                       /* vertical: WEST edges on line x */
+            int ya = y1 < y2 ? y1 : y2, yb = y1 > y2 ? y1 : y2;
+            /* Collinear-wall flush: if the run shares its line with a wall
+             * face, shift the slab so the faces align (no seam jog). */
+            int ww = 0, we = 0;
+            for (int y = ya - 1; y <= yb; y++) {   /* incl. one past each end */
+                int cw, ce;
+                if ((unsigned)y >= (unsigned)MAP_H) continue;
+                cw = (x1 > 0     && world_map[y][x1 - 1]);
+                ce = (x1 < MAP_W && world_map[y][x1]);
+                if (cw && ce) continue;            /* perpendicular tee */
+                if (cw) ww = 1;
+                if (ce) we = 1;
+            }
+            /* Slab on the side OPPOSITE the wall, face on the line. */
+            if (ww && !we)      ef |= CM_PEDGE_FLUSH_LO;   /* wall west -> slab east */
+            else if (we && !ww) ef |= CM_PEDGE_FLUSH_HI;   /* wall east -> slab west */
+            if (x1 >= 0 && x1 <= MAP_W)
+                for (int y = ya; y < yb; y++)
+                    if ((unsigned)y < (unsigned)MAP_H) pedge_w[y][x1] = ef;
+        } else if (y1 == y2) {                /* horizontal: NORTH edges on line y */
+            int xa = x1 < x2 ? x1 : x2, xb = x1 > x2 ? x1 : x2;
+            int wn = 0, ws = 0;
+            for (int x = xa - 1; x <= xb; x++) {   /* incl. one past each end */
+                int cn, cs;
+                if ((unsigned)x >= (unsigned)MAP_W) continue;
+                cn = (y1 > 0     && world_map[y1 - 1][x]);
+                cs = (y1 < MAP_H && world_map[y1][x]);
+                if (cn && cs) continue;
+                if (cn) wn = 1;
+                if (cs) ws = 1;
+            }
+            if (wn && !ws)      ef |= CM_PEDGE_FLUSH_LO;   /* wall north -> slab south */
+            else if (ws && !wn) ef |= CM_PEDGE_FLUSH_HI;   /* wall south -> slab north */
+            if (y1 >= 0 && y1 <= MAP_H)
+                for (int x = xa; x < xb; x++)
+                    if ((unsigned)x < (unsigned)MAP_W) pedge_n[y1][x] = ef | CM_PEDGE_AXIS_N;
+        }
+        g_pedge_any = 1;
+    }
+    num_partitions = 0;
+}
+
+void pedge_clear(void) {
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x <= MAP_W; x++) pedge_w[y][x] = 0;
+    for (int y = 0; y <= MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++) pedge_n[y][x] = 0;
+    g_pedge_any = 0;
+}
+
 partition_t partitions[NUM_PARTITIONS_MAX] = {
     /* SE lounge — 4-cell partition along Y=22. */
     { FX(22), FX(22), FX(26), FX(22) },
@@ -412,25 +430,9 @@ uint8_t partition_style[NUM_PARTITIONS_MAX] = {0};
  * the floor — the ceiling shows above it. Matches the HobbyTown reference's
  * low office partitions. */
 uint8_t partition_height[NUM_PARTITIONS_MAX] = {0};
-/* Per-partition crawl-under beam: 1 = render as a free-floating solid band
- * [BEAM_LOW, BEAM_HIGH] — open below (crawl under) and open above (see over),
- * drawn as a foreground overlay. Collides only when standing; crouch low and
- * you pass beneath it. (partition_height is ignored for these.) */
-uint8_t partition_crawl[NUM_PARTITIONS_MAX] = {0};
-/* Crawl-under gap height (fraction*256 of the wall) and the eye-height below
- * which the player fits under it. ~0.4 wall = a clear crawl opening; the eye
- * eases to CROUCH_EYE(=40) crouched, STAND_EYE(=128) standing. */
-/* Crawl-under "see-over" beam: a free-floating solid band [BEAM_LOW, BEAM_HIGH]
- * (fraction*256 of the wall height). Open BELOW it (crawl under, crouched) and
- * open ABOVE it (see over into the room) — drawn as an overlay band on top of
- * the background wall, exactly like the partial-height see-over divider but
- * floating instead of floor-anchored. A full-height wall could never show a
- * crawlspace ceiling (its underside is a 1px sliver); a floating beam reads as
- * a bar you duck under with the room visible above and below. Collides only
- * while standing; crouch (eye_h < CRAWL_PASS_EYE) and you pass beneath. */
-#define BEAM_LOW       102   /* underside of the beam (0.40 up the wall) */
-#define BEAM_HIGH      200   /* top of the beam (0.78); above it you see over */
-#define CRAWL_PASS_EYE 100   /* eye_h below this passes under the beam (crouched) */
+/* Eye-height below which the body fits through low openings (crawlspaces).
+ * The eye eases to CROUCH_EYE(=40) crouched, STAND_EYE(=128) standing. */
+#define CRAWL_PASS_EYE 100
 #define NUM_PARTITIONS num_partitions
 #define NUM_STANDUPS (int)(sizeof(standups) / sizeof(standups[0]))
 
@@ -631,6 +633,9 @@ void raycast_purge_cell_light(void) {
     if (g != seen_gen) {
         purge_cache_range(cell_light, sizeof cell_light);
         purge_cache_range(world_map,  sizeof world_map);
+        purge_cache_range(pedge_w,    sizeof pedge_w);   /* edge partitions   */
+        purge_cache_range(pedge_n,    sizeof pedge_n);   /* ride the map gen  */
+        purge_cache_range(&g_pedge_any, sizeof g_pedge_any);
         seen_gen = g;
     }
 }
@@ -1059,6 +1064,7 @@ static void place_partitions_fixed(int target) {
 
 /* The hand-tuned 32x32 Backrooms map + its two dividers. */
 void raycast_load_fixed(void) {
+    pedge_clear();                     /* fixed map: legacy partitions only */
     /* Authored 32x32 map at the top-left of the live grid; rest is solid wall
      * (its own boundary seals the playable area, so the fill is never seen). */
     for (int r = 0; r < MAP_H; r++)
@@ -1077,8 +1083,8 @@ void raycast_load_fixed(void) {
      * pixels, lightening the partition-heavy fixed map. */
     for (int i = 0; i < NUM_PARTITIONS_MAX; i++) {
         partition_height[i] = (i < num_partitions) ? 192 : 0;
-        partition_crawl[i]  = 0;   /* no crawl-unders in the fixed map yet */
     }
+    raycast_stamp_partition_edges();   /* fixed-map dividers go first-class */
     g_lobby_ceiling = 0;
     /* Low-ceiling crawlspace tunnel: mark the long west-edge corridor (column 1,
      * rows 22-26) as low-ceiling cells. Collision, forced-crouch, light culling
@@ -1121,16 +1127,24 @@ void raycast_load_custom(int idx) {
         for (int c = 0; c < MAP_W; c++)
             world_map[r][c] = (r < m->h && c < m->w) ? m->grid[r * m->w + c] : 1;
 
-    /* Free-standing partitions + decor. */
-    int np = m->n_parts; if (np > NUM_PARTITIONS_MAX) np = NUM_PARTITIONS_MAX;
-    for (int i = 0; i < np; i++) {
-        partitions[i] = (partition_t){ m->parts[i].x1, m->parts[i].y1,
-                                       m->parts[i].x2, m->parts[i].y2 };
-        partition_style[i]  = m->parts[i].style;
-        partition_height[i] = m->parts[i].height;
-        partition_crawl[i]  = m->parts[i].crawl;
+    /* Partitions are FIRST-CLASS: cell-edge flags the DDA hits natively
+     * (full-height edges terminate the ray like walls; partials fill the
+     * overlay band slots). The codegen pre-rasterized the authored segments
+     * into these edge lists. */
+    pedge_clear();
+    for (int i = 0; i < m->n_pedges; i++) {
+        uint8_t ef = m->pedges[i].flags;
+        int ex = m->pedges[i].x, ey = m->pedges[i].y;
+        if (ef & CM_PEDGE_AXIS_N) {
+            if (ex < MAP_W && ey <= MAP_H) { pedge_n[ey][ex] = ef; g_pedge_any = 1; }
+        } else {
+            if (ex <= MAP_W && ey < MAP_H) { pedge_w[ey][ex] = ef; g_pedge_any = 1; }
+        }
     }
-    num_partitions = np;
+    /* The authoring buffers stay empty here — custom maps arrive
+     * pre-rasterized; only the lobby/fixed/procgen loaders author
+     * partitions[] segments (converted by raycast_stamp_partition_edges). */
+    num_partitions = 0;
 
     /* Ceiling: full everywhere, then the low-ceiling crawl runs. */
     g_lobby_ceiling = m->lobby_ceiling;
@@ -1238,6 +1252,7 @@ int raycast_door_portal_check(void) {
  * side, across the top, and out the east exit doorway (col 10, rows 2-4) to
  * enter the chosen level. */
 void raycast_load_lobby(void) {
+    pedge_clear();                     /* lobby: legacy partitions only (inc 3) */
     /* Authored 32x32 lobby at the top-left of the live grid; rest solid wall. */
     for (int r = 0; r < MAP_H; r++)
         for (int c = 0; c < MAP_W; c++)
@@ -1261,7 +1276,6 @@ void raycast_load_lobby(void) {
     partition_height[0] = 0;   partition_height[1] = 192;   /* stem full, arm 3/4 */
     partition_height[2] = 0;   partition_height[3] = 0;
     /* Crawl-under beam shelved — no crawl elements placed for now. */
-    for (int i = 0; i < NUM_PARTITIONS_MAX; i++) partition_crawl[i] = 0;
     g_lobby_ceiling = 1;                  /* hand-authored fluorescent runs */
     ceil_h_clear();                       /* no crawlspaces in the lobby */
     /* Outlet on entrance-R's south face (the photo's right-hand partition),
@@ -1273,6 +1287,7 @@ void raycast_load_lobby(void) {
      * on the y=6 plane. z=0.20 receptacle height. */
     decals[0] = (decal_t){ FX(5.33), FX(6.0), FX(0.20), 1 };
     num_decals = 1;
+    raycast_stamp_partition_edges();    /* lobby dividers go first-class */
     player.x = FX(5.0); player.y = FX(7.6); player.angle = 184;
 }
 
@@ -1314,29 +1329,6 @@ static int cell_passable(int x, int y) {
  * the camera press up against a wall and break the immersion. */
 #define PLAYER_RADIUS FX(0.25)
 
-/* Returns 1 if (px, py) world position would intersect any partition's
- * thickened axis-aligned bounding box (rendered thickness + player
- * radius), 0 otherwise. */
-static int partition_collides(fx_t px, fx_t py) {
-    const fx_t PARTITION_HALF_THICK = FX(0.15);   /* matches HALF_THICK in partition_project_all */
-    fx_t margin = PARTITION_HALF_THICK + PLAYER_RADIUS;
-    int crouched = (int)SHARED_UC->eye_h < CRAWL_PASS_EYE;
-    for (int i = 0; i < NUM_PARTITIONS; i++) {
-        /* Crawl-under dividers are passable while crouched — the body fits
-         * through the open gap at the foot. Standing, they block like any wall. */
-        if (partition_crawl[i] && crouched) continue;
-        fx_t x1 = partitions[i].x1, x2 = partitions[i].x2;
-        fx_t y1 = partitions[i].y1, y2 = partitions[i].y2;
-        if (x1 > x2) { fx_t t = x1; x1 = x2; x2 = t; }
-        if (y1 > y2) { fx_t t = y1; y1 = y2; y2 = t; }
-        if (px >= x1 - margin && px <= x2 + margin &&
-            py >= y1 - margin && py <= y2 + margin) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 /* Returns 1 if (px, py) would intersect a SOLID standup (the cardboard
  * cutout), treated as a small axis-aligned box + player radius. Silhouette
  * "watcher" standups stay intangible — they're meant to be a glimpse, not a
@@ -1371,7 +1363,37 @@ static int position_clear(fx_t px, fx_t py) {
     if (!cell_passable(xR, yT)) return 0;
     if (!cell_passable(xL, yB)) return 0;
     if (!cell_passable(xR, yB)) return 0;
-    if (partition_collides(px, py)) return 0;
+    /* Slab partitions: block CROSSING a flagged line, and keep the body a
+     * margin off it (slab half-thickness + player radius — the same 0.4
+     * feel as the original box collision, so the camera never clips into
+     * the slab's own thickness). */
+    if (g_pedge_any) {
+        int fxc = FX_INT(player.x), fyc = FX_INT(player.y);
+        int txc = FX_INT(px), tyc = FX_INT(py);
+        if (txc != fxc) {
+            int line = txc > fxc ? txc : fxc;
+            if ((unsigned)fyc < (unsigned)MAP_H && line >= 0 && line <= MAP_W &&
+                (pedge_w[fyc][line] & CM_PEDGE_PRESENT)) return 0;
+        }
+        if (tyc != fyc) {
+            int line = tyc > fyc ? tyc : fyc;
+            if ((unsigned)fxc < (unsigned)MAP_W && line >= 0 && line <= MAP_H &&
+                (pedge_n[line][fxc] & CM_PEDGE_PRESENT)) return 0;
+        }
+        {
+            const fx_t EPAD = PART_HALF_THICK + PLAYER_RADIUS;
+            int cx = FX_INT(px), cy = FX_INT(py);
+            fx_t frx = px & 0xFFFF, fry = py & 0xFFFF;
+            if ((unsigned)cx < (unsigned)MAP_W && (unsigned)cy < (unsigned)MAP_H) {
+                if (frx < EPAD && (pedge_w[cy][cx] & CM_PEDGE_PRESENT)) return 0;
+                if (frx > FX_ONE - EPAD &&
+                    (pedge_w[cy][cx + 1] & CM_PEDGE_PRESENT)) return 0;
+                if (fry < EPAD && (pedge_n[cy][cx] & CM_PEDGE_PRESENT)) return 0;
+                if (fry > FX_ONE - EPAD &&
+                    (pedge_n[cy + 1][cx] & CM_PEDGE_PRESENT)) return 0;
+            }
+        }
+    }
     if (standup_collides(px, py))   return 0;
     /* Low-ceiling crawlspace: a low-ceiling cell hangs below standing head
      * height, so you can't enter it unless crouched (eye below CRAWL_PASS_EYE).
@@ -1743,85 +1765,6 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
  * u1_world/u2_world are the long-axis world coordinates at the segment
  * endpoints — passing the partition's X for horizontal segments (Y for
  * vertical) gives chevron-continuous tiling around the 4 sides. */
-/* Build the visible-faces list once per frame. Each partition is a
- * thin axis-aligned rectangle (~0.3 cells thick). From any vantage,
- * the player can see at most 2 of its 4 faces. We pick those and
- * write them as line segments into pface_* arrays for the per-ray
- * intersection in raycast_draw_walls to consume.
- *
- * This replaces the previous Doom-style segment-projection approach
- * (which linearly interpolated inv_z between projected endpoints and
- * produced a "wedge" artifact at glancing close-corner poses). The
- * per-ray approach mirrors how regular cell walls work — each column
- * independently finds its closest hit, no cross-column interpolation,
- * no wedge by construction.
- *
- * Runs ONCE on the primary before MARS_SYS_COMM4 wakes the secondary; both
- * CPUs then read the populated arrays during their draw_walls half. */
-static void partition_build_faces(void) {
-    const fx_t HALF_THICK = FX(0.15);    /* 0.3 cell ≈ 1' */
-    int n = 0;
-
-    for (int i = 0; i < NUM_PARTITIONS; i++) {
-        fx_t px1 = partitions[i].x1, py1 = partitions[i].y1;
-        fx_t px2 = partitions[i].x2, py2 = partitions[i].y2;
-        fx_t pdx = px2 - px1, pdy = py2 - py1;
-
-        /* Thick-rectangle AABB extents. */
-        fx_t xmin = px1 < px2 ? px1 : px2;
-        fx_t xmax = px1 > px2 ? px1 : px2;
-        fx_t ymin = py1 < py2 ? py1 : py2;
-        fx_t ymax = py1 > py2 ? py1 : py2;
-        if (pdx == 0) { xmin -= HALF_THICK; xmax += HALF_THICK; }
-        if (pdy == 0) { ymin -= HALF_THICK; ymax += HALF_THICK; }
-
-        int show_west  = player.x < xmin;
-        int show_east  = player.x > xmax;
-        int show_north = player.y < ymin;
-        int show_south = player.y > ymax;
-        if (!(show_west || show_east || show_north || show_south)) continue;
-        int face_start = n;
-
-        if (show_west && n < MAX_PARTITION_FACES) {
-            /* West face: x = xmin, y from ymin..ymax. U = world Y. */
-            PFACE_AX(n) = xmin; PFACE_AY(n) = ymin;
-            PFACE_BX(n) = xmin; PFACE_BY(n) = ymax;
-            PFACE_UA(n) = ymin; PFACE_UB(n) = ymax;
-            PFACE_DEPTH(n) = xmax - xmin;
-            n++;
-        }
-        if (show_east && n < MAX_PARTITION_FACES) {
-            PFACE_AX(n) = xmax; PFACE_AY(n) = ymin;
-            PFACE_BX(n) = xmax; PFACE_BY(n) = ymax;
-            PFACE_UA(n) = ymin; PFACE_UB(n) = ymax;
-            PFACE_DEPTH(n) = xmax - xmin;
-            n++;
-        }
-        if (show_north && n < MAX_PARTITION_FACES) {
-            /* North face: y = ymin, x from xmin..xmax. U = world X. */
-            PFACE_AX(n) = xmin; PFACE_AY(n) = ymin;
-            PFACE_BX(n) = xmax; PFACE_BY(n) = ymin;
-            PFACE_UA(n) = xmin; PFACE_UB(n) = xmax;
-            PFACE_DEPTH(n) = ymax - ymin;
-            n++;
-        }
-        if (show_south && n < MAX_PARTITION_FACES) {
-            PFACE_AX(n) = xmin; PFACE_AY(n) = ymax;
-            PFACE_BX(n) = xmax; PFACE_BY(n) = ymax;
-            PFACE_UA(n) = xmin; PFACE_UB(n) = xmax;
-            PFACE_DEPTH(n) = ymax - ymin;
-            n++;
-        }
-        /* Tag every face of this partition with its wallpaper style. */
-        for (int k = face_start; k < n; k++) {
-            PFACE_STYLE(k)  = partition_style[i];
-            PFACE_HEIGHT(k) = partition_height[i];
-            PFACE_CRAWL(k)  = partition_crawl[i];
-        }
-    }
-
-    PFACE_COUNT = n;
-}
 
 /* Project each ceiling light to screen space, paint a small bright bar
  * with z-test against wall_dist, apply per-light flicker. The math is the
@@ -2827,45 +2770,6 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * the floor (crawling) so the floor sits close and the ceiling looms. */
     int eye_h = (int)SHARED_UC->eye_h;
 
-    /* ── Partition screen-span cull ─────────────────────────────────────────
-     * Project each visible partition face's two endpoints to screen columns
-     * once, so the per-column intersection loop below can skip any face whose
-     * span doesn't cover the current column — turning partition cost from
-     * full-screen × faces into just-the-columns-they-occupy. This is what makes
-     * partitions closer to first-class vs grid walls. An endpoint at/behind the
-     * camera plane can't be projected, so that face falls back to the full
-     * column range (correctness over the optimization for that one face). */
-    int pcolmin[MAX_PARTITION_FACES], pcolmax[MAX_PARTITION_FACES];
-    {
-        fx_t pdet = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
-        fx_t pinv = (pdet != 0) ? fx_div_hw(FX_ONE, pdet) : 0;
-        int nf = PFACE_COUNT;
-        for (int fi = 0; fi < nf; fi++) {
-            fx_t sax = PFACE_AX(fi) - px, say = PFACE_AY(fi) - py;
-            fx_t sbx = PFACE_BX(fi) - px, sby = PFACE_BY(fi) - py;
-            fx_t tya = FX_MUL(pinv, FX_MUL(-planeY, sax) + FX_MUL(planeX, say));
-            fx_t tyb = FX_MUL(pinv, FX_MUL(-planeY, sbx) + FX_MUL(planeX, sby));
-            if (tya < FX(0.05) || tyb < FX(0.05)) {        /* an end is at/behind us */
-                pcolmin[fi] = col_start; pcolmax[fi] = col_end - 1;
-                continue;
-            }
-            fx_t txa = FX_MUL(pinv, FX_MUL(dirY, sax) - FX_MUL(dirX, say));
-            fx_t txb = FX_MUL(pinv, FX_MUL(dirY, sbx) - FX_MUL(dirX, sby));
-            /* tya/tyb >= 0.05 (guarded above) bounds the quotient, so the
-             * hardware divide is safe and replaces the last software FX_DIV in
-             * the wall pass. */
-            int xa = (SCREEN_W >> 1)
-                   + (int)(((int64_t)(SCREEN_W >> 1) * fx_div_hw(txa, tya)) >> FX_SHIFT);
-            int xb = (SCREEN_W >> 1)
-                   + (int)(((int64_t)(SCREEN_W >> 1) * fx_div_hw(txb, tyb)) >> FX_SHIFT);
-            int lo = (xa < xb ? xa : xb) - 1;            /* 1-col margin each side */
-            int hi = (xa > xb ? xa : xb) + 1;
-            if (lo < col_start) lo = col_start;
-            if (hi >= col_end)  hi = col_end - 1;
-            pcolmin[fi] = lo; pcolmax[fi] = hi;          /* lo>hi ⇒ off this half, skipped */
-        }
-    }
-
     /* Half-res: step 2 columns at a time, drawing col's result into the
      * (col,col+1) pair via word-stores. col_start/col_end are multiples of 4
      * (split is), so col+1 always stays inside this CPU's half. */
@@ -2911,9 +2815,28 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             sideDistY = FX_MUL(((fx_t)(mapY + 1) << FX_SHIFT) - py, deltaDistY);
         }
 
+        /* Slab constants for this column: the pullback from a centerline
+         * crossing to the face plane (per crossing axis) and the matching
+         * along-line drift of the ray over that pullback. */
+        fx_t slab_pbx = 0, slab_pby = 0, slab_offx = 0, slab_offy = 0;
+        if (g_pedge_any) {
+            slab_pbx  = FX_MUL(deltaDistX, PART_HALF_THICK);
+            slab_pby  = FX_MUL(deltaDistY, PART_HALF_THICK);
+            slab_offx = FX_MUL(rayDirY, slab_pbx);
+            slab_offy = FX_MUL(rayDirX, slab_pby);
+        }
         int side = 0;
         int hit = 0;
         int hit_cell = 0;          /* world_map value at the hit (2 = black exit) */
+        uint8_t edge_f = 0;        /* slab partition hit (0 = none) */
+        fx_t edge_capt = -1;       /* cap hit: exact depth (mitered or lattice) */
+        int n_efg = 0;             /* partial slab crossings (overlay bands) */
+        uint8_t efg_f[2], efg_sd[2], efg_ax[2], efg_x[2], efg_y[2];
+        fx_t efg_t[2];
+        int efg_id_last = -1;      /* (axis<<8)|line of the last recorded run —
+                                    * a ray traveling inside a slab's thickness
+                                    * re-meets the same run at every step; only
+                                    * the first contact records */
         for (int i = 0; i < 64 && !hit; i++) {
             if (sideDistX < sideDistY) {
                 sideDistX += deltaDistX;
@@ -2925,6 +2848,245 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 side = 1;
             }
             if (mapX < 0 || mapX >= MAP_W || mapY < 0 || mapY >= MAP_H) break;
+            /* First-class edge partitions: the DDA just crossed one boundary
+             * line — test its flag byte. Stepping +X into mapX crosses the
+             * line x = mapX (cell's west edge); -X crosses x = mapX+1. Same
+             * for Y against the north-edge plane. A full-height divider
+             * terminates the ray EXACTLY like a wall — perpDist, side, fog,
+             * everything downstream reuses the wall math. Cost: one cached
+             * byte read per step, only on maps that have edges at all. */
+            if (g_pedge_any) {
+                /* SIDE FACE: the DDA just crossed a flagged centerline — the
+                 * slab's near face sits PART_HALF_THICK before it along the
+                 * crossing axis (t_face = t_line - HALF*deltaDist, applied
+                 * after the loop for the terminating hit / at record time
+                 * for partials). */
+                int elx = (side == 0) ? (stepX > 0 ? mapX : mapX + 1) : mapX;
+                int ely = (side == 0) ? mapY : (stepY > 0 ? mapY : mapY + 1);
+                uint8_t ef = (side == 0) ? pedge_w[ely][elx] : pedge_n[ely][elx];
+                if (!(ef & CM_PEDGE_PRESENT)) {
+                    /* EXACT near-end recovery: a ray can pierce a slab's face
+                     * inside the run's last panel yet cross the centerline in
+                     * the unflagged cell beyond it. Compute where the ray
+                     * pierces the candidate's FACE PLANE (crossing U minus
+                     * the drift over that candidate's pullback) and index the
+                     * edge array there; the plane must lie in front of the
+                     * ray. Pullback/drift are per-flag selects (flush-shifted
+                     * slabs have asymmetric faces). Verified against analytic
+                     * ray-vs-box ground truth. */
+                    if (side == 0) {
+                        fx_t tc = sideDistX - deltaDistX;
+                        uint8_t ep = (ely > 0)         ? pedge_w[ely - 1][elx] : 0;
+                        uint8_t eq = (ely + 1 < MAP_H) ? pedge_w[ely + 1][elx] : 0;
+                        for (int c2 = 0; c2 < 2 && !(ef & CM_PEDGE_PRESENT); c2++) {
+                            uint8_t cd = c2 ? eq : ep;
+                            int    dl = c2 ? 1 : -1;
+                            if (cd & CM_PEDGE_PRESENT) {
+                                fx_t pl = SLAB_PULL(cd, slab_pbx, stepX > 0);
+                                if (tc > pl) {
+                                    fx_t dr = (pl == 0) ? 0
+                                            : (pl == slab_pbx) ? slab_offx
+                                                               : (slab_offx << 1);
+                                    fx_t uf = (py + FX_MUL(tc, rayDirY)) - dr;
+                                    int  cu = FX_INT(uf);
+                                    if (cu == ely + dl) { ef = cd; ely += dl; }
+                                    else if (cu == ely && !c2) {
+                                        /* junction miter strip (centered runs) */
+                                        fx_t fu = uf - ((fx_t)cu << FX_SHIFT);
+                                        uint8_t j0 = (elx < MAP_W ? pedge_n[ely][elx] : 0);
+                                        uint8_t j1 = (elx > 0 ? pedge_n[ely][elx - 1] : 0);
+                                        if (fu < PART_HALF_THICK &&
+                                            ((j0 | j1) & CM_PEDGE_PRESENT)) { ef = cd; ely += dl; }
+                                    } else if (cu == ely && c2) {
+                                        fx_t fu = uf - ((fx_t)cu << FX_SHIFT);
+                                        uint8_t j2 = (elx < MAP_W ? pedge_n[ely + 1][elx] : 0);
+                                        uint8_t j3 = (elx > 0 ? pedge_n[ely + 1][elx - 1] : 0);
+                                        if (fu > FX_ONE - PART_HALF_THICK &&
+                                            ((j2 | j3) & CM_PEDGE_PRESENT)) { ef = cd; ely += dl; }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        fx_t tc = sideDistY - deltaDistY;
+                        uint8_t ep = (elx > 0)         ? pedge_n[ely][elx - 1] : 0;
+                        uint8_t eq = (elx + 1 < MAP_W) ? pedge_n[ely][elx + 1] : 0;
+                        for (int c2 = 0; c2 < 2 && !(ef & CM_PEDGE_PRESENT); c2++) {
+                            uint8_t cd = c2 ? eq : ep;
+                            int    dl = c2 ? 1 : -1;
+                            if (cd & CM_PEDGE_PRESENT) {
+                                fx_t pl = SLAB_PULL(cd, slab_pby, stepY > 0);
+                                if (tc > pl) {
+                                    fx_t dr = (pl == 0) ? 0
+                                            : (pl == slab_pby) ? slab_offy
+                                                               : (slab_offy << 1);
+                                    fx_t uf = (px + FX_MUL(tc, rayDirX)) - dr;
+                                    int  cu = FX_INT(uf);
+                                    if (cu == elx + dl) { ef = cd; elx += dl; }
+                                    else if (cu == elx && !c2) {
+                                        fx_t fu = uf - ((fx_t)cu << FX_SHIFT);
+                                        uint8_t j0 = pedge_w[ely][elx];
+                                        uint8_t j1 = (ely > 0 ? pedge_w[ely - 1][elx] : 0);
+                                        if (fu < PART_HALF_THICK &&
+                                            ((j0 | j1) & CM_PEDGE_PRESENT)) { ef = cd; elx += dl; }
+                                    } else if (cu == elx && c2) {
+                                        fx_t fu = uf - ((fx_t)cu << FX_SHIFT);
+                                        uint8_t j2 = pedge_w[ely][elx + 1];
+                                        uint8_t j3 = (ely > 0 ? pedge_w[ely - 1][elx + 1] : 0);
+                                        if (fu > FX_ONE - PART_HALF_THICK &&
+                                            ((j2 | j3) & CM_PEDGE_PRESENT)) { ef = cd; elx += dl; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (ef & CM_PEDGE_PRESENT) {
+                    int rid = (side << 8) | (side == 0 ? elx : ely);
+                    if (CM_PEDGE_HCLASS(ef) == 0) {
+                        edge_f = ef; hit = 1; hit_cell = 1; break;
+                    }
+                    if (rid != efg_id_last && n_efg < 2) {
+                        efg_f[n_efg]  = ef;
+                        efg_sd[n_efg] = (uint8_t)side;
+                        efg_ax[n_efg] = (uint8_t)side;   /* run axis == crossing side here */
+                        efg_x[n_efg]  = (uint8_t)elx;
+                        efg_y[n_efg]  = (uint8_t)ely;
+                        efg_t[n_efg]  = ((side == 0) ? (sideDistX - deltaDistX)
+                                                     : (sideDistY - deltaDistY))
+                                        - (side == 0
+                                           ? SLAB_PULL(ef, slab_pbx, stepX > 0)
+                                           : SLAB_PULL(ef, slab_pby, stepY > 0));
+                        efg_id_last = rid;
+                        n_efg++;
+                    }
+                }
+                /* END CAP: entering a cell that carries a PERPENDICULAR
+                 * flagged line within HALF_THICK of the crossing point —
+                 * the ray meets the slab's capped end, and the cap face IS
+                 * this crossing plane (exact t, correct side shading). Flag
+                 * bytes gate the multiply, so open floor costs 2 cached
+                 * reads. */
+                if (side == 1) {
+                    /* Caps: ENTERED-side only — a ray leaving a run has no
+                     * face on this plane (leaving-fires were the phantom
+                     * pillars). At a junction with a perpendicular slab the
+                     * cap is MITERED: pulled back HALF_THICK to sit flush
+                     * with the adjoining face plane, and the width window is
+                     * evaluated AT that plane (the ray drifts along the cap
+                     * over the pullback). Isolated ends cap on the lattice. */
+                    int xrow = mapY - stepY;
+                    int yp   = (stepY > 0) ? mapY : mapY + 1;
+                    uint8_t aw = pedge_w[mapY][mapX];
+                    uint8_t ae = pedge_w[mapY][mapX + 1];
+                    uint8_t bw = ((unsigned)xrow < (unsigned)MAP_H) ? pedge_w[xrow][mapX] : 0;
+                    uint8_t be = ((unsigned)xrow < (unsigned)MAP_H) ? pedge_w[xrow][mapX + 1] : 0;
+                    uint8_t cw = ((aw & CM_PEDGE_PRESENT) && !(bw & CM_PEDGE_PRESENT)) ? aw : 0;
+                    uint8_t ce = ((ae & CM_PEDGE_PRESENT) && !(be & CM_PEDGE_PRESENT)) ? ae : 0;
+                    if (cw | ce) {
+                        fx_t tc = sideDistY - deltaDistY;
+                        fx_t fr = (px + FX_MUL(tc, rayDirX))
+                                - ((fx_t)mapX << FX_SHIFT);
+                        uint8_t cf = 0; int cl = mapX; fx_t ct = tc;
+                        if (cw) {
+                            fx_t fo  = SLAB_FO(cw);
+                            int cen  = !(cw & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI));
+                            int mit  = cen && ((pedge_n[yp][mapX] |
+                                        (mapX > 0 ? pedge_n[yp][mapX - 1] : 0))
+                                       & CM_PEDGE_PRESENT);
+                            fx_t frf = fr - (mit ? slab_offy : 0);
+                            if (frf > -fo && frf < PART_HALF_THICK * 2 - fo) {
+                                cf = cw;
+                                if (mit && tc > slab_pby) ct = tc - slab_pby;
+                            }
+                        }
+                        if (!cf && ce) {
+                            fx_t fo  = SLAB_FO(ce);
+                            int cen  = !(ce & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI));
+                            int mit  = cen && (((mapX + 1 < MAP_W ? pedge_n[yp][mapX + 1] : 0) |
+                                        pedge_n[yp][mapX])
+                                       & CM_PEDGE_PRESENT);
+                            fx_t frf = fr - (mit ? slab_offy : 0) - FX_ONE;
+                            if (frf > -fo && frf < PART_HALF_THICK * 2 - fo) {
+                                cf = ce; cl = mapX + 1;
+                                if (mit && tc > slab_pby) ct = tc - slab_pby;
+                            }
+                        }
+                        if (cf) {
+                            int rid = (0 << 8) | cl;
+                            if (CM_PEDGE_HCLASS(cf) == 0) {
+                                edge_f = cf; edge_capt = ct; hit = 1; hit_cell = 1; break;
+                            }
+                            if (rid != efg_id_last && n_efg < 2) {
+                                efg_f[n_efg]  = cf;
+                                efg_sd[n_efg] = 1;   /* shade/texture: Y-facing cap */
+                                efg_ax[n_efg] = 0;   /* run itself is vertical */
+                                efg_x[n_efg]  = (uint8_t)cl;
+                                efg_y[n_efg]  = (uint8_t)mapY;
+                                efg_t[n_efg]  = ct;
+                                efg_id_last = rid;
+                                n_efg++;
+                            }
+                        }
+                    }
+                } else {
+                    /* Twin of the side==1 block for horizontal runs. */
+                    int xcol = mapX - stepX;
+                    int xp   = (stepX > 0) ? mapX : mapX + 1;
+                    uint8_t an  = pedge_n[mapY][mapX];
+                    uint8_t as2 = pedge_n[mapY + 1][mapX];
+                    uint8_t bn  = ((unsigned)xcol < (unsigned)MAP_W) ? pedge_n[mapY][xcol] : 0;
+                    uint8_t bs  = ((unsigned)xcol < (unsigned)MAP_W) ? pedge_n[mapY + 1][xcol] : 0;
+                    uint8_t cn = ((an & CM_PEDGE_PRESENT) && !(bn & CM_PEDGE_PRESENT)) ? an : 0;
+                    uint8_t cs = ((as2 & CM_PEDGE_PRESENT) && !(bs & CM_PEDGE_PRESENT)) ? as2 : 0;
+                    if (cn | cs) {
+                        fx_t tc = sideDistX - deltaDistX;
+                        fx_t fr = (py + FX_MUL(tc, rayDirY))
+                                - ((fx_t)mapY << FX_SHIFT);
+                        uint8_t cf = 0; int cl = mapY; fx_t ct = tc;
+                        if (cn) {
+                            fx_t fo  = SLAB_FO(cn);
+                            int cen  = !(cn & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI));
+                            int mit  = cen && ((pedge_w[mapY][xp] |
+                                        (mapY > 0 ? pedge_w[mapY - 1][xp] : 0))
+                                       & CM_PEDGE_PRESENT);
+                            fx_t frf = fr - (mit ? slab_offx : 0);
+                            if (frf > -fo && frf < PART_HALF_THICK * 2 - fo) {
+                                cf = cn;
+                                if (mit && tc > slab_pbx) ct = tc - slab_pbx;
+                            }
+                        }
+                        if (!cf && cs) {
+                            fx_t fo  = SLAB_FO(cs);
+                            int cen  = !(cs & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI));
+                            int mit  = cen && (((mapY + 1 < MAP_H ? pedge_w[mapY + 1][xp] : 0) |
+                                        pedge_w[mapY][xp])
+                                       & CM_PEDGE_PRESENT);
+                            fx_t frf = fr - (mit ? slab_offx : 0) - FX_ONE;
+                            if (frf > -fo && frf < PART_HALF_THICK * 2 - fo) {
+                                cf = cs; cl = mapY + 1;
+                                if (mit && tc > slab_pbx) ct = tc - slab_pbx;
+                            }
+                        }
+                        if (cf) {
+                            int rid = (1 << 8) | cl;
+                            if (CM_PEDGE_HCLASS(cf) == 0) {
+                                edge_f = cf; edge_capt = ct; hit = 1; hit_cell = 1; break;
+                            }
+                            if (rid != efg_id_last && n_efg < 2) {
+                                efg_f[n_efg]  = cf;
+                                efg_sd[n_efg] = 0;   /* shade/texture: X-facing cap */
+                                efg_ax[n_efg] = 1;   /* run itself is horizontal */
+                                efg_x[n_efg]  = (uint8_t)mapX;
+                                efg_y[n_efg]  = (uint8_t)cl;
+                                efg_t[n_efg]  = ct;
+                                efg_id_last = rid;
+                                n_efg++;
+                            }
+                        }
+                    }
+                }
+            }
             if (world_map[mapY][mapX]) { hit = 1; hit_cell = world_map[mapY][mapX]; break; }
             if (sideDistX > MAX_VIEW_DIST && sideDistY > MAX_VIEW_DIST) break;
         }
@@ -2938,10 +3100,22 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         if (hit) {
             perpDist = (side == 0) ? (sideDistX - deltaDistX)
                                    : (sideDistY - deltaDistY);
+            /* Side faces pull back to the face plane; caps carry the exact
+             * depth computed at the test (mitered = flush with the adjoining
+             * face plane, isolated = on the lattice). */
+            if (edge_f & CM_PEDGE_PRESENT)
+                perpDist = (edge_capt >= 0)
+                    ? edge_capt
+                    : perpDist - ((side == 0)
+                                  ? SLAB_PULL(edge_f, slab_pbx, stepX > 0)
+                                  : SLAB_PULL(edge_f, slab_pby, stepY > 0));
             if (perpDist < FX(0.1)) perpDist = FX(0.1);
         } else {
             perpDist = 0x7FFFFFFF;
         }
+        /* Slab hit: dress the wall hit as a partition (style + texture U) —
+         * the draw path takes it from here with zero partition-specific math. */
+        int edge_part = (edge_f & CM_PEDGE_PRESENT) != 0;
 
         /* Per-ray partition intersection. Test this column's ray against
          * each visible partition face (line segment in world space) using
@@ -2957,87 +3131,56 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         int  part_style          = 0;
         int  part_height         = 0;   /* background is always full height (0) */
         fx_t partition_wallhit_w = 0;
-        /* Foreground = nearest PARTIAL-height partition OR crawl-under beam.
+        if (edge_part) {                /* first-class edge divider IS the background */
+            partition_hit = 1;
+            part_style = edge_f & CM_PEDGE_SPOTTED;
+            partition_wallhit_w = (side == 0)
+                ? (py + FX_MUL(perpDist, rayDirY))
+                : (px + FX_MUL(perpDist, rayDirX));
+        }
+        /* Foreground = the nearest PARTIAL-height partitions (floor-anchored).
          * Drawn as a band OVER the background (solid wall / full partition) after
          * the main column draw, so a surface behind it (e.g. the lobby T-stem)
-         * shows above it. A beam (fg_beam) floats between BEAM_LOW and BEAM_HIGH;
-         * a partial divider is floor-anchored. */
+         * shows above it. */
         int  fg_n = 0;                     /* partials kept: 0..2, sorted near->far —
                                             * two slots so a counter doesn't erase the
                                             * divider visible over its top */
         int  fg_style[2] = {0,0}, fg_height[2] = {0,0};
-        int  fg_side[2]  = {0,0}, fg_beam[2]  = {0,0};
+        int  fg_side[2]  = {0,0}, fg_ax[2] = {0,0};
         fx_t fg_t[2] = {0,0}, fg_wallhit[2] = {0,0};
-        int  fg_fi[2] = {0,0};             /* face index — countertop end clip */
-        int  n_faces = PFACE_COUNT;
-        for (int fi = 0; fi < n_faces; fi++) {
-            /* Screen-span cull: skip the divide entirely for faces this column
-             * can't possibly cross (precomputed above). */
-            if (col < pcolmin[fi] || col > pcolmax[fi]) continue;
-            fx_t ax = PFACE_AX(fi);
-            fx_t ay = PFACE_AY(fi);
-            fx_t bx = PFACE_BX(fi);
-            fx_t by = PFACE_BY(fi);
-            fx_t dxs = bx - ax;
-            fx_t dys = by - ay;
-            fx_t cx  = ax - px;
-            fx_t cy  = ay - py;
-
-            fx_t denom = FX_MUL(rayDirY, dxs) - FX_MUL(rayDirX, dys);
-            if (denom < 128 && denom > -128) continue;   /* edge-on sliver */
-
-            fx_t t_num = FX_MUL(cy, dxs) - FX_MUL(cx, dys);
-            fx_t t = fx_div_hw(t_num, denom);
-            if (t <= FX(0.1)) continue;
-            int fh   = PFACE_HEIGHT(fi);
-            int beam = PFACE_CRAWL(fi);   /* floating see-over beam, not floor-anchored */
-            if (!beam && fh == 0) {
-                if (t >= perpDist) continue;          /* full: behind the background */
-            } else {
-                if (fg_n == 2 && t >= fg_t[1]) continue;  /* not among the two nearest */
-            }
-            /* Clip against SOLID cells: a partition attached to (or, via
-             * procgen, overlapping) a wall must stop rendering where the wall
-             * begins. Without this, columns whose ray reaches the embedded
-             * part of the segment before the wall's face drew the band + the
-             * see-over view INTO the wall's silhouette (the "notch" bug). */
-            {
-                int hx_ = FX_INT(px + FX_MUL(t, rayDirX));
-                int hy_ = FX_INT(py + FX_MUL(t, rayDirY));
-                if ((unsigned)hx_ < (unsigned)MAP_W &&
-                    (unsigned)hy_ < (unsigned)MAP_H &&
-                    world_map[hy_][hx_] == 1) continue;
-            }
-            fx_t s_num = FX_MUL(rayDirX, cy) - FX_MUL(rayDirY, cx);
-            fx_t s = fx_div_hw(s_num, denom);
-            if (s < 0 || s > FX_ONE) continue;
-            fx_t wh = PFACE_UA(fi) + FX_MUL(s, PFACE_UB(fi) - PFACE_UA(fi));
-            int sd = (dxs == 0) ? 0 : 1;   /* vertical face = E/W (X-side), horizontal = N/S */
-            if (!beam && fh == 0) {
-                perpDist = t; partition_wallhit_w = wh; partition_hit = 1;
-                part_style = PFACE_STYLE(fi); side = sd;
-            } else {
-                /* Partial divider or floating beam — overlay bands. Keep the
-                 * TWO nearest (insertion into sorted slots) so stacked
-                 * partials layer instead of the closest erasing the rest. */
-                int slot;
-                if (fg_n == 0 || t < fg_t[0]) {
-                    if (fg_n) {                      /* shift near -> far slot */
-                        fg_t[1] = fg_t[0]; fg_wallhit[1] = fg_wallhit[0];
-                        fg_style[1] = fg_style[0]; fg_side[1] = fg_side[0];
-                        fg_beam[1] = fg_beam[0]; fg_height[1] = fg_height[0];
-                        fg_fi[1] = fg_fi[0];
-                    }
-                    if (fg_n < 2) fg_n++;
-                    slot = 0;
-                } else {
-                    if (fg_n < 2) fg_n++;
-                    slot = 1;
+        fx_t fg_line[2] = {0,0};                   /* slab centerline world coord */
+        fx_t fg_fo[2]   = {0,0};                   /* slab band offset (flush shift) */
+        fx_t fg_ua[2] = {0,0}, fg_ub[2] = {0,0};   /* run extent along the line */
+        /* Partial slabs -> band slots. The DDA delivered face/cap contacts
+         * nearest-first, each with an EXACT t — no per-column intersection
+         * math. The band and wood countertop hang off these. */
+        for (int ei = 0; ei < n_efg && fg_n < 2; ei++) {
+            uint8_t ef = efg_f[ei];
+            fx_t et = efg_t[ei];
+            if (et >= perpDist) break;             /* at/behind the background */
+            if (et < FX(0.1)) et = FX(0.1);
+            int k = fg_n++;
+            fg_t[k] = et;
+            fg_side[k] = efg_sd[ei];               /* facing: shade + texture U */
+            fg_ax[k]   = efg_ax[ei];               /* run axis: countertop depth */
+            fg_wallhit[k] = efg_sd[ei] ? (px + FX_MUL(et, rayDirX))
+                                       : (py + FX_MUL(et, rayDirY));
+            fg_line[k] = (fx_t)(efg_ax[ei] ? efg_y[ei] : efg_x[ei]) << FX_SHIFT;
+            fg_fo[k]   = SLAB_FO(ef);
+            fg_style[k]  = ef & CM_PEDGE_SPOTTED;
+            fg_height[k] = (CM_PEDGE_HCLASS(ef) == 1) ? 192 : 96;
+            {   /* Run extent along the line (countertop end clip):
+                 * walk the edge bytes both ways while the flag matches. */
+                int ex = efg_x[ei], ey = efg_y[ei], lo, hi;
+                if (efg_ax[ei] == 0) {             /* vertical line: run in Y */
+                    lo = ey; while (lo > 0 && pedge_w[lo - 1][ex] == ef) lo--;
+                    hi = ey; while (hi + 1 < MAP_H && pedge_w[hi + 1][ex] == ef) hi++;
+                } else {                           /* horizontal line: run in X */
+                    lo = ex; while (lo > 0 && pedge_n[ey][lo - 1] == ef) lo--;
+                    hi = ex; while (hi + 1 < MAP_W && pedge_n[ey][hi + 1] == ef) hi++;
                 }
-                fg_t[slot] = t; fg_wallhit[slot] = wh; fg_fi[slot] = fi;
-                fg_style[slot] = PFACE_STYLE(fi); fg_side[slot] = sd;
-                fg_beam[slot]  = beam;
-                fg_height[slot] = beam ? (BEAM_HIGH - BEAM_LOW) : fh;
+                fg_ua[k] = (fx_t)lo << FX_SHIFT;
+                fg_ub[k] = (fx_t)(hi + 1) << FX_SHIFT;
             }
         }
         /* Partials only show in front of the final background (sorted, so
@@ -3057,7 +3200,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * world height h/256 at distance d sits above the horizon ~(h-eye)/d, so
          * the full (h=256) background pokes above the partial (h=fg_height) iff
          * (256-eye)*fg_t > (fg_height-eye)*perpDist. */
-        if (fg_n == 1 && !fg_beam[0] && fg_height[0] >= STAND_EYE) {
+        if (fg_n == 1 && fg_height[0] >= STAND_EYE) {
             /* A floating beam ALWAYS overlays — it never fills floor-to-ceiling,
              * so it can't be promoted to the fast main path (that would erase the
              * see-over above and the crawl gap below). Only floor-anchored
@@ -3274,7 +3417,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             uint8_t *pb = (uint8_t *)fb + col + drawStart * SCREEN_W;
             if (hr) for (int y = drawStart; y <= drawEnd; y++) { *(uint16_t *)pb = 0; pb += SCREEN_W; }
             else    for (int y = drawStart; y <= drawEnd; y++) { *pb = 0; pb += SCREEN_W; }
-            continue;
+            goto overlay_pass;   /* partials in front must still band over it */
         }
 
         /* Embedded DOOR (decal kind 1): on the columns it covers, draw the door
@@ -3306,7 +3449,11 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 door_drawn = 1;
                 break;
             }
-            if (door_drawn) continue;   /* door drawn as the wall; skip chevron */
+            /* Door drawn as the wall: skip the chevron draw but FALL THROUGH
+             * to the partial-partition overlay — skipping it left a vertical
+             * SEAM in any band crossing the door's columns (the beam split
+             * exactly at the door in the crouch screenshots). */
+            if (door_drawn) goto overlay_pass;
         }
 
         /* DIVU latency hide #2: start tex_step = (tex_h*tile_y
@@ -3613,6 +3760,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * baseboard so it reads identical — just shorter. Only reached for the
          * see-over case (lobby T-stem); free-standing dividers were promoted to
          * the fast main path above (fg_hit cleared). */
+        overlay_pass: ;
         if (fg_n) {
             /* The nearest band is the closest solid surface in this column, so
              * the sprite z-buffer must read its depth — otherwise the ceiling
@@ -3624,17 +3772,14 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * behind a counter renders first, the counter over it. */
         for (int fk = fg_n - 1; fk >= 0; fk--) {
             fx_t ft  = fg_t[fk];
-            int  fbm = fg_beam[fk], fht = fg_height[fk];
+            int  fht = fg_height[fk];
             int  fst = fg_style[fk], fsd = fg_side[fk];
             int flh  = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)ft);
             int fdlh = (flh * fht) >> 8;                /* band height in px */
             if (fdlh > 0) {
-                /* fbot = bottom edge of the band. A floor-anchored partial sits
-                 * on the floor line; a floating beam's underside is lifted to
-                 * BEAM_LOW so the crawl gap opens beneath it (carpet shows) and
-                 * the band's top edge (BEAM_HIGH) leaves the room visible above. */
+                /* fbot = bottom edge of the band: the partial sits on the
+                 * floor line. */
                 int fbot = horizon_y + ((flh * eye_h) >> 8);
-                if (fbm) fbot -= (flh * BEAM_LOW) >> 8;
                 int ftop = fbot - fdlh;
                 int fds  = ftop < 0 ? 0 : ftop;
                 int fde  = fbot >= SCREEN_H ? SCREEN_H - 1 : fbot;
@@ -3649,12 +3794,14 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 fsh += 1;
                 if (fsd) fsh += SIDE_SHADE;
                 if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
+                int flitcap = SHADE_LEVELS - 1;
                 {
                     int lx = FX_INT(px + FX_MUL(ft, rayDirX));
                     int ly = FX_INT(py + FX_MUL(ft, rayDirY));
                     if ((unsigned)lx < (unsigned)MAP_W && (unsigned)ly < (unsigned)MAP_H) {
                         int lit = CELL_LIGHT(ly, lx);
-                        if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap; }
+                        if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap;
+                                   flitcap = cap; }
                     }
                 }
                 /* Texture + detail (spotted dots fade with distance). */
@@ -3727,71 +3874,60 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     fp += SCREEN_W;
                 }
 
-                /* COUNTERTOP: a partial whose top sits below the eye shows its
-                 * horizontal top face. Project the top edge at the BACK of the
-                 * partition's thickness (0.3 cells along the ray) and fill the
-                 * strip between the back and front top edges with WOOD — the
-                 * muted-brown door-jamb ramp, distance-faded. Skipped at
-                 * grazing angles where the thickness projection degenerates. */
-                if (!fbm && fht < eye_h) {
-                    /* Ray depth to the top face's BACK edge: crossing the
-                     * 0.3-cell thickness (÷ the across-component), CLIPPED at
-                     * the counter's END (remaining segment length ÷ the
-                     * along-component). Without the end clip, a ray grazing
-                     * along the counter painted the top as if the counter
-                     * were endless — the giant wood wedge in the screenshots.
-                     * The two components can't both be small (|ray| ~ 1), so
-                     * the min is naturally bounded in every direction. */
-                    fx_t dirU  = fsd ? rayDirX : rayDirY;   /* along the counter */
-                    fx_t dirN  = fsd ? rayDirY : rayDirX;   /* across the thickness */
-                    fx_t adirN = FX_ABS(dirN), adirU = FX_ABS(dirU);
-                    int  fi2   = fg_fi[fk];
-                    fx_t whU   = fg_wallhit[fk];
-                    fx_t rem   = (dirU >= 0) ? (PFACE_UB(fi2) - whU)
-                                             : (whU - PFACE_UA(fi2));
-                    if (rem < 0) rem = 0;
-                    fx_t dtn = (adirN > 64) ? fx_div_hw(PFACE_DEPTH(fi2), adirN)
-                                            : (fx_t)FX(16);
-                    fx_t dte = (adirU > 64) ? fx_div_hw(rem, adirU)     : (fx_t)FX(16);
-                    fx_t dt  = dtn < dte ? dtn : dte;
-                    if (dt > 0) {
-                        int flh_b = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
-                                                  (uint32_t)(ft + dt));
-                        int ftop_b = horizon_y + ((flh_b * (eye_h - fht)) >> 8);
-                        int cs0 = ftop_b < 0 ? 0 : ftop_b;
-                        int ce0 = (ftop <= fde ? ftop : fde) - 1;
-                        if (ce0 >= SCREEN_H) ce0 = SCREEN_H - 1;
-                        /* Distance-gradient across the top: the strip spans
-                         * depths ft (front edge, bottom rows) .. ft+dt (back
-                         * edge, top rows). Run the wall fog ramp at both ends
-                         * and step the wood shade linearly row-by-row, so the
-                         * countertop fades into the fog like the surfaces
-                         * around it instead of reading as one flat slab. */
-                        int s0 = fsh;                     /* front-edge shade */
-                        int s1;                           /* back-edge shade  */
+                /* COUNTERTOP: the slab's top is a FLAT HORIZONTAL PLANE at
+                 * height fht, drawn the way the floor and crawl-ceiling
+                 * passes draw planes: walk screen rows upward from the
+                 * band's top edge; every row maps to ONE distance on the
+                 * plane; sample the world point along this ray and lay
+                 * wood while the point stays inside the slab's footprint
+                 * (thickness band x run extent). Self-bounding — it cannot
+                 * paint where the counter isn't, so there is no entry/exit
+                 * depth math, no end clip, no grazing special case. */
+                if (fht < eye_h) {
+                    int   fax   = fg_ax[fk];
+                    fx_t  linew = fg_line[fk];
+                    int   eh    = eye_h - fht;        /* eye height over the plane */
+                    int   ry    = (ftop <= fde ? ftop : fde) - 1;
+                    uint8_t *cp = (uint8_t *)fb + col + ry * SCREEN_W;
+                    for (; ry > horizon_y; ry--, cp -= SCREEN_W) {
+                        /* Row -> plane distance: row = horizon + flh*eh/256
+                         * with flh = SCREEN_H/d, so d = SCREEN_H*256 /
+                         * ((row-horizon)*256/eh). Integer, one HW divide. */
+                        int flh_r = ((ry - horizon_y) << 8) / eh;
+                        if (flh_r <= 0) break;
+                        fx_t d = (fx_t)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
+                                                (uint32_t)flh_r);
+                        fx_t wx = px + FX_MUL(d, rayDirX);
+                        fx_t wy = py + FX_MUL(d, rayDirY);
+                        fx_t un = (fax ? wy : wx) - linew;
+                        fx_t uu = fax ? wx : wy;
+                        if (un < -fg_fo[fk] ||
+                            un > PART_HALF_THICK * 2 - fg_fo[fk] ||
+                            uu < fg_ua[fk] || uu > fg_ub[fk]) break;
+                        /* Shade: the wall fog ramp at this ROW's distance +
+                         * the sampled cell's light cap — the top fades and
+                         * lights exactly like the world around it. */
+                        int ts;
+                        if (d < FX(2.5)) ts = (int)((d * 2) / FX(2.5));
+                        else { fx_t past = d - FX(2.5);
+                               fx_t span = FOG_RAMP_DIST - FX(2.5);
+                               ts = 2 + (int)((past * 13) / span); }
+                        ts += 1;
+                        /* The top belongs to THIS counter: inherit the band's
+                         * own light cap instead of sampling whatever cell the
+                         * far rows round into — at long range those samples
+                         * drift into unlit cells behind the counter and the
+                         * top went fog-black against a dark wall (the
+                         * "floating line over a gap" long-view artifact).
+                         * Bound the fade near the face shade so the top always
+                         * reads attached. */
+                        if (ts > flitcap) ts = flitcap;
+                        if (ts > fsh + 4) ts = fsh + 4;
+                        if (ts > SHADE_LEVELS - 1) ts = SHADE_LEVELS - 1;
                         {
-                            fx_t tb = ft + dt;
-                            if (tb < FX(2.5)) s1 = (int)((tb * 2) / FX(2.5));
-                            else { fx_t past = tb - FX(2.5);
-                                   fx_t span = FOG_RAMP_DIST - FX(2.5);
-                                   s1 = 2 + (int)((past * 13) / span); }
-                            s1 += 1;
-                            if (s1 > SHADE_LEVELS - 1) s1 = SHADE_LEVELS - 1;
-                            if (s1 < s0) s1 = s0;         /* back never brighter */
-                        }
-                        int rows  = ce0 - cs0;
-                        int sfx   = s1 << 8;              /* 8.8 shade walker  */
-                        int sstep = rows > 0 ? (((s0 - s1) << 8) / rows) : 0;
-                        uint8_t *cp = (uint8_t *)fb + col + cs0 * SCREEN_W;
-                        for (int cy2 = cs0; cy2 <= ce0; cy2++) {
-                            int w = sfx >> 9;              /* shade 0..15 -> wood 0..7 */
-                            /* (Speckle experiment reverted: at this resolution
-                             * the specks read as hollow noise, not texture —
-                             * the clean fog gradient sells the surface better.) */
-                            if (w < 0) w = 0; else if (w > 7) w = 7;
+                            int w = ts >> 1;              /* shade 0..15 -> wood 0..7 */
                             uint8_t wood = (uint8_t)(WOODTOP_BASE + w);
                             if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
-                            cp += SCREEN_W; sfx += sstep;
                         }
                     }
                 }
@@ -3933,17 +4069,6 @@ void raycast_render(void) {
     if (pitch_combined < -128) pitch_combined = -128;
     SHARED_UC->pitch_y = (int8_t)pitch_combined;
 
-    /* Build the visible-partition-faces list once. Primary populates
-     * pface_* via cache-through alias; both halves of raycast_draw_walls
-     * read them when doing per-ray ray-segment intersection. Must finish
-     * BEFORE the secondary wake below.
-     *
-     * Drain: a read-back of the last-written cache-through address
-     * serializes against all prior writes through the same alias bus
-     * path. Without it the MARS controller can forward COMM4=HALF
-     * before SDRAM writes are visible from secondary's view. */
-    partition_build_faces();
-    (void)PFACE_COUNT;
     __asm__ __volatile__("" ::: "memory");
 
     /* Single dispatch: secondary does clear + ceiling + carpet + walls for

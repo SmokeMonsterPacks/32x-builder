@@ -316,6 +316,7 @@ static void place_crawlspaces(int count) {
 /* ── Driver ───────────────────────────────────────────────────────── */
 
 void procgen_run(uint32_t seed) {
+    pedge_clear();                     /* procgen partitions stay legacy (inc 3) */
     prng_state = seed ? seed : 1;
     for (int i = 0; i < 8; i++) xs32();   /* mix the small-seed bits */
 
@@ -327,7 +328,6 @@ void procgen_run(uint32_t seed) {
     for (int i = 0; i < NUM_PARTITIONS_MAX; i++) {
         partition_style[i]  = 0;   /* chevron */
         partition_height[i] = 0;   /* full height */
-        partition_crawl[i]  = 0;   /* solid foot */
     }
 
     /* Layout: a big open floor with structure dropped into it — open by
@@ -358,6 +358,7 @@ void procgen_run(uint32_t seed) {
      * to 4 + p*3 (up to 16) so even max-divider maps stay inside the budget. */
     scatter_partitions(4 + g_procgen_params.partitions * 3);
     assign_partition_decor();
+    raycast_stamp_partition_edges();   /* procgen dividers go first-class */
     place_crawlspaces(g_procgen_params.crawlspaces + 1);
     raycast_place_outlets(g_procgen_params.outlets * 5);
 }

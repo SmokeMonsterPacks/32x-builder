@@ -19,6 +19,7 @@ uint16_t currentFB = 0;
 /* On-screen debug metrics — off by default, toggled by the six-button
  * controller's MODE button (edge-detected once per frame from any loop). */
 uint8_t g_metrics_on = 0;
+uint8_t g_padtest_on = 0;   /* MODE+Z: raw controller register overlay */
 /* Automap overlay (MODE+B cycles): 0 = off, 1 = FULL (whole map, north-up,
  * arrow rotates), 2 = ROTATE (player fixed at center pointing screen-up, the
  * world rotating around the reticle in real time). d32xr-style vectors, but
@@ -42,6 +43,52 @@ static uint32_t g_procgen_seed = 0;
 /* Pause-menu MAPS tab -> warp request. -1 = none; else a custom_maps[] index.
  * The menu (menu.c) sets it; the main loop drains it into portal_to_custom. */
 volatile int g_warp_request = -1;
+/* ── Controller input tester (MODE+Z) ────────────────────────────────────
+ * Shows the exact word the 68K bridge delivers: RAW = MARS_SYS_COMM8 read
+ * right now, SNP = the frame's snapshot the game logic is using (a diff
+ * between them means the 68K rewrote COMM8 mid-frame). The lamp row is in
+ * BIT ORDER — bit11..bit0 = M X Y Z S A C B R L D U — so the register can
+ * be read straight off the screen. HIST logs the last 4 distinct words so
+ * one-frame glitches leave evidence. */
+static void pad_hex4(char *p, uint16_t v) {
+    for (int i = 0; i < 4; i++) {
+        int n = (v >> (12 - 4 * i)) & 15;
+        p[i] = (char)(n < 10 ? '0' + n : 'A' + n - 10);
+    }
+}
+static void pad_lamps(char *p, uint16_t v) {
+    static const char L[12] = { 'M','X','Y','Z','S','A','C','B','R','L','D','U' };
+    for (int i = 0; i < 12; i++)
+        p[i] = (v & (1u << (11 - i))) ? L[i] : '.';
+}
+static void pad_test_draw(uint8_t *fb, uint16_t snap) {
+    static uint16_t hist[4] = {0,0,0,0};
+    static uint16_t last = 0xFFFF;
+    uint16_t raw = MARS_SYS_COMM8;
+    if (raw != last) {
+        hist[3] = hist[2]; hist[2] = hist[1]; hist[1] = hist[0]; hist[0] = raw;
+        last = raw;
+    }
+    uint16_t ty = raw & SEGA_CTRL_TYPE;
+    char l1[28], l2[20], l3[28], l4[28];
+    /* RAW:XXXX 6BTN */
+    l1[0]='R';l1[1]='A';l1[2]='W';l1[3]=':'; pad_hex4(l1+4, raw);
+    l1[8]=' ';
+    l1[9]  = (ty == SEGA_CTRL_SIX) ? '6' : (ty == SEGA_CTRL_THREE) ? '3' : '?';
+    l1[10]='B';l1[11]='T';l1[12]='N';l1[13]=0;
+    pad_lamps(l2, raw); l2[12]=0;
+    l3[0]='S';l3[1]='N';l3[2]='P';l3[3]=':'; pad_hex4(l3+4, snap);
+    l3[8]=' ';
+    pad_lamps(l3+9, snap); l3[21]=0;
+    l4[0]='H';l4[1]=':';
+    for (int i = 0; i < 4; i++) { pad_hex4(l4+2+i*5, hist[i]); l4[6+i*5] = ' '; }
+    l4[21]=0;
+    font_draw_string(fb, 4, 40, l1, 49);
+    font_draw_string(fb, 4, 52, l2, 49);
+    font_draw_string(fb, 4, 64, l3, 49);
+    font_draw_string(fb, 4, 76, l4, 49);
+}
+
 static void metrics_mode_check(uint16_t pad) {
     static uint16_t prev = 0xFFFF;
     /* Debug shortcuts live behind a HELD-MODE modifier: bare X used to cycle
@@ -56,6 +103,8 @@ static void metrics_mode_check(uint16_t pad) {
             g_metrics_on ^= 1;
         if ((pad & SEGA_CTRL_B) && !(prev & SEGA_CTRL_B))
             g_automap_on = (uint8_t)((g_automap_on + 1) % 3);
+        if ((pad & SEGA_CTRL_Z) && !(prev & SEGA_CTRL_Z))
+            g_padtest_on ^= 1;
         if (g_automap_on) {
             if (pad & SEGA_CTRL_UP) {                    /* held: ramp in */
                 am_s_tgt += am_s_tgt >> 4;
@@ -322,9 +371,22 @@ static void automap_draw(uint8_t *fb) {
             if (cx < MAP_W - 1 && world_map[cy][cx + 1] == 0) am_emit(fb, x1, y0, x1, y1, AMAP_RED);
         }
     }
-    for (int i = 0; i < num_partitions; i++)
-        am_emit(fb, partitions[i].x1, partitions[i].y1,
-                    partitions[i].x2, partitions[i].y2, AMAP_RED);
+    /* Partitions are cell-edge flags now — each flagged edge draws as its
+     * one-cell segment; contiguous runs read as continuous lines. */
+    if (g_pedge_any) {
+        for (int ey = 0; ey < MAP_H; ey++)
+            for (int ex = 0; ex <= MAP_W; ex++)
+                if (pedge_w[ey][ex] & CM_PEDGE_PRESENT)
+                    am_emit(fb, (fx_t)ex << FX_SHIFT, (fx_t)ey << FX_SHIFT,
+                                (fx_t)ex << FX_SHIFT, (fx_t)(ey + 1) << FX_SHIFT,
+                            AMAP_RED);
+        for (int ey = 0; ey <= MAP_H; ey++)
+            for (int ex = 0; ex < MAP_W; ex++)
+                if (pedge_n[ey][ex] & CM_PEDGE_PRESENT)
+                    am_emit(fb, (fx_t)ex << FX_SHIFT, (fx_t)ey << FX_SHIFT,
+                                (fx_t)(ex + 1) << FX_SHIFT, (fx_t)ey << FX_SHIFT,
+                            AMAP_RED);
+    }
 
     if (am_rotate) {
         /* Fixed reticle: center arrow always pointing screen-up. */
@@ -473,6 +535,7 @@ static void show_controls_screen(void) {
         font_draw_string(fb, LEG_X, 120, "DEBUG STATS: MODE+Y", 49);
         font_draw_string(fb, LEG_X, 134, "RESOLUTION: MODE+X",  49);
         font_draw_string(fb, LEG_X, 148, "AUTOMAP: MODE+B U/D ZOOM", 49);
+        font_draw_string(fb, LEG_X, 162, "PAD TEST: MODE+Z",     49);
         font_draw_string(fb, (SCREEN_W - 16 * 8) / 2, 170, "ANY BUTTON: BACK", 49);
         swapBuffers();
     }
@@ -857,6 +920,7 @@ int m_main(void) {
                 0, 0 };
             font_draw_string(fb_text, 8, 8, padline, 49);
             if (g_metrics_on) { prof_sample_and_draw(fb_text); pos_draw(fb_text); }
+            if (g_padtest_on) pad_test_draw(fb_text, pad);
             swapBuffers();
         }
     }
@@ -943,6 +1007,7 @@ int m_main(void) {
             raycast_render();
             uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
             if (g_metrics_on) { prof_sample_and_draw(fb_text); pos_draw(fb_text); }
+            if (g_padtest_on) pad_test_draw(fb_text, pad);
             swapBuffers();
         }
     }
@@ -1030,6 +1095,7 @@ int m_main(void) {
             prof_sample_and_draw(fb_text);
             pos_draw(fb_text);
         }
+        if (g_padtest_on) pad_test_draw(fb_text, pad);
         swapBuffers();
     }
     return 0;

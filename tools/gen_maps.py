@@ -66,6 +66,8 @@ def resolve(path, reg):
     spawn = (sp["x"], sp["y"], facing[sp["facing"]])
 
     parts = []
+    pedges = []
+    hclass = {0: 0, 192: 1, 96: 2}          # height value -> edge height class
     for p in m["partitions"]:
         for enum, table, what in ((p["style"], pstyle, "style"),
                                   (p["height"], pheight, "height"),
@@ -74,6 +76,58 @@ def resolve(path, reg):
                 die("%s: unknown partition %s %r" % (base, what, enum))
         parts.append((p["x1"], p["y1"], p["x2"], p["y2"],
                       pstyle[p["style"]], pheight[p["height"]], pcrawl[p["crawl"]]))
+        # Rasterize to cell edges (the first-class model): integer, axis-
+        # aligned segments only — which is every partition ever authored.
+        x1, y1, x2, y2 = p["x1"], p["y1"], p["x2"], p["y2"]
+        if any(v != int(v) for v in (x1, y1, x2, y2)):
+            die("%s: partition (%g,%g)->(%g,%g) has fractional endpoints — "
+                "partitions live on cell edges (integer coordinates)"
+                % (base, x1, y1, x2, y2))
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        if x1 != x2 and y1 != y2:
+            die("%s: partition (%d,%d)->(%d,%d) is diagonal — partitions are "
+                "axis-aligned" % (base, x1, y1, x2, y2))
+        hv = pheight[p["height"]]
+        if hv not in hclass:
+            die("%s: partition height value %d has no edge class" % (base, hv))
+        flags = 0x80 | (0x01 if pstyle[p["style"]] else 0) | (hclass[hv] << 1) \
+              | (0x08 if pcrawl[p["crawl"]] else 0)
+        # Collinear-wall flush: if the run shares its line with a wall face,
+        # shift the slab so the faces align (0x20 = slab on the negative side,
+        # face on the line; 0x10 = positive side). Mirrors the engine stamper.
+        # Scan the run's own cells AND one continuation cell past each end:
+        # a wall on exactly one side of the line means its face is collinear
+        # with the run — flush the slab to that face. A wall on BOTH sides at
+        # a continuation cell is a perpendicular tee (stays centered).
+        if x1 == x2:                          # vertical: WEST edges on line x
+            ww = we = False
+            ya, yb = min(y1, y2), max(y1, y2)
+            for yy in range(ya - 1, yb + 1):
+                if not (0 <= yy < h): continue
+                cw = x1 > 0 and cells[yy * w + (x1 - 1)] != 0
+                ce = x1 < w and cells[yy * w + x1] != 0
+                if cw and ce: continue        # tee / wall both sides
+                if cw: ww = True
+                if ce: we = True
+            # slab goes on the side OPPOSITE the wall, face on the line
+            if ww and not we:   flags |= 0x10   # wall west -> slab east
+            elif we and not ww: flags |= 0x20   # wall east -> slab west
+            for yy in range(ya, yb):
+                pedges.append((x1, yy, flags))
+        else:                                 # horizontal: NORTH edges on line y
+            wn = ws = False
+            xa, xb = min(x1, x2), max(x1, x2)
+            for xx in range(xa - 1, xb + 1):
+                if not (0 <= xx < w): continue
+                cn = y1 > 0 and cells[(y1 - 1) * w + xx] != 0
+                cs = y1 < h and cells[y1 * w + xx] != 0
+                if cn and cs: continue
+                if cn: wn = True
+                if cs: ws = True
+            if wn and not ws:   flags |= 0x10   # wall north -> slab south
+            elif ws and not wn: flags |= 0x20   # wall south -> slab north
+            for xx in range(xa, xb):
+                pedges.append((xx, y1, flags | 0x40))
 
     decals = []
     for d in m["decals"]:
@@ -95,12 +149,16 @@ def resolve(path, reg):
                      ("max_crawl_runs", crawls)):
         if len(lst) > lim[cap]:
             die("%s: %d items exceed %s %d" % (base, len(lst), cap, lim[cap]))
+    if len(pedges) > 255:
+        die("%s: partitions rasterize to %d cell-edges (max 255 per map — "
+            "n_pedges is a uint8_t)" % (base, len(pedges)))
 
     roles = reg.get("roles", {})
     role = m.get("role", "community")
     if role not in roles:
         die("%s: unknown role %r (valid: %s)" % (base, role, ", ".join(sorted(roles))))
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
+            "pedges": pedges,
             "next": (m.get("next") or "").strip(),
             "decals": decals, "crawls": crawls, "spawn": spawn,
             "lobby_ceiling": m["options"]["lobby_ceiling"],
@@ -123,11 +181,10 @@ def emit(maps, out_path):
             L.append("    " + ",".join(str(c) for c in row) + ",")
         L.append("};")
         total += m["w"] * m["h"]
-        if m["parts"]:
-            L.append("static const cm_partition_t %s_parts[] = {" % p)
-            for (x1, y1, x2, y2, st, ht, cr) in m["parts"]:
-                L.append("    { %s,%s,%s,%s, %d,%d,%d }," %
-                         (fxlit(x1), fxlit(y1), fxlit(x2), fxlit(y2), st, ht, cr))
+        if m["pedges"]:
+            L.append("static const cm_pedge_t %s_pedges[] = {" % p)
+            for (ex, ey, ef) in m["pedges"]:
+                L.append("    { %d,%d,0x%02x }," % (ex, ey, ef))
             L.append("};")
         if m["decals"]:
             L.append("static const cm_decal_t %s_decals[] = {" % p)
@@ -145,11 +202,11 @@ def emit(maps, out_path):
         for i, m in enumerate(maps):
             p = "map%02d" % i
             sx, sy, sa = m["spawn"]
-            parts = ("%s_parts,%d" % (p, len(m["parts"]))) if m["parts"] else "0,0"
+            pedges = ("%s_pedges,%d" % (p, len(m["pedges"]))) if m["pedges"] else "0,0"
             decals = ("%s_decals,%d" % (p, len(m["decals"]))) if m["decals"] else "0,0"
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
             L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
-                     (m["name"][:16], m["w"], m["h"], p, parts, decals, crawls,
+                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls,
                       fxlit(sx), fxlit(sy), sa,
                       m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
                       m["next_idx"]))
