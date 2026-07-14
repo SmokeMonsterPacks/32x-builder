@@ -3,6 +3,7 @@
 #include "raycast.h"
 #include "sin_table.h"   /* COS_FX/SIN_FX for the automap player arrow */
 #include "font.h"
+#include "version.h"
 #include "shared.h"
 #include "procgen.h"
 #include "custom_maps.h"
@@ -83,10 +84,10 @@ static void pad_test_draw(uint8_t *fb, uint16_t snap) {
     l4[0]='H';l4[1]=':';
     for (int i = 0; i < 4; i++) { pad_hex4(l4+2+i*5, hist[i]); l4[6+i*5] = ' '; }
     l4[21]=0;
-    font_draw_string(fb, 4, 40, l1, 49);
-    font_draw_string(fb, 4, 52, l2, 49);
-    font_draw_string(fb, 4, 64, l3, 49);
-    font_draw_string(fb, 4, 76, l4, 49);
+    font_draw_string(fb, 4, 40, l1, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    font_draw_string(fb, 4, 52, l2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    font_draw_string(fb, 4, 64, l3, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    font_draw_string(fb, 4, 76, l4, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
 }
 
 static void metrics_mode_check(uint16_t pad) {
@@ -98,7 +99,7 @@ static void metrics_mode_check(uint16_t pad) {
      * button. The VISUALS pause-menu tab remains the discoverable path. */
     if (pad & SEGA_CTRL_MODE) {
         if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
-            SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 3);
+            SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 4);
         if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y))
             g_metrics_on ^= 1;
         if ((pad & SEGA_CTRL_B) && !(prev & SEGA_CTRL_B))
@@ -143,7 +144,10 @@ static inline uint16_t prof_read_frt(void) {
 
 static inline void prof_init(void) {
     SH2_FRT_TIER  = 0x01;  /* default — no interrupts enabled */
-    SH2_FRT_TCR   = 0x01;  /* Φ/32 prescaler = ~720kHz */
+    SH2_FRT_TCR   = 0x02;  /* Φ/128 prescaler ≈ 180kHz — heavy diagnostic frames
+                          * (SERL ~120ms) were wrapping the 16-bit window at Φ/32,
+                          * poisoning every T/H/S/W read above 91ms. 364ms window
+                          * now; ~5.6us/tick is ample for pass-level metrics. */
     SH2_FRT_FTCSR = 0;     /* clear OVF/OCF; free-running */
     prof_prev_frt = prof_read_frt();
 }
@@ -156,7 +160,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * still fits, but a sub-11fps frame (>65536) wraps and reads tiny. Unwrap
      * the single overflow the same way the FPS calc does: a "frame" shorter
      * than 12000 ticks (>60fps) can't be real here, so it's a wrapped long one. */
-    uint32_t delta = (raw < 12000) ? (uint32_t)raw + 65536u : raw;
+    uint32_t delta = (raw < 3000) ? (uint32_t)raw + 65536u : raw;
     /* EMA: 7/8 old + 1/8 new — ~8-frame time constant. */
     prof_smoothed = (prof_smoothed - (prof_smoothed >> 3)) + (delta >> 3);
     uint16_t secondary = SHARED_UC->secondary_render_ticks;
@@ -192,7 +196,10 @@ static void prof_sample_and_draw(uint8_t *fb) {
     text[23] = 0;
     /* Top-right corner. LIGHT_BASE[0] (palette idx 49) is the brightest
      * fixture-white, reads on every background. */
-    font_draw_string(fb, SCREEN_W - 8 * 23 - 4, 4, text, 49);
+    font_draw_string(fb, SCREEN_W - 8 * 23 - 4, 4, text, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    /* Build stamp on the debug HUD: every metrics screenshot self-identifies
+     * (no more guessing which ROM produced a capture). */
+    font_draw_string(fb, SCREEN_W - 8 * 14 - 4, SCREEN_H - 36, "B" VERSION_BUILD_STR " " VERSION_SHA_STR, AMAP_RED_BRIGHT);
 
     /* Second line: primary-half per-pass breakdown — Clear / ceiling-Grid /
      * caRpet / Walls (raw FRT ticks), then F = effective FPS. Per-pass tells
@@ -217,14 +224,14 @@ static void prof_sample_and_draw(uint8_t *fb) {
          * FRT wraps at 65536 (~91ms); a per-frame delta below one vblank
          * (12000 ticks) wrapped once, so add 65536 — honest down to ~10fps. */
         uint32_t ft = delta ? delta : 1;
-        if (ft < 12000) ft += 65536;
-        uint32_t fps = (720000u + ft / 2) / ft;
+        if (ft < 3000) ft += 65536;
+        uint32_t fps = (180000u + ft / 2) / ft;
         if (fps > 99) fps = 99;
         t2[pos++] = 'F'; t2[pos++] = ':';
         t2[pos++] = '0' + (fps / 10);
         t2[pos++] = '0' + (fps % 10);
         t2[pos] = 0;
-        font_draw_string(fb, 4, SCREEN_H - 12, t2, 49);
+        font_draw_string(fb, 4, SCREEN_H - 12, t2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
     }
 
     /* Third line: the SERIAL TAIL — primary-only post-sync work that the
@@ -232,12 +239,14 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * (crawlspace, scene-dependent), P = lights + standups sprites. This is
      * the ~25%-of-frame block that was invisible until now. */
     {
-        extern volatile uint16_t prof_pass_slab, prof_pass_sprite;
-        static const char lbl[2] = {'L', 'P'};
-        uint16_t pv[2] = { prof_pass_slab, prof_pass_sprite };
-        char t3[20];
+        extern volatile uint16_t prof_pass_ovl, prof_pass_sprite;
+        extern volatile uint16_t prof_split_col, prof_dda_fat;
+        static const char lbl[4] = {'O', 'P', 'K', 'E'};
+        uint16_t pv[4] = { prof_pass_ovl, prof_pass_sprite,
+                           prof_split_col, prof_dda_fat };
+        char t3[36];
         int pos = 0;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 4; i++) {
             t3[pos++] = lbl[i];
             t3[pos++] = ':';
             uint16_t x = pv[i];
@@ -246,7 +255,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
             t3[pos++] = ' ';
         }
         t3[pos] = 0;
-        font_draw_string(fb, 4, SCREEN_H - 24, t3, 49);
+        font_draw_string(fb, 4, SCREEN_H - 24, t3, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
     }
 }
 
@@ -445,8 +454,8 @@ static void pos_draw(uint8_t *fb) {
     line2[2] = '0' + (angle % 10);
     line2[5] = 0;
 
-    font_draw_string(fb, 4,  4, line1, 49);
-    font_draw_string(fb, 4, 16, line2, 49);
+    font_draw_string(fb, 4,  4, line1, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    font_draw_string(fb, 4, 16, line2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
 }
 
 void swapBuffers(void) {
@@ -508,7 +517,7 @@ static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *lab
         int nl = 0; while (label[nl]) nl++;
         lobby_hl_bar(fb, x + 2 * 8, y, nl * 8);
     }
-    font_draw_string(fb, x, y, line, 49);
+    font_draw_string(fb, x, y, line, 49);   /* menu text — stays white */
 }
 
 /* SHOW CONTROLS sub-screen: the title and the controls legend over the frozen

@@ -200,8 +200,12 @@ sh_src/version.h: FORCE
 		echo "  VERSION  build $$BUILD ($$SHA) $$DATE"; \
 	else rm -f sh_src/version.h.tmp; fi
 
-# menu.c draws the version strings, so it must see a fresh version.h.
-sh_src/menu.o: sh_src/version.h
+# menu.c and m_main.c both draw the version strings (menu screen + debug HUD),
+# so they must see a fresh version.h. This is also the ORDER dependency that
+# makes a clean checkout work: version.h is generated (not tracked), so without
+# these prerequisites make would compile these TUs before the rule fires — CI
+# has no stale copy to mask it (build-129 release failed exactly this way).
+sh_src/menu.o sh_src/m_main.o: sh_src/version.h
 
 # sh_src/custom_maps.c is codegen'd from maps/*.map + registry.json by the level
 # editor's generator. Regenerate when a .map, the registry, or the generator

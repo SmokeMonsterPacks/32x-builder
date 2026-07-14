@@ -350,6 +350,19 @@ int     num_decals = 0;
 uint8_t pedge_w[MAP_H][MAP_W + 1];
 uint8_t pedge_n[MAP_H + 1][MAP_W];
 int g_pedge_any = 0;
+/* Proximity gate: 1 where a DDA step must run the (expensive) slab side/cap/
+ * recovery tests — i.e. cells within reach of a partition edge. Every map has
+ * SOME partition, so g_pedge_any is ~always set; without this gate the DDA
+ * ran the full partition math on every step of every column even in empty
+ * views, taxing the whole game. The tests read edges up to ±1 cell away, so
+ * marking a radius-2 halo around each edge can never skip a real hit. */
+uint8_t pedge_cell[MAP_H][MAP_W];
+void pedge_build_cells(void);
+volatile uint16_t prof_dda_steps = 0;   /* primary half: DDA steps walked/frame */
+volatile uint16_t prof_dda_fat   = 0;   /* primary half: steps in the slab-gate path */
+volatile uint16_t prof_pass_ovl  = 0;   /* primary half: see-over overlay ticks/frame */
+volatile uint16_t prof_split_col = 0;   /* adaptive split column (HUD K) */
+static inline uint16_t prof_frt_read(void);
 
 /* Convert the authored partitions[] (integer, axis-aligned segments — the
  * working representation every loader already produces) into first-class
@@ -404,7 +417,35 @@ void raycast_stamp_partition_edges(void) {
         }
         g_pedge_any = 1;
     }
+    /* Transitive flush: a centered run collinear with a flushed run takes the
+     * same shift, so faces along one line never jog at the gaps between runs
+     * (and both meet the wall corner the flushed run aligned to). */
+    for (int x = 0; x <= MAP_W; x++) {          /* vertical lines */
+        uint8_t fl = 0;
+        for (int y = 0; y < MAP_H; y++)
+            if ((pedge_w[y][x] & CM_PEDGE_PRESENT) &&
+                (pedge_w[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI)))
+                fl = pedge_w[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI);
+        if (fl)
+            for (int y = 0; y < MAP_H; y++)
+                if ((pedge_w[y][x] & CM_PEDGE_PRESENT) &&
+                    !(pedge_w[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI)))
+                    pedge_w[y][x] |= fl;
+    }
+    for (int y = 0; y <= MAP_H; y++) {          /* horizontal lines */
+        uint8_t fl = 0;
+        for (int x = 0; x < MAP_W; x++)
+            if ((pedge_n[y][x] & CM_PEDGE_PRESENT) &&
+                (pedge_n[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI)))
+                fl = pedge_n[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI);
+        if (fl)
+            for (int x = 0; x < MAP_W; x++)
+                if ((pedge_n[y][x] & CM_PEDGE_PRESENT) &&
+                    !(pedge_n[y][x] & (CM_PEDGE_FLUSH_LO | CM_PEDGE_FLUSH_HI)))
+                    pedge_n[y][x] |= fl;
+    }
     num_partitions = 0;
+    pedge_build_cells();
 }
 
 void pedge_clear(void) {
@@ -412,7 +453,64 @@ void pedge_clear(void) {
         for (int x = 0; x <= MAP_W; x++) pedge_w[y][x] = 0;
     for (int y = 0; y <= MAP_H; y++)
         for (int x = 0; x < MAP_W; x++) pedge_n[y][x] = 0;
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++) pedge_cell[y][x] = 0;
     g_pedge_any = 0;
+}
+
+/* Directional slab gate. Per cell, 8 bits keyed by the crossing that ENTERS
+ * it: gb = (side<<1)|positive_step. Low nibble (1<<gb): the crossed line is
+ * flagged — run the 1-byte SIDE test. High nibble (16<<gb): an end/junction
+ * event is POSSIBLE for exactly that crossing (a flagged neighbor along the
+ * crossed line, or a one-sided ENTERED-only cap candidate on a perpendicular
+ * line) — only then run the fat recovery + cap tests. The old radius halos
+ * put ~88%% of DDA steps near counters on the fat path (short runs are all
+ * ends; the end halos blanketed them). Direction-exact bits cut fat entries
+ * to ~3%% with bit-identical output: 221,184-ray sim sweep, 0 mismatches. */
+static uint8_t pw_at(int x, int y) {
+    return ((unsigned)y < (unsigned)MAP_H && (unsigned)x <= (unsigned)MAP_W)
+         ? pedge_w[y][x] : 0;
+}
+static uint8_t pn_at(int x, int y) {
+    return ((unsigned)y <= (unsigned)MAP_H && (unsigned)x < (unsigned)MAP_W)
+         ? pedge_n[y][x] : 0;
+}
+void pedge_build_cells(void) {
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++) pedge_cell[y][x] = 0;
+    if (!g_pedge_any) return;
+    for (int y = 0; y < MAP_H; y++) {
+        for (int x = 0; x < MAP_W; x++) {
+            uint8_t m = 0;
+            #define GP(e) ((e) & CM_PEDGE_PRESENT)
+            /* gb=1: X crossing heading +X — crossed line x (west edge) */
+            if (GP(pw_at(x, y))) m |= 1 << 1;
+            if (GP(pw_at(x, y - 1) | pw_at(x, y + 1)) ||
+                (GP(pn_at(x, y))     && !GP(pn_at(x - 1, y))) ||
+                (GP(pn_at(x, y + 1)) && !GP(pn_at(x - 1, y + 1))))
+                m |= 16 << 1;
+            /* gb=0: heading -X — crossed line x+1 */
+            if (GP(pw_at(x + 1, y))) m |= 1 << 0;
+            if (GP(pw_at(x + 1, y - 1) | pw_at(x + 1, y + 1)) ||
+                (GP(pn_at(x, y))     && !GP(pn_at(x + 1, y))) ||
+                (GP(pn_at(x, y + 1)) && !GP(pn_at(x + 1, y + 1))))
+                m |= 16 << 0;
+            /* gb=3: Y crossing heading +Y — crossed line y (north edge) */
+            if (GP(pn_at(x, y))) m |= 1 << 3;
+            if (GP(pn_at(x - 1, y) | pn_at(x + 1, y)) ||
+                (GP(pw_at(x, y))     && !GP(pw_at(x, y - 1))) ||
+                (GP(pw_at(x + 1, y)) && !GP(pw_at(x + 1, y - 1))))
+                m |= 16 << 3;
+            /* gb=2: heading -Y — crossed line y+1 */
+            if (GP(pn_at(x, y + 1))) m |= 1 << 2;
+            if (GP(pn_at(x - 1, y + 1) | pn_at(x + 1, y + 1)) ||
+                (GP(pw_at(x, y))     && !GP(pw_at(x, y + 1))) ||
+                (GP(pw_at(x + 1, y)) && !GP(pw_at(x + 1, y + 1))))
+                m |= 16 << 2;
+            #undef GP
+            pedge_cell[y][x] = m;
+        }
+    }
 }
 
 partition_t partitions[NUM_PARTITIONS_MAX] = {
@@ -635,6 +733,7 @@ void raycast_purge_cell_light(void) {
         purge_cache_range(world_map,  sizeof world_map);
         purge_cache_range(pedge_w,    sizeof pedge_w);   /* edge partitions   */
         purge_cache_range(pedge_n,    sizeof pedge_n);   /* ride the map gen  */
+        purge_cache_range(pedge_cell, sizeof pedge_cell);/* + proximity gate  */
         purge_cache_range(&g_pedge_any, sizeof g_pedge_any);
         seen_gen = g;
     }
@@ -1145,6 +1244,7 @@ void raycast_load_custom(int idx) {
      * pre-rasterized; only the lobby/fixed/procgen loaders author
      * partitions[] segments (converted by raycast_stamp_partition_edges). */
     num_partitions = 0;
+    pedge_build_cells();
 
     /* Ceiling: full everywhere, then the low-ceiling crawl runs. */
     g_lobby_ceiling = m->lobby_ceiling;
@@ -1877,6 +1977,16 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
             if      (roll < 2)  flicker_off = 2;
             else if (roll < 5)  flicker_off = 1;
         }
+        /* The tile lives IN the ceiling plane, so its brightness must track
+         * the CEILING's fog at its own distance — the ceiling around a tile
+         * at 4-5 cells is already near-black, and any brighter quad reads as
+         * blinking pixels floating on the fog (the seam: confirmed by its
+         * flicker). Dim on the ceiling's curve; gone by 5. */
+        if      (centerY >= FX(5.0)) continue;
+        else if (centerY >= FX(4.25)) flicker_off += 3;
+        else if (centerY >= FX(3.5))  flicker_off += 2;
+        else if (centerY >= FX(2.75)) flicker_off += 1;
+        if (flicker_off > 3) flicker_off = 3;
 
         /* Two-bulb fluorescent troffer pattern: divide the panel
          * vertically into 16 bands. Outer 2 bands top + bottom = dim
@@ -2417,6 +2527,17 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
      * bright carpet before the fade, geometry untouched. */
     int geo_bias    = SCREEN_H / 2 - horizon_y;        /* unshifted: skip + LOD */
     int sample_bias = geo_bias + CROUCH_GRAD_SHIFT(SHARED_UC->eye_h);
+    /* THE CENTER SEAM: the ceiling pass stops BEFORE horizon_y and this
+     * loop starts AFTER it (both would divide by zero at p=0), so the
+     * horizon row itself was never painted — a 1px stale line across the
+     * screen center, visible wherever no wall covers the horizon: across
+     * the fog band, floating just above distant see-over counters.
+     * Paint it the deepest fog shade; walls and bands overdraw it. */
+    if (horizon_y >= 0 && horizon_y < SCREEN_H) {
+        uint8_t *hp = fb + (uintptr_t)horizon_y * SCREEN_W + col_start;
+        uint8_t fogc = (uint8_t)(FLOOR_BASE + SHADE_LEVELS - 1);
+        for (int c = col_start; c < col_end; c++) *hp++ = fogc;
+    }
     for (int y = horizon_y + 1; y < SCREEN_H; y++) {
         if (y < 0) continue;        /* extreme positive pitch */
         /* Skip + LOD key off the geometric (unshifted) distance so far rows
@@ -2743,6 +2864,8 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
 }
 
 RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
+    int dda_steps = 0, dda_fat = 0;   /* per-frame DDA profiling (HUD D/E) */
+    int ovl_acc = 0;                  /* FRT ticks in the see-over overlay (HUD O) */
     fx_t px = SHARED_UC->player.x;
     fx_t py = SHARED_UC->player.y;
     uint8_t angle = (uint8_t)SHARED_UC->player.angle;
@@ -2854,8 +2977,15 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * for Y against the north-edge plane. A full-height divider
              * terminates the ray EXACTLY like a wall — perpDist, side, fog,
              * everything downstream reuses the wall math. Cost: one cached
-             * byte read per step, only on maps that have edges at all. */
-            if (g_pedge_any) {
+             * byte read per step, only on maps that have edges at all. The
+             * pedge_cell gate skips ALL the slab math on cells with no
+             * partition in reach — the difference between a per-step tax on
+             * every column of every frame and paying it only near partitions. */
+            dda_steps++;
+            int gb = (side << 1) | (((side == 0) ? stepX : stepY) > 0);
+            uint8_t pgate = (uint8_t)(pedge_cell[mapY][mapX] >> gb);
+            if (pgate & 0x11) {
+                if (pgate & 0x10) dda_fat++;
                 /* SIDE FACE: the DDA just crossed a flagged centerline — the
                  * slab's near face sits PART_HALF_THICK before it along the
                  * crossing axis (t_face = t_line - HALF*deltaDist, applied
@@ -2863,8 +2993,9 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                  * for partials). */
                 int elx = (side == 0) ? (stepX > 0 ? mapX : mapX + 1) : mapX;
                 int ely = (side == 0) ? mapY : (stepY > 0 ? mapY : mapY + 1);
-                uint8_t ef = (side == 0) ? pedge_w[ely][elx] : pedge_n[ely][elx];
-                if (!(ef & CM_PEDGE_PRESENT)) {
+                uint8_t ef = (pgate & 1)
+                    ? ((side == 0) ? pedge_w[ely][elx] : pedge_n[ely][elx]) : 0;
+                if (!(ef & CM_PEDGE_PRESENT) && (pgate & 0x10)) {
                     /* EXACT near-end recovery: a ray can pierce a slab's face
                      * inside the run's last panel yet cross the centerline in
                      * the unflagged cell beyond it. Compute where the ray
@@ -2967,7 +3098,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                  * this crossing plane (exact t, correct side shading). Flag
                  * bytes gate the multiply, so open floor costs 2 cached
                  * reads. */
-                if (side == 1) {
+                if ((pgate & 0x10) && side == 1) {
                     /* Caps: ENTERED-side only — a ray leaving a run has no
                      * face on this plane (leaving-fires were the phantom
                      * pillars). At a junction with a perpendicular slab the
@@ -3029,7 +3160,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                             }
                         }
                     }
-                } else {
+                } else if (pgate & 0x10) {
                     /* Twin of the side==1 block for horizontal runs. */
                     int xcol = mapX - stepX;
                     int xp   = (stepX > 0) ? mapX : mapX + 1;
@@ -3236,6 +3367,33 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
 
         WALL_DIST(col) = perpDist;
         if (hr) WALL_DIST(col + 1) = perpDist;
+        /* See-over occlusion clip: the nearest partial band is opaque from its
+         * top edge to the floor, so every background pixel at or below that
+         * edge gets repainted by the overlay. Counter-filling views measured
+         * FILL-BOUND (full-res W:32k vs half-res W:30k at the same pose —
+         * halving the ray count barely moved the pass), so the win is not
+         * casting fewer rays but writing fewer pixels: clamp every background
+         * fill in this column to the rows above the band. The projected band
+         * top costs one HW divide, reused as the overlay's own flh below. */
+        int fg_clip = SCREEN_H;
+        int fg_flh0 = 0;
+        if (fg_n) {
+            fg_flh0 = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
+                                    (uint32_t)fg_t[0]);
+            int fb0 = horizon_y + ((fg_flh0 * eye_h) >> 8);
+            int ft0 = fb0 - ((fg_flh0 * fg_height[0]) >> 8);
+            fg_clip = ft0 < 0 ? 0 : ft0;
+        }
+        /* See-over band with NOTHING behind it (background beyond the fog):
+         * skip the wall draw entirely. This column used to fall through with
+         * perpDist=0x7FFFFFFF, where lineHeight degenerates to 0 and the
+         * draw loop painted EXACTLY ONE ROW of wall texture at the horizon
+         * with an overflowed fog shade — the 1px light band riding the
+         * screen center through every half-height see-over view, immune to
+         * every countertop/light fix because it was neither. (Identified by
+         * palette forensics: the band row decodes as WALL+9 surrounded by
+         * FLOOR+15.) */
+        if (!hit && !partition_hit) goto overlay_pass;
         /* No hard cutoff at MAX_VIEW_DIST — let walls render through
          * fog. The shade ramp clamps them to shade 15 past FOG_RAMP_DIST
          * so they're already fog-colored before they would have popped
@@ -3408,6 +3566,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         int wall_top  = wall_bot - draw_lineHeight;
         int drawStart = wall_top < 0 ? 0 : wall_top;
         int drawEnd   = wall_bot >= SCREEN_H ? SCREEN_H - 1 : wall_bot;
+        if (drawEnd >= fg_clip) drawEnd = fg_clip - 1;   /* band-covered rows */
+        if (drawEnd < drawStart) goto overlay_pass;      /* fully hidden */
 
         /* Black-exit cell (world_map == 2): a solid void wall — the dark
          * doorway you walk through to leave the lobby. Fill the column
@@ -3761,6 +3921,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * see-over case (lobby T-stem); free-standing dividers were promoted to
          * the fast main path above (fg_hit cleared). */
         overlay_pass: ;
+        {
+            uint16_t ovl_t0 = fg_n ? prof_frt_read() : 0;
         if (fg_n) {
             /* The nearest band is the closest solid surface in this column, so
              * the sprite z-buffer must read its depth — otherwise the ceiling
@@ -3774,7 +3936,9 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             fx_t ft  = fg_t[fk];
             int  fht = fg_height[fk];
             int  fst = fg_style[fk], fsd = fg_side[fk];
-            int flh  = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)ft);
+            int flh  = fk ? (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
+                                          (uint32_t)ft)
+                          : fg_flh0;                     /* computed at clip time */
             int fdlh = (flh * fht) >> 8;                /* band height in px */
             if (fdlh > 0) {
                 /* fbot = bottom edge of the band: the partial sits on the
@@ -3783,6 +3947,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 int ftop = fbot - fdlh;
                 int fds  = ftop < 0 ? 0 : ftop;
                 int fde  = fbot >= SCREEN_H ? SCREEN_H - 1 : fbot;
+                if (fk && fde >= fg_clip) fde = fg_clip - 1;  /* behind near band */
                 /* Shade: distance ramp + uniform + N/S side-shade, then cell-
                  * light cap — matching the wall pass exactly so the arm reads
                  * one step darker than the (E/W-facing) stem, not the same. */
@@ -3794,14 +3959,12 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 fsh += 1;
                 if (fsd) fsh += SIDE_SHADE;
                 if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
-                int flitcap = SHADE_LEVELS - 1;
                 {
                     int lx = FX_INT(px + FX_MUL(ft, rayDirX));
                     int ly = FX_INT(py + FX_MUL(ft, rayDirY));
                     if ((unsigned)lx < (unsigned)MAP_W && (unsigned)ly < (unsigned)MAP_H) {
                         int lit = CELL_LIGHT(ly, lx);
-                        if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap;
-                                   flitcap = cap; }
+                        if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap; }
                     }
                 }
                 /* Texture + detail (spotted dots fade with distance). */
@@ -3853,7 +4016,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 int ftex_end = (fbot - fbase_h) - 1;     /* texture above, molding below */
                 if (ftex_end > fde) ftex_end = fde;
                 int fmask = fth - 1;
-                fx_t fstep = ((fx_t)(fth * ftly) << FX_SHIFT) / fdlh;
+                fx_t fstep = (fx_t)divu_u32((uint32_t)((fth * ftly) << FX_SHIFT),
+                                            (uint32_t)fdlh);
                 fx_t fpos  = (fx_t)(fds - ftop) * fstep;
                 uint8_t *fp = (uint8_t *)fb + col + fds * SCREEN_W;
                 int y = fds;
@@ -3874,66 +4038,96 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     fp += SCREEN_W;
                 }
 
-                /* COUNTERTOP: the slab's top is a FLAT HORIZONTAL PLANE at
-                 * height fht, drawn the way the floor and crawl-ceiling
-                 * passes draw planes: walk screen rows upward from the
-                 * band's top edge; every row maps to ONE distance on the
-                 * plane; sample the world point along this ray and lay
-                 * wood while the point stays inside the slab's footprint
-                 * (thickness band x run extent). Self-bounding — it cannot
-                 * paint where the counter isn't, so there is no entry/exit
-                 * depth math, no end clip, no grazing special case. */
+                /* COUNTERTOP as a bounded strip. Entry = the band's own top
+                 * edge (attached by construction); exit = the ray's chord out
+                 * of the slab footprint — ray-box exit across the thickness
+                 * (one HW divide) vs out the run's end (one HW divide). This
+                 * is geometrically IDENTICAL to sampling the plane per row,
+                 * but with no per-row division: the sampled loop cost several
+                 * whole frame budgets when a counter filled the view (the
+                 * half-height sluggishness), and its brightness-capped far
+                 * rows painted the light seam floating in the fog. The far
+                 * end now fogs dark on the wall ramp like everything else. */
                 if (fht < eye_h) {
-                    int   fax   = fg_ax[fk];
-                    fx_t  linew = fg_line[fk];
-                    int   eh    = eye_h - fht;        /* eye height over the plane */
-                    int   ry    = (ftop <= fde ? ftop : fde) - 1;
-                    uint8_t *cp = (uint8_t *)fb + col + ry * SCREEN_W;
-                    for (; ry > horizon_y; ry--, cp -= SCREEN_W) {
-                        /* Row -> plane distance: row = horizon + flh*eh/256
-                         * with flh = SCREEN_H/d, so d = SCREEN_H*256 /
-                         * ((row-horizon)*256/eh). Integer, one HW divide. */
-                        int flh_r = ((ry - horizon_y) << 8) / eh;
-                        if (flh_r <= 0) break;
-                        fx_t d = (fx_t)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
-                                                (uint32_t)flh_r);
-                        fx_t wx = px + FX_MUL(d, rayDirX);
-                        fx_t wy = py + FX_MUL(d, rayDirY);
-                        fx_t un = (fax ? wy : wx) - linew;
-                        fx_t uu = fax ? wx : wy;
-                        if (un < -fg_fo[fk] ||
-                            un > PART_HALF_THICK * 2 - fg_fo[fk] ||
-                            uu < fg_ua[fk] || uu > fg_ub[fk]) break;
-                        /* Shade: the wall fog ramp at this ROW's distance +
-                         * the sampled cell's light cap — the top fades and
-                         * lights exactly like the world around it. */
-                        int ts;
-                        if (d < FX(2.5)) ts = (int)((d * 2) / FX(2.5));
-                        else { fx_t past = d - FX(2.5);
-                               fx_t span = FOG_RAMP_DIST - FX(2.5);
-                               ts = 2 + (int)((past * 13) / span); }
-                        ts += 1;
-                        /* The top belongs to THIS counter: inherit the band's
-                         * own light cap instead of sampling whatever cell the
-                         * far rows round into — at long range those samples
-                         * drift into unlit cells behind the counter and the
-                         * top went fog-black against a dark wall (the
-                         * "floating line over a gap" long-view artifact).
-                         * Bound the fade near the face shade so the top always
-                         * reads attached. */
-                        if (ts > flitcap) ts = flitcap;
-                        if (ts > fsh + 4) ts = fsh + 4;
-                        if (ts > SHADE_LEVELS - 1) ts = SHADE_LEVELS - 1;
-                        {
-                            int w = ts >> 1;              /* shade 0..15 -> wood 0..7 */
-                            uint8_t wood = (uint8_t)(WOODTOP_BASE + w);
-                            if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
+                    int  fax   = fg_ax[fk];
+                    fx_t dirU  = fax ? rayDirX : rayDirY;   /* along the run  */
+                    fx_t dirN  = fax ? rayDirY : rayDirX;   /* across         */
+                    fx_t adirN = FX_ABS(dirN), adirU = FX_ABS(dirU);
+                    fx_t uw  = fax ? (px + FX_MUL(ft, rayDirX))
+                                   : (py + FX_MUL(ft, rayDirY));
+                    fx_t un0 = (fax ? (py + FX_MUL(ft, rayDirY))
+                                    : (px + FX_MUL(ft, rayDirX))) - fg_line[fk];
+                    /* Across-depth from the entry point to the exit face. */
+                    fx_t depN = (dirN >= 0)
+                        ? (PART_HALF_THICK * 2 - fg_fo[fk]) - un0
+                        : un0 + fg_fo[fk];
+                    if (depN < 0) depN = 0;
+                    fx_t rem = (dirU >= 0) ? (fg_ub[fk] - uw) : (uw - fg_ua[fk]);
+                    if (rem < 0) rem = 0;
+                    fx_t dtn = (adirN > 64) ? fx_div_hw(depN, adirN) : (fx_t)FX(12);
+                    fx_t dte = (adirU > 64) ? fx_div_hw(rem,  adirU) : (fx_t)FX(12);
+                    fx_t dt  = dtn < dte ? dtn : dte;
+                    /* LIP clamp — the build-127 look. The physically-true chord
+                     * runs the counter's whole length into the fog, rendering a
+                     * wrong-contrast band along the top (bright over dark fog,
+                     * dark over bright walls: THE seam). The approved read is a
+                     * thin wood lip at the front edge with the subtle gradient;
+                     * the rest of the top belongs to the scene behind it. */
+                    if (dt > FX(0.35)) dt = FX(0.35);
+                    if (dt > 0) {
+                        int flh_b = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
+                                                  (uint32_t)(ft + dt));
+                        int rowB = horizon_y + ((flh_b * (eye_h - fht)) >> 8);
+                        int cs0 = rowB < 0 ? 0 : rowB;
+                        int ce0 = (ftop <= fde ? ftop : fde) - 1;
+                        if (ce0 >= SCREEN_H) ce0 = SCREEN_H - 1;
+                        if (fk && ce0 >= fg_clip) ce0 = fg_clip - 1;
+                        if (cs0 <= ce0) {
+                            int s0 = fsh;                 /* front edge shade */
+                            int s1;                       /* back edge: wall fog ramp */
+                            {
+                                fx_t tb = ft + dt;
+                                if (tb < FX(2.5)) s1 = (int)((tb * 2) / FX(2.5));
+                                else { fx_t past = tb - FX(2.5);
+                                       fx_t span = FOG_RAMP_DIST - FX(2.5);
+                                       s1 = 2 + (int)((past * 13) / span); }
+                                s1 += 1;
+                                /* The far end FOGS like the walls do — no
+                                 * brightness cap here: capping it near the
+                                 * band's shade is what painted the bright
+                                 * seam floating over black fog. */
+                                if (s1 > SHADE_LEVELS - 1) s1 = SHADE_LEVELS - 1;
+                                if (s1 < s0) s1 = s0;
+                            }
+                            int rows  = ce0 - cs0;
+                            int sfx   = s1 << 8;          /* back (top) -> front */
+                            /* s1 >= s0 by the clamp above; negate the unsigned
+                             * HW quotient instead of a signed soft divide. */
+                            int sstep = rows > 0
+                                ? -(int)divu_u32((uint32_t)((s1 - s0) << 8),
+                                                 (uint32_t)rows) : 0;
+                            uint8_t *cp = (uint8_t *)fb + col + cs0 * SCREEN_W;
+                            for (int cy2 = cs0; cy2 <= ce0; cy2++) {
+                                int w = sfx >> 9;         /* shade 0..15 -> wood 0..7 */
+                                if (w < 0) w = 0; else if (w > 7) w = 7;
+                                uint8_t wood = (uint8_t)(WOODTOP_BASE + w);
+                                if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
+                                cp += SCREEN_W; sfx += sstep;
+                            }
                         }
                     }
                 }
             }
         }
+            if (fg_n) ovl_acc += (uint16_t)(prof_frt_read() - ovl_t0);
+        }
     }
+    if (col_start == 0) {              /* primary half only: HUD reads these */
+        prof_dda_steps = (uint16_t)dda_steps;
+        prof_dda_fat   = (uint16_t)dda_fat;
+        prof_pass_ovl  = (uint16_t)ovl_acc;
+    }
+
 }
 
 /* The other tex_pos reference in this file is in the old fixed-split
@@ -4012,10 +4206,10 @@ void raycast_render(void) {
      * the on-screen T: readout. EMA (7/8 + 1/8) smooths it so AUTO reacts over a
      * few frames, not to one-frame spikes. */
     static uint16_t frame_prev_frt = 0;
-    static uint32_t frame_ema = 36000;   /* ~F:20 seed so AUTO doesn't lurch at boot */
+    static uint32_t frame_ema = 9000;    /* ~F:20 seed so AUTO doesn't lurch at boot */
     uint16_t fdraw = (uint16_t)(prof_start - frame_prev_frt);
     frame_prev_frt = prof_start;
-    uint32_t fdelta = (fdraw < 12000) ? (uint32_t)fdraw + 65536u : fdraw;
+    uint32_t fdelta = (fdraw < 3000) ? (uint32_t)fdraw + 65536u : fdraw;
     frame_ema = (frame_ema - (frame_ema >> 3)) + (fdelta >> 3);
 
     /* Resolve the effective wall half-res from the menu mode. Lobby always full.
@@ -4030,9 +4224,10 @@ void raycast_render(void) {
         uint8_t mode = SHARED_UC->wall_res_mode;
         if      (mode == 0) eff_hr = 0;
         else if (mode == 1) eff_hr = 1;
+        else if (mode == 3) eff_hr = 0;   /* SERIAL diagnostic: full res */
         else {
-            if      (frame_ema > 54000) auto_hr = 1;   /* slower than ~F:13.3 → half */
-            else if (frame_ema < 45000) auto_hr = 0;   /* faster than ~F:16   → full */
+            if      (frame_ema > 13500) auto_hr = 1;   /* slower than ~F:13.3 → half */
+            else if (frame_ema < 11250) auto_hr = 0;   /* faster than ~F:16   → full */
             eff_hr = auto_hr;
         }
     }
@@ -4085,20 +4280,43 @@ void raycast_render(void) {
         int h = (int)prof_primary_half_ticks;            /* last frame, primary  */
         int s = (int)SHARED_UC->secondary_render_ticks;  /* last frame, secondary */
         int sum = h + s;
-        if (sum > 2000) {                                /* valid FRT reading */
+        if (sum > 500) {                                 /* valid FRT reading */
             int shift = ((h - s) * SCREEN_W) / (sum << 1);  /* full balancing step */
             shift >>= 1;                                 /* damp to avoid oscillation */
             if      (shift >  16) shift =  16;
             else if (shift < -16) shift = -16;
             split -= shift;                              /* h>s: primary overloaded -> shrink */
-            if      (split < 64)            split = 64;
-            else if (split > SCREEN_W - 64) split = SCREEN_W - 64;
+            /* Clamp was [64, 256] — but the pinned-split matrix measured a
+             * ~7x per-column cost spread across the screen at counter poses
+             * (leftmost overlay+door columns ~650 ticks/col vs ~94 at the
+             * right), so true balance can want a split well under 64. The
+             * controller kept pushing into the old clamp and stuck there,
+             * one CPU 1.8x busier than the other. 16 keeps the 4-px word
+             * alignment and a nonzero share for each CPU. */
+            if      (split < 16)            split = 16;
+            else if (split > SCREEN_W - 16) split = SCREEN_W - 16;
             split &= ~3;                                 /* clear pass writes 4-px words */
         }
         SHARED_UC->split_col = (uint16_t)split;          /* secondary reads this */
+        prof_split_col = (uint16_t)split;
     }
 
     MARS_SYS_COMM4 = MARS_CMD_HALF;
+
+    /* WALLS=SERL diagnostic: let the secondary finish its whole half BEFORE
+     * the primary draws — zero render overlap, so the primary's per-pass
+     * ticks measure pure work with no cross-CPU framebuffer-bus contention.
+     * Comparing the same pose in FULL vs SERL splits "real per-column cost"
+     * from "the two CPUs stalling each other": identical W in both means the
+     * work is real; W collapsing in SERL convicts the bus. */
+    if (SHARED_UC->wall_res_mode == 3) {
+        while (MARS_SYS_COMM4 != MARS_CMD_NONE) {
+            __asm__ __volatile__("nop\n\tnop\n\tnop\n\tnop\n\t"
+                                 "nop\n\tnop\n\tnop\n\tnop\n\t"
+                                 "nop\n\tnop\n\tnop\n\tnop\n\t"
+                                 "nop\n\tnop\n\tnop\n\tnop");
+        }
+    }
 
     uint16_t pp = prof_frt_read();
     raycast_clear_half(0, split);

@@ -2,10 +2,17 @@
 
 A first-person **Backrooms raycasting engine for the Sega 32X**, written from
 scratch in C and SH-2 assembly. It runs natively on real 32X hardware (and on
-a MiSTer FPGA core) — dual-CPU rendering, a textured DDA raycaster, procedural
-liminal-space level generation, freestanding partition walls, dynamic ceiling
-lighting, a 3D cardboard-box intro rendered live (not a video), crawl/crouch
-with full eye-height perspective, and a settings menu.
+a MiSTer FPGA core) — adaptive load-balanced dual-CPU rendering, a textured DDA
+raycaster, procedural liminal-space level generation, first-class **slab
+partitions** (full-height dividers, half-height cubicle walls, and wood
+countertops you can see over), dynamic ceiling lighting, a 3D cardboard-box
+intro rendered live (not a video), crawl/crouch with full eye-height
+perspective, and a settings menu.
+
+It also ships a **browser-based level editor** with a first-person walk
+preview, and a **community-map pipeline**: design a map, submit it as a GitHub
+pull request, and a merge auto-cuts a playable ROM release — no toolchain
+required. See [Level editor & community maps](#level-editor--community-maps).
 
 > **About the repo name:** this started life as a generic "32X builder" and the
 > name stuck — it's really a Backrooms raycaster now. The name stays so existing
@@ -32,7 +39,9 @@ and deferred work lives in **[ROADMAP.md](ROADMAP.md)**.
 |---|---|
 | `sh_src/` | **The engine.** SH-2 code for both CPUs: raycaster (`raycast.c`), 3D box intro (`box3d.c`), primary/secondary entry points (`m_main.c`, `s_main.c`), shared cross-CPU state (`shared.h`/`.c`), menu, font, procgen, sound, and baked asset headers (`*_tex.h`, `box_model.h`, etc.). |
 | `md_src/` | Genesis-side **MC68000** code (`md_main.c`, boot/startup `.s`, linker script). The 32X needs both a 68000 and an SH-2 program. |
-| `tools/` | Python **asset bakers** — convert PNG/WAV/Blender output into the committed C headers (`bake_wall.py`, `bake_hero.py`, `wav_to_pwm.py`, `export_box.py`, `gen_backrooms_map.py`, …). |
+| `tools/` | Python **asset bakers** — convert PNG/WAV/Blender output into the committed C headers (`bake_wall.py`, `bake_hero.py`, `wav_to_pwm.py`, `export_box.py`, `gen_backrooms_map.py`, …) — plus the map codegen/lint (`gen_maps.py`, `lint_maps.py`, `mapfmt.py`). |
+| `tools/map-editor/` | The **web level editor** (Flask + canvas): top-down authoring, first-person walk preview, resource-budget checks, and the community-PR submit flow. |
+| `maps/` | Level `.map` files — `core/` (protected canon) and `community/` (contributor submissions). Compiled into the ROM by `gen_maps.py`. |
 | `scripts/` | **Blender** generators for the 3D cardboard-box cinematic + hero splash (`genbox.py`, `genhero.py`). |
 | `models/`, `sound/`, `images/` | Source art/audio the bakers consume. |
 | `rom/` | Committed `.32x` release snapshots (built artifacts, intentionally tracked). |
@@ -137,8 +146,22 @@ buttons). Built around hold-modifiers rather than toggles:
 | **A** | Sprint (hold) |
 | **X** | Crawl / crouch (hold) — eye drops to the floor, full crawl perspective |
 | **C** | Look mode (hold); ↑ / ↓ tilt the gaze up / down while held |
-| **START** | Settings menu (ambience / footstep volume) |
-| **MODE** | Toggle on-screen debug metrics (X/Y/A, timers, profiler) — off by default |
+| **A** | Interact — open the EXIT door when you're standing at it |
+| **START** | Settings menu (ambience / footstep volume, VISUALS tab) |
+
+**MODE is a modifier** (held with a second button), so the debug tools stay out
+of the way by default:
+
+| Combo | Action |
+|---|---|
+| **MODE + X** | Cycle wall resolution: FULL → HALF → AUTO → SERL (diagnostic) |
+| **MODE + Y** | Toggle the on-screen profiler (frame/render timers, per-pass ticks) |
+| **MODE + B** | Cycle the automap overlay |
+| **MODE + Z** | Controller-input tester (raw pad register — for diagnosing emulator key binds) |
+
+`WALLS: AUTO` (the default) measures frame time and drops to half-res only when
+a scene gets heavy, so the image stays crisp when it can afford to. `SERL`
+serializes the two CPUs for contention-free profiling and is intentionally slow.
 
 ---
 
@@ -162,17 +185,50 @@ After regenerating any header, rebuild with `make`.
 
 ---
 
+## Level editor & community maps
+
+The engine reads its levels from `.map` files that compile into the ROM, and
+there's a full **web editor** for authoring them — a top-down grid editor plus
+a first-person **walk preview** that renders in the ROM's real palette and
+textures, so you can test a level in the browser before building anything.
+
+- **Try it:** [backrooms-32x-project.fly.dev](https://backrooms-32x-project.fly.dev/)
+  (hosted, read-only — your work lives in your browser; use **Export** to save a
+  `.map` to disk, or **Submit** to open a pull request).
+- **Run it locally:** `cd tools/map-editor && pip install -r requirements.txt &&
+  python3 app.py` — the local instance saves maps into `maps/community/`.
+
+Editor features: grid/partition/decal/crawlspace/lights/spawn layers, partition
+shape presets (counter, L, U, booth), a universal ✕ delete tool, and a live
+**resource budget** panel that shows how many partitions / decals / crawl runs a
+map uses against the engine's limits — with a **⚙ Optimize** button that
+losslessly merges redundant geometry. You learn a map is over budget *while
+building it*, not at submit time.
+
+**Community pipeline:** maps carry a `role` (protected core maps vs. community
+submissions). **Submit to game** opens a pre-filled GitHub PR under your own
+account; CI lints and builds the map, a bot posts a rendered preview, and once a
+maintainer merges it, a GitHub Release with a playable ROM is cut automatically.
+Canonical maps and assets are protected by CODEOWNERS and clone-on-edit, so
+contributions never overwrite the originals.
+
+---
+
 ## Architecture in one paragraph
 
 Two SH-2s split the screen into vertical halves and each renders its own
 clear + ceiling grid + carpet + walls in parallel, syncing once per frame
-(one COMM4 doorbell) before sprites and lighting. Cross-CPU state lives in
-SDRAM accessed through the cache-through alias (`addr | 0x20000000`) so neither
-CPU sees stale cache. The raycaster is a textured DDA with LOD texture pop-in,
-flat per-row floor/ceiling shading, freestanding "partition" wallpaper dividers,
-look-up/down via a cheap y-shear, and variable eye height for crouch/crawl. The
-hot wall-pixel loop is hand-written SH-2 assembly. See **[DEVLOG.md](DEVLOG.md)**
-and **[ROADMAP.md](ROADMAP.md)** for the full story.
+(one COMM4 doorbell) before sprites and lighting. The split column is
+**adaptively load-balanced** each frame from measured per-half render time, so
+uneven scenes don't leave one CPU idling. Cross-CPU state lives in SDRAM
+accessed through the cache-through alias (`addr | 0x20000000`) so neither CPU
+sees stale cache. The raycaster is a textured DDA with LOD texture pop-in, flat
+per-row floor/ceiling shading, and **first-class slab partitions** — thin walls
+that live on cell edges, rasterized to per-edge flags with a directional
+proximity gate so the expensive end-cap/recovery math runs only where a slab end
+can actually be hit. Look-up/down is a cheap y-shear; eye height varies for
+crouch/crawl. The hot wall-pixel loop is hand-written SH-2 assembly. See
+**[DEVLOG.md](DEVLOG.md)** and **[ROADMAP.md](ROADMAP.md)** for the full story.
 
 ---
 

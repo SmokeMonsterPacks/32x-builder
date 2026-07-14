@@ -189,8 +189,12 @@ window.RC = (function () {
     if (pos && !neg) return -PT_HALF;
     return 0;
   }
-  function partitionHit(rx, ry, maxd) {
-    const parts = window.ME.model.partitions; let best = null;
+  /* ALL partitions the ray crosses within maxd (nearest face per partition),
+   * sorted FAR -> NEAR for painter's-order overlay. Returning only the nearest
+   * (as before) meant a half-height counter erased every partition behind it;
+   * the engine keeps and layers the crossings, so we do too. */
+  function partitionHits(rx, ry, maxd) {
+    const parts = window.ME.model.partitions; const out = [];
     for (const p of parts) {
       const dx = p.x2 - p.x1, dy = p.y2 - p.y1, len = Math.hypot(dx, dy) || 1;
       const ux = dx / len, uy = dy / len;              // along the run
@@ -202,17 +206,22 @@ window.RC = (function () {
       const ax = cxL + nx, ay = cyL + ny, bx = cx1 + nx, by = cy1 + ny;   // thin box:
       const cx2 = cx1 - nx, cy2 = cy1 - ny, ex = cxL - nx, ey = cyL - ny; // 2 faces + 2 caps
       const edges = [[ax, ay, bx, by], [bx, by, cx2, cy2], [cx2, cy2, ex, ey], [ex, ey, ax, ay]];
+      let best = null;                                 // nearest face of THIS partition
       for (const e of edges) {
         const h = raySeg(px, py, rx, ry, e[0], e[1], e[2], e[3]);
         if (h && h.dist < maxd && (!best || h.dist < best.dist)) {
           const hx = px + rx * h.dist, hy = py + ry * h.dist;
           const u = ((hx - p.x1) * dx + (hy - p.y1) * dy) / (len * len);   // along the divider
+          const hv = (window.ME.reg.partition.height[p.height] | 0);
           best = { dist: h.dist, side: h.side, style: p.style, height: p.height,
+                   hfrac: hv > 0 ? hv / 256 : 1,
                    u: u, seg: p, len: len, shift: sh, ux: ux, uy: uy };
         }
       }
+      if (best) out.push(best);
     }
-    return best;
+    out.sort((a, b) => b.dist - a.dist);               // far -> near (painter's order)
+    return out;
   }
   /* Countertop top: the flat horizontal wood plane capping a half/low
    * partition, drawn the crawl-ceiling way — walk screen rows up from the
@@ -222,21 +231,21 @@ window.RC = (function () {
   function drawCountertop(data, x, ph, hfrac, bandTopY, dirRx, dirRy) {
     const B = A().bases, P = A().palette;
     const woodBase = B.WOODTOP_BASE; if (woodBase === undefined) return;
-    const eh = eyeH; if (hfrac >= (1 - 1e-3) || hfrac <= eh) return;  // top must be below the eye
+    const eh = eyeH; if (hfrac >= eh) return;   // top only visible when it sits BELOW the eye
     const seg = ph.seg, sh = ph.shift, ux = ph.ux, uy = ph.uy;
     const px0 = -uy, py0 = ux;
     const lineX = (seg.x1 + px0 * sh), lineY = (seg.y1 + py0 * sh);   // a point on the centerline
     const ua = 0, ub = ph.len;                                        // run extent (param along u)
     const sl1 = SL() - 1;
     for (let y = bandTopY - 1; y > MID; y--) {
-      const d = (eh - hfrac) * H / (MID - y);          // row -> distance on the hfrac plane
+      const d = (eh - hfrac) * H / (y - MID);          // row (below horizon) -> distance on the hfrac plane
       if (d <= 0) break;
       const wx = px + dirRx * d, wy = py + dirRy * d;
       const un = (wx - lineX) * px0 + (wy - lineY) * py0;              // perpendicular offset
       const uu = (wx - seg.x1) * ux + (wy - seg.y1) * uy;             // along the run
       if (un < -PT_HALF || un > PT_HALF || uu < ua || uu > ub) break; // left the footprint
-      let s = shadeIdx(d, 0, lit(Math.floor(wx), Math.floor(wy)));
-      if (s > 7) s = 7;                                 // wood ramp is 8 entries
+      let s = shadeIdx(d, 0, lit(Math.floor(wx), Math.floor(wy))) >> 1;   // 16 levels -> 8-entry wood ramp
+      if (s > 4) s = 4; if (s < 0) s = 0;   // stay in the BROWN range (6-7 are grey), matching the ROM
       const c = P[woodBase + s] || [0, 0, 0];
       const o = (y * W + x) * 4;
       data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
@@ -353,49 +362,62 @@ window.RC = (function () {
       }
       let dist = side === 0 ? sdX - ddx : sdY - ddy; if (dist < 0.02) dist = 0.02;
 
-      let hfrac = 1, voidCol = false, tex = null, baseIdx = 0, distShade = 0, tu = 0;
-      const ph = partitionHit(rx, ry, dist);
-      if (ph) {
-        dist = ph.dist < 0.02 ? 0.02 : ph.dist;
-        tex = ph.style === 'spotted' ? A().textures.partition : A().textures.wall;
-        baseIdx = ph.style === 'spotted' ? B.PARTITION_BASE : B.WALL_BASE;
-        distShade = shadeIdx(dist, ph.side === 1 ? 2 : 0, 0);
-        const segLen = Math.hypot(ph.seg.x2 - ph.seg.x1, ph.seg.y2 - ph.seg.y1) || 1;
-        tu = Math.floor(((ph.u * segLen * TILE) % 1) * tex.w);
-        const hv = (window.ME.reg.partition.height[ph.height] | 0);
-        if (hv > 0) hfrac = hv / 256;      /* registry-driven: low=0.75, half=0.375 */
-      } else if (val === 2) {
-        voidCol = true;                            // black-exit void
-      } else {
-        tex = A().textures.wall;
-        baseIdx = B.WALL_BASE;
-        distShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
-        const wallX = side === 0 ? (py + dist * ry) : (px + dist * rx);
-        tu = Math.floor((((wallX - Math.floor(wallX)) * TILE) % 1) * tex.w);
-      }
-
-      const eh = eyeH, sl1 = SL() - 1;
+      const eh = eyeH, sl1 = SL() - 1, P = A().palette;
       zbuf[x] = dist;                              // depth for sprite z-test
-      const wallBot = MID + eh * H / dist, wallTop = MID - (1 - eh) * H / dist;
-      const lineH = wallBot - wallTop;
-      const y0 = Math.max(0, Math.ceil(wallBot - lineH * hfrac));
-      const y1 = Math.min(H, Math.ceil(wallBot));
-      const P = A().palette;
-      for (let y = y0; y < y1; y++) {
-        const o = (y * W + x) * 4;
-        let c;
-        if (voidCol || !tex) { c = [0, 0, 0]; }
-        else {
-          const vf = (y - wallTop) / lineH;
-          const tv = Math.floor((((vf * TILE) % 1 + 1) % 1) * tex.h);
-          let s = distShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
-          c = P[baseIdx + s] || [0, 0, 0];
+
+      /* ── BACKGROUND: the DDA wall (or black void), full height. A partial
+       * partition is drawn as an OVERLAY on top of this (see-over), matching
+       * the engine — so the wall behind a half-height counter still shows
+       * above the band instead of blanking to floor/ceiling. */
+      {
+        const wallBot = MID + eh * H / dist, wallTop = MID - (1 - eh) * H / dist;
+        const lineH = wallBot - wallTop;
+        const y0 = Math.max(0, Math.ceil(wallTop)), y1 = Math.min(H, Math.ceil(wallBot));
+        if (val === 2) {
+          for (let y = y0; y < y1; y++) { const o = (y * W + x) * 4; data[o] = data[o + 1] = data[o + 2] = 0; data[o + 3] = 255; }
+        } else {
+          const tex = A().textures.wall, baseIdx = B.WALL_BASE;
+          const bgShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
+          const wallX = side === 0 ? (py + dist * ry) : (px + dist * rx);
+          const tu = Math.floor((((wallX - Math.floor(wallX)) * TILE) % 1) * tex.w);
+          for (let y = y0; y < y1; y++) {
+            const vf = (y - wallTop) / lineH;
+            const tv = Math.floor((((vf * TILE) % 1 + 1) % 1) * tex.h);
+            let s = bgShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
+            const c = P[baseIdx + s] || [0, 0, 0];
+            const o = (y * W + x) * 4; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+          }
         }
-        data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
       }
 
-      /* Countertop: a half/low partition shows its flat wood top above the band. */
-      if (ph && hfrac < 1) drawCountertop(data, x, ph, hfrac, y0, rx, ry);
+      /* ── FOREGROUND: every partition slab the ray crosses, drawn FAR->NEAR
+       * over the background so a near half-height counter doesn't erase the
+       * partitions behind it (their tops still show above its band). */
+      const phs = partitionHits(rx, ry, dist);
+      for (const ph of phs) {
+        const pdist = ph.dist < 0.02 ? 0.02 : ph.dist;
+        const tex = ph.style === 'spotted' ? A().textures.partition : A().textures.wall;
+        const baseIdx = ph.style === 'spotted' ? B.PARTITION_BASE : B.WALL_BASE;
+        const pShade = shadeIdx(pdist, ph.side === 1 ? 2 : 0, 0);
+        const segLen = Math.hypot(ph.seg.x2 - ph.seg.x1, ph.seg.y2 - ph.seg.y1) || 1;
+        const tu = Math.floor(((ph.u * segLen * TILE) % 1) * tex.w);
+        const hfrac = ph.hfrac;                    // low=0.75, half=0.375, full=1
+        const pBot = MID + eh * H / pdist, pTop = MID - (1 - eh) * H / pdist;
+        const pLineH = pBot - pTop;
+        const py0 = Math.max(0, Math.ceil(pBot - pLineH * hfrac)), py1 = Math.min(H, Math.ceil(pBot));
+        for (let y = py0; y < py1; y++) {
+          const vf = (y - pTop) / pLineH;
+          const tv = Math.floor((((vf * TILE) % 1 + 1) % 1) * tex.h);
+          let s = pShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
+          const c = P[baseIdx + s] || [0, 0, 0];
+          const o = (y * W + x) * 4; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+        }
+        if (hfrac < 1) drawCountertop(data, x, ph, hfrac, py0, rx, ry);
+        /* Nearest partition (partial OR full) is the column's closest solid, so
+         * it sets the sprite depth — matching the engine (WALL_DIST = fg_t[0]),
+         * so the neanderthal behind a counter is occluded, not printed on top. */
+        if (pdist < zbuf[x]) zbuf[x] = pdist;
+      }
 
       /* Crawlspace mouth header (lintel): the solid band from the lowered slab
        * up to the full ceiling at the crawl boundary — makes the dropped ceiling

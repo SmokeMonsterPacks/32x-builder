@@ -28,7 +28,7 @@ void s_main(void) {
     /* Secondary-side FRT init for profiling parity with primary. Φ/32
      * prescaler = ~720kHz, 1.39μs per tick — same as m_main.c. */
     SH2_FRT_TIER  = 0x01;
-    SH2_FRT_TCR   = 0x01;
+    SH2_FRT_TCR   = 0x02;   /* Phi/128 ~= 180kHz: 364ms before wrap */
     SH2_FRT_FTCSR = 0;
 
     for (;;) {

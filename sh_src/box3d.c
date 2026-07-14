@@ -575,7 +575,7 @@ void box3d_play_fall(void) {
 
 void box3d_play(void) {
 #if BOX_PROFILE
-    SH2_FRT_TIER = 0x01; SH2_FRT_TCR = 0x01; SH2_FRT_FTCSR = 0;  /* Phi/32 */
+    SH2_FRT_TIER = 0x01; SH2_FRT_TCR = 0x02; SH2_FRT_FTCSR = 0;  /* Phi/128 */
 #endif
     build_wear_lut();        /* CPU precompute (was in load_palette) */
     uint16_t prev_pad = 0xFFFF;

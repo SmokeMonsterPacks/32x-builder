@@ -157,6 +157,23 @@ def resolve(path, reg):
     role = m.get("role", "community")
     if role not in roles:
         die("%s: unknown role %r (valid: %s)" % (base, role, ", ".join(sorted(roles))))
+    # Transitive flush: runs sharing a LINE align with any flushed run on it.
+    # (The lobby spotted run tees into a 2-thick wall — both-sided, so its own
+    # scan stays centered — but it is collinear with the flushed chevron run;
+    # without propagation the two faces jog 0.05 at the gap and the spotted
+    # seam misses the wall corner.)
+    lineflush = {}
+    for (ex, ey, fl) in pedges:
+        key = ("n", ey) if (fl & 0x40) else ("w", ex)
+        if fl & 0x30:
+            lineflush[key] = fl & 0x30
+    if lineflush:
+        pedges = [
+            (ex, ey,
+             (fl | lineflush.get(("n", ey) if (fl & 0x40) else ("w", ex), 0))
+             if not (fl & 0x30) else fl)
+            for (ex, ey, fl) in pedges
+        ]
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
             "pedges": pedges,
             "next": (m.get("next") or "").strip(),

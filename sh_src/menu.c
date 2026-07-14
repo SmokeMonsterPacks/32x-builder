@@ -135,7 +135,7 @@ void menu_update(uint16_t pad) {
          * VERT (vertical half-res) and METRICS overlay are flips. */
         if (menu_row == 1) {
             int m = (int)SHARED_UC->wall_res_mode + dir;
-            SHARED_UC->wall_res_mode = (uint8_t)((m + 3) % 3);
+            SHARED_UC->wall_res_mode = (uint8_t)((m + 4) % 4);
         } else if (menu_row == 2) SHARED_UC->vres_half ^= 1;
         else if (menu_row == 3) g_metrics_on ^= 1;
     }
@@ -256,8 +256,8 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 48, menu_row == 3, "SHIMMER",
                  (f & LIGHTING_SHIMMER) ? " ON" : "OFF");
     } else if (menu_tab == TAB_VISUALS) {
-        static const char *res_lbl[3] = { "FULL", "HALF", "AUTO" };
-        uint8_t m = SHARED_UC->wall_res_mode; if (m > 2) m = 1;
+        static const char *res_lbl[4] = { "FULL", "HALF", "AUTO", "SERL" };
+        uint8_t m = SHARED_UC->wall_res_mode; if (m > 3) m = 1;
         draw_row(fb, 32, menu_row == 1, "WALLS", res_lbl[m]);
         draw_row(fb, 40, menu_row == 2, "VERT",
                  SHARED_UC->vres_half ? "HALF" : "FULL");
