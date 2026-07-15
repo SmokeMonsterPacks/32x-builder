@@ -269,13 +269,33 @@ typedef struct {
     uint8_t kind;             /* sprite_defs[] index — the billboard's art/dims/base */
 } standup_t;
 
-static const standup_t standups[] = {
+/* Per-map cutouts. Was a const array of ONE — which meant the fixed map's
+ * neanderthal stood in EVERY level (procgen, lobby, every community map) while
+ * authored kind-2 decals were never wired in at all: they landed in decals[],
+ * which only draws things pinned to a wall plane and never collides. So maps
+ * showed a cutout nobody placed and ignored the ones they did. Now populated
+ * per-map by the loaders, like lights. */
+#define MAX_STANDUPS 24
+static standup_t standups[MAX_STANDUPS];
+static int       num_standups = 0;
+/* The fixed map's original cutout, installed by raycast_load_fixed only. */
+static const standup_t fixed_standups[] = {
     /* Neanderthal ~5 cells north of spawn, pulled west to hug the col-15
      * flat wall (x=16 face) so it stands against the wall and leaves the east
      * side of the col-16 corridor walkable. Solid (collides), the "iconic
      * Backrooms cardboard cutout" moment. Audio via the Voyager hello loop. */
     { FX(16.3), FX(23.5), 64,  0, 2 },   /* kind 2 = neanderthal */
 };
+/* Shove state, parallel to standups[]. A cutout you've walked into is ARMED;
+ * a second, deliberate push in that direction tips it over (see player_update).
+ * uint8 each — the secondary reads standups[] for drawing, so both ride the
+ * sprite-cache purge. */
+static uint8_t standup_armed[MAX_STANDUPS];
+static uint8_t standup_down[MAX_STANDUPS];
+static void standups_clear(void) {
+    num_standups = 0;
+    for (int i = 0; i < MAX_STANDUPS; i++) { standup_armed[i] = 0; standup_down[i] = 0; }
+}
 
 /* Wall-mounted decals (currently just the lobby outlet): small billboards
  * anchored at a height fraction z (0=floor, 1=ceiling) instead of the floor.
@@ -532,7 +552,7 @@ uint8_t partition_height[NUM_PARTITIONS_MAX] = {0};
  * The eye eases to CROUCH_EYE(=40) crouched, STAND_EYE(=128) standing. */
 #define CRAWL_PASS_EYE 100
 #define NUM_PARTITIONS num_partitions
-#define NUM_STANDUPS (int)(sizeof(standups) / sizeof(standups[0]))
+#define NUM_STANDUPS num_standups
 
 /* Illuminated drop-ceiling panels (the Backrooms iconic recessed
  * fluorescent panels). Positions are scattered across the map rather
@@ -1204,6 +1224,10 @@ void raycast_load_fixed(void) {
     raycast_stamp_partition_edges();   /* fixed-map dividers go first-class */
     g_lobby_ceiling = 0;
     g_map_lights = 0; g_map_n_lights = 0;   /* procedural grid; drop any custom map's fixtures */
+    /* The original cutout lives here, on the map it was placed for. */
+    standups_clear();
+    for (unsigned i = 0; i < sizeof fixed_standups / sizeof fixed_standups[0]; i++)
+        standups[num_standups++] = fixed_standups[i];
     /* Low-ceiling crawlspace tunnel: mark the long west-edge corridor (column 1,
      * rows 22-26) as low-ceiling cells. Collision, forced-crouch, light culling
      * and the slab render all derive from ceil_h[] now, so this is just "these
@@ -1277,11 +1301,27 @@ void raycast_load_custom(int idx) {
         ceil_h_add_run(m->crawls[i].cx, m->crawls[i].cy,
                        m->crawls[i].dx, m->crawls[i].dy, m->crawls[i].len);
 
-    /* Decals: explicit placements first, then optional auto-helpers. */
+    /* Decals: explicit placements first, then optional auto-helpers. Kind 2 is
+     * a FREE-STANDING cutout, not a wall decal — it belongs in standups[]
+     * (drawn as a billboard, collides). Routing it into decals[] was why
+     * authored neanderthals neither showed nor blocked. */
     num_decals = 0;
-    for (int i = 0; i < m->n_decals && num_decals < 16; i++)
-        decals[num_decals++] = (decal_t){ m->decals[i].x, m->decals[i].y,
-            m->decals[i].z, m->decals[i].axis, m->decals[i].kind };
+    standups_clear();
+    for (int i = 0; i < m->n_decals; i++) {
+        if (m->decals[i].kind == 2) {
+            if (num_standups < MAX_STANDUPS) {
+                standups[num_standups].x            = m->decals[i].x;
+                standups[num_standups].y            = m->decals[i].y;
+                standups[num_standups].facing_angle = m->decals[i].facing;
+                standups[num_standups].silhouette   = 0;
+                standups[num_standups].kind         = m->decals[i].kind;
+                num_standups++;
+            }
+        } else if (num_decals < 16) {
+            decals[num_decals++] = (decal_t){ m->decals[i].x, m->decals[i].y,
+                m->decals[i].z, m->decals[i].axis, m->decals[i].kind };
+        }
+    }
     if (m->place_outlets)   raycast_place_outlets(m->place_outlets);
     if (m->place_exit_door) raycast_place_exit_door();
     g_door_open = g_door_target = 0;
@@ -1402,6 +1442,7 @@ void raycast_load_lobby(void) {
     /* Crawl-under beam shelved — no crawl elements placed for now. */
     g_lobby_ceiling = 1;                  /* hand-authored fluorescent runs */
     g_map_lights = 0; g_map_n_lights = 0;   /* lobby uses its own built-in runs */
+    standups_clear();                       /* no cutout in the lobby */
     ceil_h_clear();                       /* no crawlspaces in the lobby */
     /* Outlet on entrance-R's south face (the photo's right-hand partition),
      * low and right-of-center in the spawn/menu view. Placed FX(0.16) south
@@ -1458,17 +1499,29 @@ static int cell_passable(int x, int y) {
  * cutout), treated as a small axis-aligned box + player radius. Silhouette
  * "watcher" standups stay intangible — they're meant to be a glimpse, not a
  * wall. Makes the cutout a real free-standing obstacle you bump into. */
-#define STANDUP_HALF_THICK FX(0.12)   /* slim box so a 1-cell corridor stays squeezable past */
-static int standup_collides(fx_t px, fx_t py) {
-    fx_t margin = STANDUP_HALF_THICK + PLAYER_RADIUS;
+/* It's a CARDBOARD CUTOUT, so the box is a panel, not a pillar: barely there
+ * along its facing normal, shoulder-wide across. The old box was square
+ * (0.12 both axes -> a 0.74 square with the player radius), which read as an
+ * invisible column and made a 1-cell corridor impassable. Thin-face is both
+ * truer and more uncanny: it stops you dead face-on, but you can slip past
+ * its edge. */
+#define STANDUP_HALF_THICK FX(0.03)   /* cardboard, face-on */
+#define STANDUP_HALF_WIDTH FX(0.20)   /* shoulders, across the panel */
+/* Index of the solid cutout containing (px,py), or -1. */
+static int standup_blocker(fx_t px, fx_t py) {
     for (int i = 0; i < NUM_STANDUPS; i++) {
-        if (standups[i].silhouette) continue;
+        if (standups[i].silhouette || standup_down[i]) continue;  /* toppled = walk over it */
+        /* facing: E0 S64 W128 N192 — N/S facers present their face along Y. */
+        int ns = (standups[i].facing_angle == 64 || standups[i].facing_angle == 192);
+        fx_t mx = (ns ? STANDUP_HALF_WIDTH : STANDUP_HALF_THICK) + PLAYER_RADIUS;
+        fx_t my = (ns ? STANDUP_HALF_THICK : STANDUP_HALF_WIDTH) + PLAYER_RADIUS;
         fx_t dx = px - standups[i].x;
         fx_t dy = py - standups[i].y;
-        if (dx > -margin && dx < margin && dy > -margin && dy < margin) return 1;
+        if (dx > -mx && dx < mx && dy > -my && dy < my) return i;
     }
-    return 0;
+    return -1;
 }
+static int standup_collides(fx_t px, fx_t py) { return standup_blocker(px, py) >= 0; }
 
 static int position_clear(fx_t px, fx_t py) {
     /* Check all 4 corners of the player's bounding box against wall
@@ -1673,12 +1726,34 @@ void player_update(uint16_t pad) {
     }
     }   /* end if (!look_mode) — UP/DOWN handled as look pitch above. */
 
-    /* Axis-separated collision: try X first, then Y. */
+    /* Axis-separated collision: try X first, then Y. Remember which cutout (if
+     * any) refused the move — that's what a second push will tip over. */
+    int shove = -1;
     fx_t newX = player.x + dx;
     if (position_clear(newX, player.y)) player.x = newX;
+    else { int b = standup_blocker(newX, player.y); if (b >= 0) shove = b; }
 
     fx_t newY = player.y + dy;
     if (position_clear(player.x, newY)) player.y = newY;
+    else { int b = standup_blocker(player.x, newY); if (b >= 0) shove = b; }
+
+    /* CARDBOARD, NOT CONCRETE. Walk into a cutout and it stops you dead — the
+     * uncanny beat. Push again, deliberately, in the same direction and it
+     * tips over and you squeeze past. Gated on a fresh press of the movement
+     * input rather than a hold timer, so it's an act of intent and not a
+     * function of how long you leaned (and it can't depend on frame rate). */
+    {
+        static uint16_t prev_move = 0;
+        const uint16_t MOVE_MASK = SEGA_CTRL_UP | SEGA_CTRL_DOWN
+                                 | SEGA_CTRL_LEFT | SEGA_CTRL_RIGHT;
+        uint16_t move = pad & MOVE_MASK;
+        int fresh_push = (move & ~prev_move) != 0;   /* a direction newly pressed */
+        if (shove >= 0) {
+            if (standup_armed[shove] && fresh_push) standup_down[shove] = 1;  /* timber */
+            else standup_armed[shove] = 1;                                    /* first contact */
+        }
+        prev_move = move;
+    }
 
     /* Track walking state and advance bob phase. */
     is_walking = (dx != 0 || dy != 0);
@@ -1743,6 +1818,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
 
     for (int i = 0; i < NUM_STANDUPS; i++) {
+        if (standup_down[i]) continue;      /* shoved over — it's on the floor now */
         fx_t sx = standups[i].x - px;
         fx_t sy = standups[i].y - py;
 
@@ -2075,13 +2151,18 @@ void raycast_draw_sprites(int col_start, int col_end) {
     draw_standups(col_start, col_end);
 }
 
-/* Secondary: drop stale lights[] before drawing sprites. init_lights rebuilds
- * lights[] on the primary at each map load; purge so this CPU re-reads the
- * current map's fixtures instead of a previous level's cached lines. standups[]
- * is const (ROM) and WALL_DIST is cache-through, so neither needs a purge. */
+/* Secondary: drop stale lights[] AND standups[] before drawing sprites. Both
+ * are rebuilt on the primary at each map load, and standup_down[] changes
+ * mid-level when the player shoves a cutout over — without the purge the
+ * secondary would keep drawing a toppled cutout on its half of the screen.
+ * standups[] used to be const (ROM) and needed no purge; it's per-map RAM now.
+ * WALL_DIST stays cache-through. */
 void raycast_purge_sprite_cache(void) {
-    purge_cache_range(lights,      sizeof lights);
-    purge_cache_range(&num_lights, sizeof num_lights);
+    purge_cache_range(lights,        sizeof lights);
+    purge_cache_range(&num_lights,   sizeof num_lights);
+    purge_cache_range(standups,      sizeof standups);
+    purge_cache_range(&num_standups, sizeof num_standups);
+    purge_cache_range(standup_down,  sizeof standup_down);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop

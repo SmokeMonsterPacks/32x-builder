@@ -42,7 +42,7 @@ typedef struct { uint8_t x, y, flags; } cm_pedge_t;
  * above/east). */
 #define CM_PEDGE_FLUSH_LO 0x10
 #define CM_PEDGE_FLUSH_HI 0x20
-typedef struct { fx_t x, y, z; uint8_t axis, kind; }                  cm_decal_t;
+typedef struct { fx_t x, y, z; uint8_t axis, kind, facing; }          cm_decal_t;  /* facing: engine angle (E0 S64 W128 N192); free-standing kinds use it, wall decals ignore it */
 typedef struct { uint8_t cx, cy; int8_t dx, dy; uint8_t len; }        cm_crawl_t;  /* one ceil_h_add_run (dx,dy signed: N/W = -1) */
 typedef struct cm_light_s { uint8_t cx, cy; }                        cm_light_t;  /* authored ceiling fixture, cell coords */
 

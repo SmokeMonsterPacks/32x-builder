@@ -136,7 +136,10 @@ def resolve(path, reg):
         if d["face"] not in face_axis:
             die("%s: unknown face %r" % (base, d["face"]))
         z = d.get("z", kinds[d["kind"]]["z"])
-        decals.append((d["x"], d["y"], z, face_axis[d["face"]], kinds[d["kind"]]["kind"]))
+        # A free-standing billboard has no wall to align to, so `axis` is
+        # meaningless for it — carry the real facing angle instead.
+        decals.append((d["x"], d["y"], z, face_axis[d["face"]],
+                       kinds[d["kind"]]["kind"], facing[d["face"]]))
 
     crawls = []
     for c in m["crawls"]:
@@ -214,8 +217,8 @@ def emit(maps, out_path):
             L.append("};")
         if m["decals"]:
             L.append("static const cm_decal_t %s_decals[] = {" % p)
-            for (x, y, z, ax, kd) in m["decals"]:
-                L.append("    { %s,%s,%s, %d,%d }," % (fxlit(x), fxlit(y), fxlit(z), ax, kd))
+            for (x, y, z, ax, kd, fa) in m["decals"]:
+                L.append("    { %s,%s,%s, %d,%d,%d }," % (fxlit(x), fxlit(y), fxlit(z), ax, kd, fa))
             L.append("};")
         if m["crawls"]:
             L.append("static const cm_crawl_t %s_crawls[] = {" % p)
