@@ -60,6 +60,12 @@ extern uint8_t partition_height[NUM_PARTITIONS_MAX];
  * only when standing (crouch low to crawl under). */
 /* When set, the ceiling uses the lobby's hand-authored fluorescent runs. */
 extern int g_lobby_ceiling;
+/* Authored ceiling fixtures for the loaded map (NULL => procedural grid).
+ * Declared here so the loaders in procgen.c can clear them. cm_light_t comes
+ * from custom_maps.h, which includes this header — forward-declare instead. */
+struct cm_light_s;
+extern const struct cm_light_s *g_map_lights;
+extern uint8_t                  g_map_n_lights;
 /* When set, at least one low-ceiling crawlspace cell exists this map. */
 extern int g_lowceil_active;
 /* Per-cell ceiling height (255 = full open ceiling, lower = crawlspace slab).

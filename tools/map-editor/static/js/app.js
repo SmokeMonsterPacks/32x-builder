@@ -46,14 +46,17 @@ function setLight(cx, cy, add) {
   if (!ME.model.lights) ME.model.lights = [];
   if (cx < 0 || cy < 0 || cx >= ME.model.w || cy >= ME.model.h) return;
   const i = ME.model.lights.findIndex(l => l.cx === cx && l.cy === cy);
-  if (add && i < 0) ME.model.lights.push({ cx, cy });
+  if (add && i < 0) { if (!budgetRoom('lights', 1)) return; ME.model.lights.push({ cx, cy }); }
   else if (!add && i >= 0) ME.model.lights.splice(i, 1);
 }
 function seedLights() {                // the engine's auto-grid as a starting point
   const m = ME.model; m.lights = [];
   for (let my = 1; my < m.h - 1; my += 2)
     for (let mx = 1; mx < m.w - 1; mx += 2)
-      if (gridVal(mx, my) === 0) m.lights.push({ cx: mx, cy: my });
+      if (gridVal(mx, my) === 0) {
+        if (!budgetRoom('lights', 1)) return;      // stop at the engine cap
+        m.lights.push({ cx: mx, cy: my });
+      }
 }
 function bakeOutlets() {               // place_outlets:N -> explicit decals (the engine rule)
   const m = ME.model;
@@ -100,6 +103,7 @@ const BUDGET_ROWS = [
   ['partitions', 'Partitions', 'max_partitions', m => m.partitions.length],
   ['decals',     'Decals',     'max_decals',     m => m.decals.length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
+  ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
 ];
 function budgetCap(capKey) {
   const lim = (ME.reg && ME.reg.limits) || {};

@@ -324,6 +324,9 @@ void procgen_run(uint32_t seed) {
     num_partitions = 0;
     num_decals = 0;                       /* outlet is lobby-only */
     g_lobby_ceiling = 0;                  /* auto-grid ceiling for procgen */
+    /* Procgen has no authored fixtures: clear any left by a custom map, or the
+     * previous map's lights would light this one (init_lights runs after us). */
+    g_map_lights = 0; g_map_n_lights = 0;
     ceil_h_clear();                       /* full ceilings; mark crawlspaces below */
     for (int i = 0; i < NUM_PARTITIONS_MAX; i++) {
         partition_style[i]  = 0;   /* chevron */

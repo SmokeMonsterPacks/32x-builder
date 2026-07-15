@@ -659,9 +659,27 @@ static uint8_t cell_light[MAP_H][MAP_W];
 #define LIT_FOG_CAP     9   /* a lit surface never fogs darker than this (-2 per light level) */
 #define SIDE_SHADE      1   /* N/S-facing faces are this many shades darker (form cue) */
 
+/* Authored ceiling fixtures for the map being loaded, or NULL for "derive the
+ * procedural grid". Set by raycast_load_custom, CLEARED by every other loader
+ * (procgen/fixed/lobby) — a stale pointer here would light the next map with
+ * the previous one's fixtures, the same class of bug as the world_map cache
+ * ghosting. Read by init_lights, which runs from raycast_init AFTER the loader.
+ * Not const-folded: the loaders run before raycast_init on every map change. */
+const struct cm_light_s *g_map_lights   = 0;
+uint8_t                  g_map_n_lights = 0;
+
 static void init_lights(void) {
     num_lights = 0;
-    if (g_lobby_ceiling) {
+    if (g_map_lights && g_map_n_lights) {
+        /* Hand-placed fixtures from the .map — the author's lighting wins and
+         * we do NOT second-guess it: no wall/crawlspace filtering like the
+         * procedural branch does, because "a light there" was a decision. */
+        for (int i = 0; i < g_map_n_lights && num_lights < MAX_LIGHTS; i++) {
+            lights[num_lights].x = FX(g_map_lights[i].cx) + FX(0.5);
+            lights[num_lights].y = FX(g_map_lights[i].cy) + FX(0.5);
+            num_lights++;
+        }
+    } else if (g_lobby_ceiling) {
         /* Hand-authored lobby ceiling: a fixture in every even column
          * (x=2,4,6,8) down rows 2-5 and 7 (skip the entrance row 6) — gives
          * continuous fluorescent runs like the reference photo. */
@@ -1185,6 +1203,7 @@ void raycast_load_fixed(void) {
     }
     raycast_stamp_partition_edges();   /* fixed-map dividers go first-class */
     g_lobby_ceiling = 0;
+    g_map_lights = 0; g_map_n_lights = 0;   /* procedural grid; drop any custom map's fixtures */
     /* Low-ceiling crawlspace tunnel: mark the long west-edge corridor (column 1,
      * rows 22-26) as low-ceiling cells. Collision, forced-crouch, light culling
      * and the slab render all derive from ceil_h[] now, so this is just "these
@@ -1245,6 +1264,11 @@ void raycast_load_custom(int idx) {
      * partitions[] segments (converted by raycast_stamp_partition_edges). */
     num_partitions = 0;
     pedge_build_cells();
+
+    /* Authored fixtures (init_lights reads these when raycast_init runs next).
+     * n_lights == 0 leaves the procedural grid in charge. */
+    g_map_lights   = m->lights;
+    g_map_n_lights = m->n_lights;
 
     /* Ceiling: full everywhere, then the low-ceiling crawl runs. */
     g_lobby_ceiling = m->lobby_ceiling;
@@ -1377,6 +1401,7 @@ void raycast_load_lobby(void) {
     partition_height[2] = 0;   partition_height[3] = 0;
     /* Crawl-under beam shelved — no crawl elements placed for now. */
     g_lobby_ceiling = 1;                  /* hand-authored fluorescent runs */
+    g_map_lights = 0; g_map_n_lights = 0;   /* lobby uses its own built-in runs */
     ceil_h_clear();                       /* no crawlspaces in the lobby */
     /* Outlet on entrance-R's south face (the photo's right-hand partition),
      * low and right-of-center in the spawn/menu view. Placed FX(0.16) south

@@ -17,6 +17,7 @@
 #define CUSTOM_MAP_MAX_DIM    64    /* grid width/height upper bound  */
 #define CUSTOM_DECAL_MAX      16    /* == sizeof decals[] in raycast.c */
 #define CUSTOM_CRAWL_MAX       8    /* == MAX_LOWCEIL_RECTS            */
+#define CUSTOM_LIGHT_MAX     200    /* == MAX_LIGHTS in raycast.c      */
 
 /* POD mirrors of the engine structures — primitives only, so custom_maps.c
  * compiles without seeing decal_t / the partition decor statics. */
@@ -43,6 +44,7 @@ typedef struct { uint8_t x, y, flags; } cm_pedge_t;
 #define CM_PEDGE_FLUSH_HI 0x20
 typedef struct { fx_t x, y, z; uint8_t axis, kind; }                  cm_decal_t;
 typedef struct { uint8_t cx, cy; int8_t dx, dy; uint8_t len; }        cm_crawl_t;  /* one ceil_h_add_run (dx,dy signed: N/W = -1) */
+typedef struct cm_light_s { uint8_t cx, cy; }                        cm_light_t;  /* authored ceiling fixture, cell coords */
 
 typedef struct {
     const char           *name;        /* shown in the menus; keep <= 16 chars  */
@@ -51,6 +53,9 @@ typedef struct {
     const cm_pedge_t     *pedges; uint8_t n_pedges;   /* rasterized partitions */
     const cm_decal_t     *decals; uint8_t n_decals;
     const cm_crawl_t     *crawls; uint8_t n_crawls;
+    /* Authored ceiling fixtures. n_lights == 0 => init_lights() falls back to
+     * its procedural every-other-cell grid (what every map did before). */
+    const cm_light_t     *lights; uint8_t n_lights;
     fx_t                  spawn_x, spawn_y;  uint8_t spawn_angle;
     uint8_t               lobby_ceiling;     /* 0 = auto fixture grid (normal)   */
     uint8_t               place_outlets;     /* >0: raycast_place_outlets(N) too */

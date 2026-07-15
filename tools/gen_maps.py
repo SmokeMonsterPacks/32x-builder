@@ -145,8 +145,17 @@ def resolve(path, reg):
         dx, dy = cdir[c["dir"]]
         crawls.append((c["cx"], c["cy"], dx, dy, c["len"]))
 
+    # Authored ceiling fixtures. Empty list => the engine falls back to its
+    # procedural grid (init_lights), which is what every map did before this.
+    lights = []
+    for g_ in m["lights"]:
+        cx, cy = int(g_["cx"]), int(g_["cy"])
+        if not (0 <= cx < w and 0 <= cy < h):
+            die("%s: light %d,%d is outside the %dx%d grid" % (base, cx, cy, w, h))
+        lights.append((cx, cy))
+
     for cap, lst in (("max_partitions", parts), ("max_decals", decals),
-                     ("max_crawl_runs", crawls)):
+                     ("max_crawl_runs", crawls), ("max_lights", lights)):
         if len(lst) > lim[cap]:
             die("%s: %d items exceed %s %d" % (base, len(lst), cap, lim[cap]))
     if len(pedges) > 255:
@@ -177,7 +186,7 @@ def resolve(path, reg):
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
             "pedges": pedges,
             "next": (m.get("next") or "").strip(),
-            "decals": decals, "crawls": crawls, "spawn": spawn,
+            "decals": decals, "crawls": crawls, "lights": lights, "spawn": spawn,
             "lobby_ceiling": m["options"]["lobby_ceiling"],
             "place_outlets": m["options"]["place_outlets"],
             "place_exit_door": m["options"]["place_exit_door"],
@@ -213,6 +222,11 @@ def emit(maps, out_path):
             for (cx, cy, dx, dy, ln) in m["crawls"]:
                 L.append("    { %d,%d,%d,%d,%d }," % (cx, cy, dx, dy, ln))  # dx,dy signed
             L.append("};")
+        if m["lights"]:
+            L.append("static const cm_light_t %s_lights[] = {" % p)
+            for (cx, cy) in m["lights"]:
+                L.append("    { %d,%d }," % (cx, cy))
+            L.append("};")
         L.append("")
     if maps:
         L.append("const custom_map_t custom_maps[] = {")
@@ -222,8 +236,9 @@ def emit(maps, out_path):
             pedges = ("%s_pedges,%d" % (p, len(m["pedges"]))) if m["pedges"] else "0,0"
             decals = ("%s_decals,%d" % (p, len(m["decals"]))) if m["decals"] else "0,0"
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
-            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
-                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls,
+            lights = ("%s_lights,%d" % (p, len(m["lights"]))) if m["lights"] else "0,0"
+            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
+                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls, lights,
                       fxlit(sx), fxlit(sy), sa,
                       m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
                       m["next_idx"]))
