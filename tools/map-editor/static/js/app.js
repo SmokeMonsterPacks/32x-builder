@@ -621,6 +621,40 @@ function buildPalette() {
 }
 
 /* ---------- file bar ---------- */
+/* ---------- story chain (next:) ----------
+ * `next:` names the map the EXIT DOOR leads to; empty = procedural. gen_maps
+ * resolves it by NAME (uppercased) and HARD-FAILS the build if the target
+ * doesn't exist or the map points at itself — so this picker only ever offers
+ * titles that exist, and never the current map. */
+function buildNextSel() {
+  const sel = $('#map-next');
+  if (!sel || !ME.model) return;
+  const cur  = (ME.model.next || '').trim();
+  const self = (ME.model.name || '').trim().toUpperCase();
+  const titles = (ME.mapTitles || []).filter(t => t.toUpperCase() !== self);
+  sel.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = ''; none.textContent = '\u2014 procedural \u2014';
+  sel.appendChild(none);
+  const opts = titles.slice();
+  /* Keep a target we don't have locally (imported chain, or the other half of
+   * the pair still on disk): rebuilding the list would otherwise drop the
+   * value silently on the next save. */
+  if (cur && !titles.some(t => t.toUpperCase() === cur.toUpperCase())) opts.push(cur + ' (not in this checkout)');
+  for (const t of opts) {
+    const bare = t.replace(' (not in this checkout)', '');
+    const o = document.createElement('option');
+    o.value = bare; o.textContent = t;
+    sel.appendChild(o);
+  }
+  sel.value = cur;
+  /* Renaming the map to match its own target would fail the build; surface it
+   * here rather than at submit. */
+  if (cur && cur.toUpperCase() === self) {
+    status('next: cannot point at this map itself \u2014 pick another or set procedural');
+  }
+}
+
 function syncName() {
   const name = ($('#map-name').value.trim() || ME.model.name || 'untitled');
   ME.model.name = name.toUpperCase().slice(0, 16);
@@ -628,6 +662,7 @@ function syncName() {
 }
 async function refreshList() {
   const r = await jget('/maps'); const sel = $('#map-list');
+  ME.mapTitles = r.maps.map(m => m.title).filter(Boolean).sort();
   sel.innerHTML = '<option value="">—</option>';
   for (const m of r.maps) {                       // {name, role, folder, protected}
     const o = document.createElement('option');
@@ -635,11 +670,12 @@ async function refreshList() {
     o.textContent = (m.protected ? '🔒 ' : '') + m.name + '  (' + m.role + ')';
     sel.appendChild(o);
   }
+  buildNextSel();
 }
 async function doNew(size) {
   const r = await jget('/new?w=' + size + '&h=' + size);
   ME.model = r.model; ME.name = null; $('#map-name').value = ME.model.name;
-  fitCell(); status('new ' + size + '×' + size); buildPalette(); draw(); saveWip();
+  fitCell(); status('new ' + size + '×' + size); buildPalette(); buildNextSel(); draw(); saveWip();
 }
 async function doLoad(name) {
   const r = await jget('/maps/' + name);
@@ -648,7 +684,7 @@ async function doLoad(name) {
   $('#map-list').value = name;
   const tag = ME.model.protected || (ME.model.role && ME.model.role !== 'community')
     ? '  — protected: edits Export as your own community copy' : '';
-  fitCell(); buildPalette(); draw(); saveWip(); announceBudget('loaded ' + name + tag);
+  fitCell(); buildPalette(); buildNextSel(); draw(); saveWip(); announceBudget('loaded ' + name + tag);
 }
 
 /* Export = download the .map to the user's disk (the save path on the hosted,
@@ -736,7 +772,7 @@ function doImport(file) {
     const j = await r.json();
     if (j.error) { status('import error: ' + j.error); return; }
     ME.model = j.model; ME.name = null; $('#map-name').value = ME.model.name;
-    fitCell(); buildPalette(); draw(); saveWip(); announceBudget('imported ' + (file.name || 'map'));
+    fitCell(); buildPalette(); buildNextSel(); draw(); saveWip(); announceBudget('imported ' + (file.name || 'map'));
   };
   reader.readAsText(file);
 }
@@ -754,6 +790,14 @@ function wireFileBar() {
   $('#btn-new').onclick = () => doNew(parseInt($('#new-size').value, 10));
   $('#btn-export').onclick = doExport;
   $('#btn-optimize').onclick = doOptimize;
+  $('#map-next').onchange = e => {
+    ME.model.next = e.target.value;
+    saveWip();
+    status(e.target.value ? 'exit door \u2192 ' + e.target.value
+                          : 'exit door \u2192 procedural level');
+  };
+  /* A rename changes what "itself" means, so re-filter the picker. */
+  $('#map-name').oninput = () => { if (ME.model) { syncName(); buildNextSel(); } };
   $('#btn-submit').onclick = doSubmit;
   $('#btn-import').onclick = () => $('#file-import').click();
   $('#file-import').onchange = e => { if (e.target.files[0]) doImport(e.target.files[0]); e.target.value = ''; };

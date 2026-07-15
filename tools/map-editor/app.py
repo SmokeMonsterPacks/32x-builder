@@ -66,17 +66,25 @@ def _community_path(name):
 
 
 def _list_maps():
-    """[{name, role, folder, protected}] — the editor shows a lock on protected
-    (core) maps and clones them on edit."""
+    """[{name, title, role, folder, protected}] — the editor shows a lock on
+    protected (core) maps and clones them on edit.
+
+    `name` is the FILE stem (the /maps/<name> key); `title` is the map's
+    `name:` header. They differ ("segapowerbase" vs "SEGA POWER BASE"), and
+    story chains resolve by TITLE (gen_maps matches `next:` against the header
+    name, uppercased) — so the editor's next-map picker needs the title, not
+    the filename. Same parse as the role lookup, so it costs nothing extra."""
     roles = _roles()
     maps = []
     for folder, name, path in sorted(_iter_map_files(), key=lambda t: (t[0], t[1])):
-        role = "community"
+        role, title = "community", ""
         try:
-            role = mapfmt.parse(open(path).read()).get("role", "community")
+            m = mapfmt.parse(open(path).read())
+            role = m.get("role", "community")
+            title = m.get("name") or ""
         except Exception:
             pass
-        maps.append({"name": name, "role": role, "folder": folder,
+        maps.append({"name": name, "title": title, "role": role, "folder": folder,
                      "protected": bool(roles.get(role, {}).get("protected"))})
     return maps
 

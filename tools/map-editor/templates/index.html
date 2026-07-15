@@ -23,6 +23,9 @@
     <button id="btn-new">New map</button>
     <span class="sep"></span>
     <label>Name <input id="map-name" maxlength="16" size="14" placeholder="MYMAP"></label>
+    <label title="Story chain: where the EXIT DOOR leads. Pick another map to link them into a sequence; leave as — and the exit drops you into a procedurally generated level. Links by map name, so you can decide the order later.">Next
+      <select id="map-next"><option value="">— procedural —</option></select>
+    </label>
     <button id="btn-export" class="primary" title="Download this map as a .map file to your computer">⬇ Export .map</button>
     <button id="btn-submit" class="primary" title="Submit this map to the game: opens a pre-filled GitHub pull request under your own GitHub account. CI checks it; once merged it ships in the next ROM.">🚀 Submit to game</button>
     <button id="btn-optimize" title="Losslessly shrink the map's encoding: merge collinear partition segments, re-cover crawl cells with the fewest runs, drop duplicate decals. The map looks identical; it just uses less of the budget.">⚙ Optimize</button>
