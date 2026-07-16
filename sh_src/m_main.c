@@ -380,6 +380,24 @@ static void automap_draw(uint8_t *fb) {
             if (cx < MAP_W - 1 && world_map[cy][cx + 1] == 0) am_emit(fb, x1, y0, x1, y1, AMAP_RED);
         }
     }
+    /* The outer shell. It's solid — the DDA treats out of bounds as wall and
+     * collision always has — but it lives nowhere in world_map, so the map has
+     * to draw it explicitly or it stays the last system claiming the boundary
+     * is open. Emit only where it faces walkable floor: a border cell that's
+     * already a wall draws its own face and hides the shell, same as in 3D. */
+    {
+        const fx_t xe = (fx_t)MAP_W << FX_SHIFT, ye = (fx_t)MAP_H << FX_SHIFT;
+        for (int cx = 0; cx < MAP_W; cx++) {
+            fx_t x0 = (fx_t)cx << FX_SHIFT, x1 = x0 + FX_ONE;
+            if (world_map[0][cx] == 0)          am_emit(fb, x0,  0, x1,  0, AMAP_RED);
+            if (world_map[MAP_H - 1][cx] == 0)  am_emit(fb, x0, ye, x1, ye, AMAP_RED);
+        }
+        for (int cy = 0; cy < MAP_H; cy++) {
+            fx_t y0 = (fx_t)cy << FX_SHIFT, y1 = y0 + FX_ONE;
+            if (world_map[cy][0] == 0)          am_emit(fb,  0, y0,  0, y1, AMAP_RED);
+            if (world_map[cy][MAP_W - 1] == 0)  am_emit(fb, xe, y0, xe, y1, AMAP_RED);
+        }
+    }
     /* Partitions are cell-edge flags now — each flagged edge draws as its
      * one-cell segment; contiguous runs read as continuous lines. */
     if (g_pedge_any) {
@@ -860,10 +878,16 @@ int m_main(void) {
                 int d = tgt - scroll_px;
                 scroll_px += (d > 3 || d < -3) ? (d >> 2) : (d > 0) - (d < 0);
 
-                /* Unroll spring: stiffness 3/4, damping 3/8 per frame — one
-                 * quick overshoot then settle, ~1.5x faster than the first
-                 * cut at the user's ask. When a CLOSE settles, commit the
-                 * fold and rebuild without the children. */
+                /* Unroll spring: stiffness 3/4, damping 5/8 per frame — ONE
+                 * overshoot then settle. Damping was 3/8, which claimed a
+                 * single overshoot but actually rang three times: simulating
+                 * the integer spring at a 3-row target gives peaks at 44 (tgt
+                 * 30), then 27, then back over — a visible double-bounce that
+                 * took 11 frames to settle. 5/8 overshoots exactly once and
+                 * settles in 5, so it reads calmer AND snappier. (3/4 kills
+                 * the bounce entirely and feels dead; 1/2 still rings twice.)
+                 * When a CLOSE settles, commit the fold and rebuild without
+                 * the children. */
                 int disp = 0, span = 0;
                 if (anim_hdr >= 0) {
                     /* Symmetric integer spring: TRUE division truncates toward
@@ -873,7 +897,7 @@ int m_main(void) {
                      * deaf to input (the expand-after-collapse lockup). The
                      * tick failsafe guarantees settle even so. */
                     gap_vel += (gap_tgt - gap_cur) * 3 / 4;
-                    gap_vel -= gap_vel * 3 / 8;
+                    gap_vel -= gap_vel * 5 / 8;
                     gap_cur += gap_vel;
                     span = anim_n * ROW_H;
                     anim_ticks++;
