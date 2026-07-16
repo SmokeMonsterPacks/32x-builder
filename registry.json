@@ -80,6 +80,7 @@
     "max_decals": 16,
     "max_crawl_runs": 8,
     "max_lights": 512,
-    "max_dark_rooms": 64
+    "max_dark_rooms": 64,
+    "max_partition_edges": 255
   }
 }

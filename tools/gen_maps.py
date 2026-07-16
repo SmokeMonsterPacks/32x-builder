@@ -170,9 +170,10 @@ def resolve(path, reg):
                      ("max_dark_rooms", dark)):
         if len(lst) > lim[cap]:
             die("%s: %d items exceed %s %d" % (base, len(lst), cap, lim[cap]))
-    if len(pedges) > 255:
-        die("%s: partitions rasterize to %d cell-edges (max 255 per map — "
-            "n_pedges is a uint8_t)" % (base, len(pedges)))
+    if len(pedges) > lim.get("max_partition_edges", 255):
+        die("%s: partitions rasterize to %d cell-edges (max %d per map — "
+            "n_pedges is a uint8_t)"
+            % (base, len(pedges), lim.get("max_partition_edges", 255)))
 
     roles = reg.get("roles", {})
     role = m.get("role", "community")

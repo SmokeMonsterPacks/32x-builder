@@ -99,8 +99,16 @@ function fitCell() {
  * building instead of at submit time ("8 hours invested in broken maps").
  * Counts use the same arrays the serializer writes, so the numbers match
  * lint exactly. Placement is hard-stopped at the cap with a status hint. */
+/* How many cell-edges a partition run rasterizes to — a 10-cell wall is ONE
+ * segment but TEN edges. This is the cap that actually bites (n_pedges is a
+ * uint8_t in the ROM), and it's invisible in the segment count: you can sit at
+ * 47/64 segments and still be six from the edge ceiling. Same maths as
+ * lint_maps' edge_total, so the panel and the build agree. */
+const partEdges = p => Math.abs(p.x2 - p.x1) + Math.abs(p.y2 - p.y1);
 const BUDGET_ROWS = [
   ['partitions', 'Partitions', 'max_partitions', m => m.partitions.length],
+  ['edges',      'Partition edges', 'max_partition_edges',
+                 m => m.partitions.reduce((n, p) => n + partEdges(p), 0)],
   ['decals',     'Decals',     'max_decals',     m => m.decals.length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
   ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
@@ -452,6 +460,9 @@ const PART_PRESETS = {
 function dropPreset(ax, ay) {
   const segs = PART_PRESETS[ME.partPreset]; if (!segs) return;
   if (!budgetRoom('partitions', segs.length)) return;
+  const presetEdges = segs.reduce((n, s) =>
+    n + Math.abs(s[2] - s[0]) + Math.abs(s[3] - s[1]), 0);
+  if (!budgetRoom('edges', presetEdges)) return;
   for (const s of segs)
     ME.model.partitions.push({
       x1: ax + s[0], y1: ay + s[1], x2: ax + s[2], y2: ay + s[3],
@@ -485,6 +496,9 @@ function clickPartition(wx, wy) {
       if (Math.abs(px - a.x) >= Math.abs(py - a.y)) py = a.y; else px = a.x;
     }
     if (!budgetRoom('partitions', 1)) { ME.partPending = null; return; }
+    if (!budgetRoom('edges', Math.abs(px - a.x) + Math.abs(py - a.y))) {
+      ME.partPending = null; return;
+    }
     ME.model.partitions.push({
       x1: a.x, y1: a.y, x2: px, y2: py,
       style: ME.partStyle, height: ME.partHeight, crawl: ME.partCrawl

@@ -127,8 +127,11 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
-    if edge_total > 255:
-        e("partitions rasterize to %d cell-edges (max 255 per map)" % edge_total)
+    edge_cap = lim.get("max_partition_edges", 255)
+    if edge_total > edge_cap:
+        e("partitions rasterize to %d cell-edges (max %d per map — n_pedges is "
+          "a uint8_t). Long runs cost edges even when the segment count is low."
+          % (edge_total, edge_cap))
 
     sp = m["spawn"]; sx, sy = int(sp["x"]), int(sp["y"])
     if _cell(m, glyphs, sx, sy) != 0:
