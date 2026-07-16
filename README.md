@@ -132,6 +132,24 @@ make deploy MISTER=root@your-mister.local
 USB renumber on reboot won't break the copy. (`make deploy-tv` is a second
 preconfigured host.)
 
+### Playing a release build (not your own build)
+
+A local `make` is **not** the released artifact — CI pins its toolchain
+(`sh-elf-gcc 13.1.0`), your machine probably has a different one, and the same
+commit produces different bytes. To test what people actually downloaded, fetch
+it rather than rebuild it:
+
+```sh
+./fetch-release.sh                  # latest release
+./fetch-release.sh build-135        # a specific one
+./fetch-release.sh --deploy         # latest, straight onto the MiSTers
+```
+
+ROMs land in `rom/release/` (never clobbering your local `rom/backrooms.32x`),
+and the script reads the build stamp back out of the downloaded binary to prove
+the tag and the artifact agree. `make deploy-rom ROM=<path>` pushes any given
+ROM to a MiSTer without rebuilding.
+
 ---
 
 ## Controls

@@ -108,6 +108,22 @@ deploy-tv: release
 		echo "==> Copying $(TARGET).32x to $(MISTER_TV):$$DIR/" && \
 		scp $(TARGET).32x $(MISTER_TV):$$DIR/backrooms.32x
 
+# Deploy an ALREADY-BUILT rom to a MiSTer without rebuilding — the point is to
+# put exact bytes there (e.g. a ROM fetched from a GitHub release by
+# ./fetch-release.sh). `deploy` depends on `release`, so it would rebuild and
+# defeat that: CI pins marsdev 13.1.0, this machine may not, so a local rebuild
+# is NOT the released artifact.
+#   make deploy-rom ROM=rom/release/backrooms-build-138.32x
+deploy-rom:
+	@test -n "$(ROM)" || { echo "usage: make deploy-rom ROM=<path to .32x> [MISTER=host]"; exit 1; }
+	@test -f "$(ROM)" || { echo "error: $(ROM) not found"; exit 1; }
+	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+		echo "==> Copying $(ROM) to $(MISTER):$$DIR/" && \
+		scp "$(ROM)" $(MISTER):$$DIR/backrooms.32x
+
+deploy-rom-tv:
+	@$(MAKE) deploy-rom ROM="$(ROM)" MISTER=$(MISTER_TV)
+
 # Build + publish a GitHub Release (ROM as the asset, commit log as notes).
 # Git-derived tag build-<commit-count>. Needs the gh CLI, authenticated.
 # Use 'make publish ARGS=--dry-run' to preview without building/publishing.

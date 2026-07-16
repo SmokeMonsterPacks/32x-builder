@@ -53,3 +53,4 @@ srcref/
 __pycache__/
 *.pyc
 .env
+rom/release/
