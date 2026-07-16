@@ -84,6 +84,33 @@ def parse_map(path, errs):
         return None
 
 
+EXIT_VOID_MAX = 4   # mirror of EXIT_VOID_MAX in raycast.c: a void region this
+                    # small is a walk-through exit doorway; larger stays solid.
+
+def _exit_void_regions(m):
+    """(doorways, oversized): count of black-void ('X') regions that ARE exit
+    doorways (<= EXIT_VOID_MAX cells) and count that are too big to portal."""
+    g = m["grid"]; h = len(g); w = len(g[0]) if h else 0
+    seen = [[False] * w for _ in range(h)]
+    doorways = oversized = 0
+    for y0 in range(h):
+        for x0 in range(w):
+            if g[y0][x0] != 'X' or seen[y0][x0]:
+                continue
+            stack, n = [(x0, y0)], 0
+            seen[y0][x0] = True
+            while stack:
+                x, y = stack.pop(); n += 1
+                for nx, ny in ((x+1,y),(x-1,y),(x,y+1),(x,y-1)):
+                    if 0 <= nx < w and 0 <= ny < h and not seen[ny][nx] and g[ny][nx] == 'X':
+                        seen[ny][nx] = True; stack.append((nx, ny))
+            if n <= EXIT_VOID_MAX:
+                doorways += 1
+            else:
+                oversized += 1
+    return doorways, oversized
+
+
 def lint_model(m, base, folder, reg, seen_names, errs):
     """Lint a parsed map MODEL. `base` labels the errors; `folder` is where the
     map lives (or will live — 'community' for editor submissions)."""
@@ -127,6 +154,17 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
+    # Exit voids are SOLID PORTALS, not floor/decoration. A pile of small void
+    # openings (each a warp trigger) means they were painted as dark floor —
+    # steer that to Dark Rooms, which is the real "dark walk-through" tool.
+    dw, _ov = _exit_void_regions(m)
+    void_cap = lim.get("max_exit_voids", 4)
+    if dw > void_cap:
+        e("%d black-void exit doorways — each is a SOLID exit portal (walking "
+          "beside one warps you to the next map), not floor. Max %d. For dark "
+          "walk-through areas use DARK ROOMS instead; keep exits to a few small "
+          "doorways." % (dw, void_cap))
+
     edge_cap = lim.get("max_partition_edges", 255)
     if edge_total > edge_cap:
         e("partitions rasterize to %d cell-edges (max %d per map — n_pedges is "
@@ -181,8 +219,12 @@ def lint_model(m, base, folder, reg, seen_names, errs):
     if nxt:
         has_door = (any(d.get("kind") == "door" for d in m["decals"])
                     or m["options"].get("place_exit_door"))
-        if not has_door:
-            e("next: %s needs an exit door (place one, or set place_exit_door: 1)" % nxt)
+        doorways, _ = _exit_void_regions(m)
+        if not (has_door or doorways):
+            e("next: %s needs an exit — place an exit door, set place_exit_door: 1, "
+              "or add a small black-void doorway (a void opening of %d cells or "
+              "fewer; a larger void stays solid dark and won't portal)"
+              % (nxt, EXIT_VOID_MAX))
         if nxt.upper() == (m.get("name") or "").upper():
             e("next: points at itself")
 

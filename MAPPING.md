@@ -87,6 +87,26 @@ they're 300 partitions.
 
 ---
 
+## Exits: doors, void doorways, and the dark
+
+Three things get confused, so here's the difference:
+
+- **Exit door** (Decals layer) — a real door you open with A and walk through.
+  The deliberate, framed exit. This is the normal way to end a map or chain to
+  the next one.
+- **Exit void** (Grid layer, the black cell) — a **solid** black opening. It is
+  *not* floor and you do not walk through it; walking *beside* a small one warps
+  you to the next map. Keep it doorway-sized: a void opening of **4 cells or
+  fewer** portals; anything larger stays solid "endless dark" and does nothing.
+  A map may have only a few. It's the no-clip, fall-into-the-black exit.
+- **Dark room** (Dark rooms layer) — this is the one you want for a **dark
+  area you walk around in**. Unlit space, fog, lights turned down. If you're
+  reaching for black cells to make somewhere feel dark, use a Dark room
+  instead — black cells are exits, not shadow.
+
+A `next:` chain needs an exit the player can reach: an exit door, or a small
+void doorway. A wall of black cells is not an exit and won't satisfy a chain.
+
 ## Story chains
 
 A map's exit door normally dumps you into a randomly generated level. Point it
