@@ -3581,6 +3581,18 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             } else {
                 litX = mapX; litY = mapY;
             }
+            /* The outer shell terminates the ray OUT of bounds (mapX/mapY is
+             * -1 or MAP_W/MAP_H by construction), and the partition fallback
+             * above lands on those same coords — so clamp before sampling.
+             * An unguarded read here indexed cell_light[-32] and friends and
+             * returned garbage; a garbage `lit` drives the cap below hugely
+             * negative, wall_shade follows, and WALL_BASE + shade wraps the
+             * uint8 into unset palette. That was the corner rendering indigo
+             * in Ares and black on MiSTer — the same index reading whatever
+             * CRAM happened to hold. Patchy per column because each column
+             * read a DIFFERENT garbage byte. */
+            if (litX < 0) litX = 0; else if (litX >= MAP_W) litX = MAP_W - 1;
+            if (litY < 0) litY = 0; else if (litY >= MAP_H) litY = MAP_H - 1;
             int lit = CELL_LIGHT(litY, litX);
             if (lit) {
                 /* A lit surface resists distance fog: cap how dark it gets
@@ -3588,6 +3600,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                  * below the cap; far-but-lit ones — the rear T-divider —
                  * stay mid-bright and readable instead of fogging out. */
                 int cap = LIT_FOG_CAP - (lit - 1) * 2;
+                if (cap < 0) cap = 0;      /* never invert the ramp, whatever lit says */
                 if (wall_shade > cap) wall_shade = cap;
             }
             /* Crawlspace light model: a wall face SEEN FROM under a low
