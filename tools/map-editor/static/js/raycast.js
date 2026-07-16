@@ -13,6 +13,7 @@ window.RC = (function () {
   let px, py, pa;               // player pos (cells) + angle (radians)
   let eyeH = 0.5;               // eye height 0..1; crouches in crawlspaces
   let lightGrid = null, lowGrid = null, fixtureGrid = null, hasLow = false;
+  let darkGrid = null;
   let procOut = [];             // outlets the engine would auto-place (place_outlets)
 
   function A() { return window.ME.assets; }
@@ -30,6 +31,9 @@ window.RC = (function () {
   }
   function lit(cx, cy) { return (lightGrid && cy >= 0 && cx >= 0 && cy < lightGrid.length && cx < lightGrid[0].length) ? lightGrid[cy][cx] : 0; }
   function low(cx, cy) { return (lowGrid && cy >= 0 && cx >= 0 && cy < lowGrid.length && cx < lowGrid[0].length) ? lowGrid[cy][cx] : 0; }
+  /* DARK ROOM (engine: cell_light bit 7). No fixtures, everything toward fog. */
+  function dark(cx, cy) { return (darkGrid && cy >= 0 && cx >= 0 && cy < darkGrid.length && cx < darkGrid[0].length) ? darkGrid[cy][cx] : 0; }
+  const DARK_ROOM_SHADE = 6;   /* == DARK_ROOM_SHADE in raycast.c */
 
   /* port of init_lights: auto-grid fixtures every 2 cells on open non-crawl
    * cells, then the 3x3 cell_light boost (centre +2, neighbours +1, cap 3). */
@@ -37,6 +41,10 @@ window.RC = (function () {
     const m = window.ME.model;
     lightGrid = Array.from({ length: m.h }, () => new Int8Array(m.w));
     lowGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
+    darkGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
+    for (const d of (m.dark || []))
+      for (let y = Math.max(0, d.y0); y <= Math.min(m.h - 1, d.y1); y++)
+        for (let x = Math.max(0, d.x0); x <= Math.min(m.w - 1, d.x1); x++) darkGrid[y][x] = 1;
     fixtureGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
     hasLow = false;
     for (const c of m.crawls) for (const [x, y] of runCells(c))
@@ -45,11 +53,12 @@ window.RC = (function () {
     const pts = [];
     if (m.lights && m.lights.length) {
       for (const l of m.lights)
-        if (l.cx >= 0 && l.cy >= 0 && l.cx < m.w && l.cy < m.h) pts.push([l.cx, l.cy]);
+        if (l.cx >= 0 && l.cy >= 0 && l.cx < m.w && l.cy < m.h && !darkGrid[l.cy][l.cx])
+          pts.push([l.cx, l.cy]);
     } else {
       for (let my = 1; my < m.h - 1; my += 2)
         for (let mx = 1; mx < m.w - 1; mx += 2)
-          if (cellVal(mx, my) === 0 && !lowGrid[my][mx]) pts.push([mx, my]);
+          if (cellVal(mx, my) === 0 && !lowGrid[my][mx] && !darkGrid[my][mx]) pts.push([mx, my]);
     }
     const cap = A().bases.LIGHT_BOOST_MAX ?? 3;
     for (const [lx, ly] of pts) {
@@ -309,6 +318,7 @@ window.RC = (function () {
           const hx = (Math.floor(wx * 8)) & 0xFF, hy = (Math.floor(wy * 8)) & 0xFF;
           if (((hx * 73 + hy * 31) & 0xF) < 6) idx = B.FLOOR_BASE + Math.min(sl1, sh + 2);
           if (low(cx, cy)) idx = B.FLOOR_BASE + Math.min(sl1, sh + 3);   // dark crawl floor
+          if (dark(cx, cy)) idx = B.FLOOR_BASE + Math.min(sl1, sh + DARK_ROOM_SHADE);
           put(data, o, idx);
         }
       } else {
@@ -334,6 +344,13 @@ window.RC = (function () {
             if (fxf > 0.2 && fxf < 0.8 && fyf > 0.2 && fyf < 0.8) { put(data, o, B.LIGHT_BASE); continue; }
           }
           let sh = fBase - lit(cx, cy) * 2; if (sh < 0) sh = 0;
+          /* DARK ROOM ceiling: the ROM draws its darkness OVER the tile grid
+           * (you can't read tile grid in an unlit room), so skip the grid here
+           * rather than shading it — same resulting look, and it matches. */
+          if (dark(cx, cy)) {
+            put(data, o, B.CEIL_BASE + Math.min(sl1, sh + DARK_ROOM_SHADE));
+            continue;
+          }
           const gx = (fwx * 4) % 1, gy = (fwy * 4) % 1;
           const grid = (gx >= 0 ? gx : gx + 1) < 0.06 || (gy >= 0 ? gy : gy + 1) < 0.06;
           put(data, o, B.CEIL_BASE + (grid ? Math.min(sl1, sh + 3) : sh));
@@ -377,7 +394,14 @@ window.RC = (function () {
           for (let y = y0; y < y1; y++) { const o = (y * W + x) * 4; data[o] = data[o + 1] = data[o + 2] = 0; data[o + 3] = 255; }
         } else {
           const tex = A().textures.wall, baseIdx = B.WALL_BASE;
-          const bgShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
+          let bgShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
+          /* A face seen FROM a dark room: the viewer-side cell is the open one
+           * (back-step off the solid wall), same as the engine's model. */
+          if (darkGrid) {
+            const vx = side === 0 ? mapX - stepX : mapX;
+            const vy = side === 1 ? mapY - stepY : mapY;
+            if (dark(vx, vy)) bgShade = Math.min(SL() - 1, bgShade + DARK_ROOM_SHADE);
+          }
           const wallX = side === 0 ? (py + dist * ry) : (px + dist * rx);
           const tu = Math.floor((((wallX - Math.floor(wallX)) * TILE) % 1) * tex.w);
           for (let y = y0; y < y1; y++) {
