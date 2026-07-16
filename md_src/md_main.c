@@ -4,6 +4,7 @@
 static volatile uint16_t* const mars_comm0  = (uint16_t*) MARS_COMM0;
 static volatile uint16_t* const mars_comm2  = (uint16_t*) MARS_COMM2;
 static volatile uint16_t* const mars_comm8  = (uint16_t*) MARS_COMM8;
+static volatile uint16_t* const mars_comm10 = (uint16_t*) MARS_COMM10;
 static volatile uint32_t* const mars_comm12 = (uint32_t*) MARS_COMM12;
 
 // VDP
@@ -73,6 +74,14 @@ void main(void) {
 		// TODO: Remove this after fixing _vblank
 		while(*vdp_ctrl_port & 8) do_commands();
 		while(!(*vdp_ctrl_port & 8)) do_commands();
+		// Publish both pads UNSOLICITED every frame, exactly like the COMM12
+		// frame tick below. The SH-2 then reads COMM8/COMM10 directly with no
+		// request/response round-trip — the old on-demand handshake (COMM0
+		// command 3, still serviced above for compatibility) is what starved
+		// the bridge under render contention. P2 is published for free; no
+		// gameplay reads COMM10 yet.
+		*mars_comm8  = read_joypad(0);
+		*mars_comm10 = read_joypad(1);
 		*mars_comm12 = ++timer;
 	}
 }
