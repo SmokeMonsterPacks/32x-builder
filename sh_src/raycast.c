@@ -3083,7 +3083,19 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 mapY += stepY;
                 side = 1;
             }
-            if (mapX < 0 || mapX >= MAP_W || mapY < 0 || mapY >= MAP_H) break;
+            /* The world's outer shell is SOLID. Collision has always said so
+             * (cell_passable returns 0 out of bounds) and the editor's preview
+             * draws it as wall, so the RENDERER was the odd one out: it let the
+             * ray escape and you saw the infinite void through the map's edge.
+             * Authors built against the editor and left their borders open —
+             * every community map is affected (SEGA POWER BASE has 121 open
+             * border cells). The ray already crossed the boundary plane, so
+             * side/sideDist are set for exactly that face: treat it as a wall
+             * hit and the shell renders at the right depth for free. */
+            if (mapX < 0 || mapX >= MAP_W || mapY < 0 || mapY >= MAP_H) {
+                hit = 1; hit_cell = 1;
+                break;
+            }
             /* First-class edge partitions: the DDA just crossed one boundary
              * line — test its flag byte. Stepping +X into mapX crosses the
              * line x = mapX (cell's west edge); -X crosses x = mapX+1. Same
