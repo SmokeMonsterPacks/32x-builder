@@ -327,6 +327,7 @@ void procgen_run(uint32_t seed) {
     /* Procgen has no authored fixtures: clear any left by a custom map, or the
      * previous map's lights would light this one (init_lights runs after us). */
     g_map_lights = 0; g_map_n_lights = 0;
+    g_map_dark = 0; g_map_n_dark = 0;
     ceil_h_clear();                       /* full ceilings; mark crawlspaces below */
     for (int i = 0; i < NUM_PARTITIONS_MAX; i++) {
         partition_style[i]  = 0;   /* chevron */

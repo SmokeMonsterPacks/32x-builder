@@ -681,6 +681,26 @@ static uint8_t cell_light[MAP_H][MAP_W];
  * but the lines stay warm across frames. The primary wrote them, so it's current. */
 #define CELL_LIGHT(y,x) (((volatile uint8_t *)cell_light)[(y)*MAP_W + (x)])
 #define LIGHT_BOOST_MAX 3
+/* DARK ROOM flag, stolen from cell_light's top bit. cell_light only ever holds
+ * a 0..3 boost, so bit 7 is free — and riding this array means dark rooms
+ * inherit its cache purge and gen counter for nothing. A separate array would
+ * have needed both. Read the boost as (cl & 3), the darkness as (cl & CELL_DARK). */
+#define CELL_DARK       0x80
+/* How far a dark room pushes a surface down the fog ramp. 6 lands it near the
+ * dark end without going pure black — "lit by what leaks in", not "off". */
+#define DARK_ROOM_SHADE 6
+static uint8_t cell_dark_seed[MAP_H][MAP_W];   /* build-time scratch (primary only) */
+#define MAX_DARK_RECTS  8
+static fx_t dark_rect[MAX_DARK_RECTS][4];   /* x0,y0,x1,y1 world, for column-clipping */
+static int  n_dark_rect = 0;
+int  g_dark_active = 0;                     /* 0 => every dark-room test compiles out */
+fx_t g_dark_x0, g_dark_y0, g_dark_x1, g_dark_y1;   /* union bbox, like g_lowceil_* */
+/* True if the world point is inside a dark room. Mirrors ceil_is_low(). */
+static int cell_is_dark(fx_t wx, fx_t wy) {
+    int cx = FX_INT(wx), cy = FX_INT(wy);
+    if ((unsigned)cx >= (unsigned)MAP_W || (unsigned)cy >= (unsigned)MAP_H) return 0;
+    return (CELL_LIGHT(cy, cx) & CELL_DARK) != 0;
+}
 #define LIT_FOG_CAP     9   /* a lit surface never fogs darker than this (-2 per light level) */
 #define SIDE_SHADE      1   /* N/S-facing faces are this many shades darker (form cue) */
 
@@ -692,14 +712,42 @@ static uint8_t cell_light[MAP_H][MAP_W];
  * Not const-folded: the loaders run before raycast_init on every map change. */
 const struct cm_light_s *g_map_lights   = 0;
 uint16_t                 g_map_n_lights = 0;
+const struct cm_dark_s  *g_map_dark     = 0;
+uint8_t                  g_map_n_dark   = 0;
 
 static void init_lights(void) {
+    /* Dark rooms first: the fixture placement below consults them, so a dark
+     * room gets no ceiling lights the same way a crawlspace doesn't. */
+    n_dark_rect = 0; g_dark_active = 0;
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++) cell_dark_seed[y][x] = 0;
+    for (int i = 0; i < g_map_n_dark && n_dark_rect < MAX_DARK_RECTS; i++) {
+        int x0 = g_map_dark[i].x0, y0 = g_map_dark[i].y0;
+        int x1 = g_map_dark[i].x1, y1 = g_map_dark[i].y1;
+        for (int y = y0; y <= y1 && y < MAP_H; y++)
+            for (int x = x0; x <= x1 && x < MAP_W; x++) cell_dark_seed[y][x] = 1;
+        fx_t fx0 = FX(x0), fy0 = FX(y0), fx1 = FX(x1 + 1), fy1 = FX(y1 + 1);
+        dark_rect[n_dark_rect][0] = fx0; dark_rect[n_dark_rect][1] = fy0;
+        dark_rect[n_dark_rect][2] = fx1; dark_rect[n_dark_rect][3] = fy1;
+        n_dark_rect++;
+        if (!g_dark_active) {
+            g_dark_x0 = fx0; g_dark_x1 = fx1; g_dark_y0 = fy0; g_dark_y1 = fy1;
+            g_dark_active = 1;
+        } else {
+            if (fx0 < g_dark_x0) g_dark_x0 = fx0;
+            if (fx1 > g_dark_x1) g_dark_x1 = fx1;
+            if (fy0 < g_dark_y0) g_dark_y0 = fy0;
+            if (fy1 > g_dark_y1) g_dark_y1 = fy1;
+        }
+    }
     num_lights = 0;
     if (g_map_lights && g_map_n_lights) {
         /* Hand-placed fixtures from the .map — the author's lighting wins and
          * we do NOT second-guess it: no wall/crawlspace filtering like the
          * procedural branch does, because "a light there" was a decision. */
         for (int i = 0; i < g_map_n_lights && num_lights < MAX_LIGHTS; i++) {
+            /* A fixture inside a dark room is a contradiction — drop it. */
+            if (cell_dark_seed[g_map_lights[i].cy][g_map_lights[i].cx]) continue;
             lights[num_lights].x = FX(g_map_lights[i].cx) + FX(0.5);
             lights[num_lights].y = FX(g_map_lights[i].cy) + FX(0.5);
             num_lights++;
@@ -726,6 +774,7 @@ static void init_lights(void) {
                 /* Skip a fixture on/around a crawlspace: its own cell AND the
                  * 4-neighbours, so none floats over the low ceiling or hangs at
                  * the tunnel mouth where it'd be seen straight through. */
+                if (cell_dark_seed[my][mx]) continue;   /* dark room: no fixtures */
                 if (g_lowceil_active) {
                     int near_low = CEIL_H(my, mx) != CEIL_H_FULL
                         || (mx > 0          && CEIL_H(my, mx - 1) != CEIL_H_FULL)
@@ -755,6 +804,12 @@ static void init_lights(void) {
             }
         }
     }
+    /* Fold the dark rooms into cell_light's top bit, AFTER the boost loop
+     * (which only ever writes 0..3). One array, one purge, one gen. */
+    if (g_dark_active)
+        for (int y = 0; y < MAP_H; y++)
+            for (int x = 0; x < MAP_W; x++)
+                if (cell_dark_seed[y][x]) cell_light[y][x] |= CELL_DARK;
     /* Signal the secondary that cell_light changed so it purges its now-stale
      * cached lines once (see CELL_LIGHT). Write-through already pushed our
      * writes to SDRAM. */
@@ -1229,6 +1284,7 @@ void raycast_load_fixed(void) {
     raycast_stamp_partition_edges();   /* fixed-map dividers go first-class */
     g_lobby_ceiling = 0;
     g_map_lights = 0; g_map_n_lights = 0;   /* procedural grid; drop any custom map's fixtures */
+    g_map_dark = 0; g_map_n_dark = 0;
     /* The original cutout lives here, on the map it was placed for. */
     standups_clear();
     for (unsigned i = 0; i < sizeof fixed_standups / sizeof fixed_standups[0]; i++)
@@ -1298,6 +1354,8 @@ void raycast_load_custom(int idx) {
      * n_lights == 0 leaves the procedural grid in charge. */
     g_map_lights   = m->lights;
     g_map_n_lights = m->n_lights;
+    g_map_dark     = m->dark;
+    g_map_n_dark   = m->n_dark;
 
     /* Ceiling: full everywhere, then the low-ceiling crawl runs. */
     g_lobby_ceiling = m->lobby_ceiling;
@@ -1447,6 +1505,7 @@ void raycast_load_lobby(void) {
     /* Crawl-under beam shelved — no crawl elements placed for now. */
     g_lobby_ceiling = 1;                  /* hand-authored fluorescent runs */
     g_map_lights = 0; g_map_n_lights = 0;   /* lobby uses its own built-in runs */
+    g_map_dark = 0; g_map_n_dark = 0;
     standups_clear();                       /* no cutout in the lobby */
     ceil_h_clear();                       /* no crawlspaces in the lobby */
     /* Outlet on entrance-R's south face (the photo's right-hand partition),
@@ -2289,6 +2348,49 @@ RAMTEXT void raycast_draw_ceiling_grid(int col_start, int col_end) {
             for (int col = col_start; col < col_end; col++) row_p[col] = grid_c;
         }
 
+        /* DARK ROOM ceiling. The base ceiling colour comes from the CLEAR pass
+         * (a row fill with no world coords, so it can't know about cells) —
+         * this is the first pass up here that HAS world coords, so the darkness
+         * lands here. Drawn AFTER the grid lines on purpose: in an unlit room
+         * you shouldn't be able to read the tile grid, so covering it is the
+         * correct look and it saves darkening grid_c per cell. Same bbox ->
+         * column-clip -> half-res fill as the carpet. */
+        if (g_dark_active) {
+            fx_t stepX = (wxR - wxL) / SCREEN_W;
+            fx_t stepY = (wyR - wyL) / SCREEN_W;
+            fx_t minx = wxL < wxR ? wxL : wxR, maxx = wxL < wxR ? wxR : wxL;
+            fx_t miny = wyL < wyR ? wyL : wyR, maxy = wyL < wyR ? wyR : wyL;
+            if (!(maxx < g_dark_x0 || minx > g_dark_x1 ||
+                  maxy < g_dark_y0 || miny > g_dark_y1)) {
+                int cA = col_start, cB = col_end - 1;
+                const fx_t EPS = 16;
+                if (stepX > EPS || stepX < -EPS) {
+                    int a = (int)(fx_div_hw(g_dark_x0 - wxL, stepX) >> FX_SHIFT);
+                    int b = (int)(fx_div_hw(g_dark_x1 - wxL, stepX) >> FX_SHIFT);
+                    if (a > b) { int t = a; a = b; b = t; }
+                    if (a > cA) cA = a; if (b < cB) cB = b;
+                }
+                if (stepY > EPS || stepY < -EPS) {
+                    int a = (int)(fx_div_hw(g_dark_y0 - wyL, stepY) >> FX_SHIFT);
+                    int b = (int)(fx_div_hw(g_dark_y1 - wyL, stepY) >> FX_SHIFT);
+                    if (a > b) { int t = a; a = b; b = t; }
+                    if (a > cA) cA = a; if (b < cB) cB = b;
+                }
+                if (cA < col_start) cA = col_start;
+                if (cB > col_end - 1) cB = col_end - 1;
+                int dsh = base_shade + DARK_ROOM_SHADE;
+                if (dsh > SHADE_LEVELS - 1) dsh = SHADE_LEVELS - 1;
+                uint8_t ddk = (uint8_t)(CEIL_BASE + dsh);
+                int c0 = cA & ~1, c1 = cB | 1;
+                if (c1 > col_end - 1) c1 = col_end - 1;
+                fx_t dwx = wxL + stepX * c0, dwy = wyL + stepY * c0;
+                for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
+                    if (!cell_is_dark(dwx, dwy)) continue;
+                    *(uint16_t *)(row_p + col) = WDUP(ddk);
+                }
+            }
+        }
+
         prev_wxL_s = wxL_s;
         prev_wyL_s = wyL_s;
         has_prev   = 1;
@@ -2709,6 +2811,48 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
             worldY += stepWY;
         }
 
+        /* DARK ROOM floor: no fixtures overhead, so the carpet reads near fog.
+         * Same shape as the crawlspace block below — reject the row by bbox,
+         * clip to the columns the zone actually spans, then fill at the
+         * carpet's own LOD. g_dark_active means a lit map never enters. */
+        if (g_dark_active) {
+            fx_t wx0 = px + FX_MUL(rowDist, leftDirX);
+            fx_t wy0 = py + FX_MUL(rowDist, leftDirY);
+            fx_t wxR = px + FX_MUL(rowDist, rightDirX);
+            fx_t wyR = py + FX_MUL(rowDist, rightDirY);
+            fx_t minx = wx0 < wxR ? wx0 : wxR, maxx = wx0 < wxR ? wxR : wx0;
+            fx_t miny = wy0 < wyR ? wy0 : wyR, maxy = wy0 < wyR ? wyR : wy0;
+            if (!(maxx < g_dark_x0 || minx > g_dark_x1 ||
+                  maxy < g_dark_y0 || miny > g_dark_y1)) {
+                int cA = col_start, cB = col_end - 1;
+                const fx_t EPS = 16;
+                if (stepX > EPS || stepX < -EPS) {
+                    int a = (int)(fx_div_hw(g_dark_x0 - wx0, stepX) >> FX_SHIFT);
+                    int b = (int)(fx_div_hw(g_dark_x1 - wx0, stepX) >> FX_SHIFT);
+                    if (a > b) { int t = a; a = b; b = t; }
+                    if (a > cA) cA = a; if (b < cB) cB = b;
+                }
+                if (stepY > EPS || stepY < -EPS) {
+                    int a = (int)(fx_div_hw(g_dark_y0 - wy0, stepY) >> FX_SHIFT);
+                    int b = (int)(fx_div_hw(g_dark_y1 - wy0, stepY) >> FX_SHIFT);
+                    if (a > b) { int t = a; a = b; b = t; }
+                    if (a > cA) cA = a; if (b < cB) cB = b;
+                }
+                if (cA < col_start) cA = col_start;
+                if (cB > col_end - 1) cB = col_end - 1;
+                int dsh = base_shade + DARK_ROOM_SHADE;
+                if (dsh > SHADE_LEVELS - 1) dsh = SHADE_LEVELS - 1;
+                uint8_t ddk = (uint8_t)(FLOOR_BASE + dsh);
+                int c0 = cA & ~1, c1 = cB | 1;
+                if (c1 > col_end - 1) c1 = col_end - 1;
+                uint8_t *drow = fb + y * SCREEN_W;
+                fx_t dwx = wx0 + stepX * c0, dwy = wy0 + stepY * c0;
+                for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
+                    if (!cell_is_dark(dwx, dwy)) continue;
+                    *(uint16_t *)(drow + col) = WDUP(ddk);
+                }
+            }
+        }
         /* Lightless crawlspace floor: cells under a low (unlit) ceiling get no
          * light from above, so darken the carpet there. Column-clip to the zone
          * bbox like the slab so it stays cheap; the carpet draws before the
@@ -3593,7 +3737,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * read a DIFFERENT garbage byte. */
             if (litX < 0) litX = 0; else if (litX >= MAP_W) litX = MAP_W - 1;
             if (litY < 0) litY = 0; else if (litY >= MAP_H) litY = MAP_H - 1;
-            int lit = CELL_LIGHT(litY, litX);
+            int lit = CELL_LIGHT(litY, litX) & LIGHT_BOOST_MAX;
             if (lit) {
                 /* A lit surface resists distance fog: cap how dark it gets
                  * (more headroom the more lit). Near surfaces are already
@@ -3621,6 +3765,24 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     (unsigned)cfy < (unsigned)MAP_H &&
                     CEIL_H(cfy, cfx) != CEIL_H_FULL) {
                     wall_shade += 5;
+                    if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
+                }
+            }
+            /* DARK ROOM: no fixtures overhead, so a face seen from inside one
+             * gets only what leaks in. Same viewer-side cell as the crawlspace
+             * model (the wall cell itself is solid), and applied AFTER the
+             * lit-cap so a fixture in the lit room beyond can't undo it.
+             * g_dark_active keeps lit maps at zero cost. */
+            if (g_dark_active) {
+                int dfx = litX, dfy = litY;
+                if (!partition_hit) {
+                    if (side == 0) dfx = mapX - stepX;
+                    else           dfy = mapY - stepY;
+                }
+                if ((unsigned)dfx < (unsigned)MAP_W &&
+                    (unsigned)dfy < (unsigned)MAP_H &&
+                    (CELL_LIGHT(dfy, dfx) & CELL_DARK)) {
+                    wall_shade += DARK_ROOM_SHADE;
                     if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
                 }
             }
@@ -4101,7 +4263,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     int lx = FX_INT(px + FX_MUL(ft, rayDirX));
                     int ly = FX_INT(py + FX_MUL(ft, rayDirY));
                     if ((unsigned)lx < (unsigned)MAP_W && (unsigned)ly < (unsigned)MAP_H) {
-                        int lit = CELL_LIGHT(ly, lx);
+                        int lit = CELL_LIGHT(ly, lx) & LIGHT_BOOST_MAX;
                         if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap; }
                     }
                 }

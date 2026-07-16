@@ -66,6 +66,9 @@ extern int g_lobby_ceiling;
 struct cm_light_s;
 extern const struct cm_light_s *g_map_lights;
 extern uint16_t                 g_map_n_lights;
+struct cm_dark_s;
+extern const struct cm_dark_s  *g_map_dark;
+extern uint8_t                  g_map_n_dark;
 /* When set, at least one low-ceiling crawlspace cell exists this map. */
 extern int g_lowceil_active;
 /* Per-cell ceiling height (255 = full open ceiling, lower = crawlspace slab).

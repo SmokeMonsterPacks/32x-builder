@@ -9,7 +9,7 @@ const ME = {
   brush: 1,                  // grid cell value to paint
   decalKind: 'outlet',
   partStyle: 'chevron', partHeight: 'full', partCrawl: 'no', partPreset: 'freehand', partHover: null,
-  partPending: null, crawlPending: null,
+  partPending: null, crawlPending: null, darkPending: null,
   cell: 22,
   glyphForVal: {}, colorForVal: {},
 };
@@ -104,6 +104,7 @@ const BUDGET_ROWS = [
   ['decals',     'Decals',     'max_decals',     m => m.decals.length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
   ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
+  ['dark',       'Dark rooms', 'max_dark_rooms', m => (m.dark || []).length],
 ];
 function budgetCap(capKey) {
   const lim = (ME.reg && ME.reg.limits) || {};
@@ -245,7 +246,7 @@ function doOptimize() {
   if (m.partitions.length < b.p) parts.push('partitions ' + b.p + '\u2192' + m.partitions.length);
   if (m.crawls.length     < b.c) parts.push('crawls ' + b.c + '\u2192' + m.crawls.length);
   if (m.decals.length     < b.d) parts.push('decals ' + b.d + '\u2192' + m.decals.length);
-  ME.partPending = ME.crawlPending = null;
+  ME.partPending = ME.crawlPending = ME.darkPending = null;
   draw(); saveWip();
   if (!parts.length) { announceBudget('optimize: already minimal'); return; }
   const over = overBudget();
@@ -332,6 +333,19 @@ function draw() {
     ctx.restore();
   }
   if (ME.partPending) dot(ME.partPending.x, ME.partPending.y, '#fff');
+  if (ME.model.dark) {
+    for (const d of ME.model.dark) {
+      ctx.fillStyle = 'rgba(10,10,30,0.55)';                  /* unlit = ink */
+      ctx.fillRect(d.x0 * cs, d.y0 * cs, (d.x1 - d.x0 + 1) * cs, (d.y1 - d.y0 + 1) * cs);
+      ctx.strokeStyle = '#6a6ad0';
+      ctx.strokeRect(d.x0 * cs + 0.5, d.y0 * cs + 0.5,
+                     (d.x1 - d.x0 + 1) * cs - 1, (d.y1 - d.y0 + 1) * cs - 1);
+    }
+  }
+  if (ME.darkPending) {
+    ctx.strokeStyle = '#6a6ad0';
+    ctx.strokeRect(ME.darkPending.cx * cs + 1, ME.darkPending.cy * cs + 1, cs - 2, cs - 2);
+  }
   if (ME.crawlPending) {
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
     ctx.strokeRect(ME.crawlPending.cx * cs + 1, ME.crawlPending.cy * cs + 1, cs - 2, cs - 2);
@@ -384,6 +398,7 @@ function wireCanvas() {
           else deleteNearest(ME.model.partitions, p => distSeg(wx, wy, p));
         } else clickPartition(wx, wy);
         break;
+      case 'dark': clickDark(cx, cy); break;
       case 'crawl':
         right ? deleteCrawlAt(cx, cy) : clickCrawl(cx, cy); break;
       case 'lights':
@@ -477,6 +492,19 @@ function clickPartition(wx, wy) {
     ME.partPending = { x: px, y: py };   // CHAIN: keep going for connected walls
   }
 }
+/* Dark room: two clicks = opposite corners of an unlit rect. The engine gives
+ * it no ceiling fixtures and renders its walls/floor/ceiling toward fog. */
+function clickDark(cx, cy) {
+  if (!ME.model.dark) ME.model.dark = [];
+  if (!ME.darkPending) { ME.darkPending = { cx, cy }; return; }
+  const a = ME.darkPending;
+  ME.darkPending = null;
+  if (!budgetRoom('dark', 1)) return;
+  ME.model.dark.push({
+    x0: Math.min(a.cx, cx), y0: Math.min(a.cy, cy),
+    x1: Math.max(a.cx, cx), y1: Math.max(a.cy, cy),
+  });
+}
 function clickCrawl(cx, cy) {
   if (!ME.crawlPending) { ME.crawlPending = { cx, cy }; return; }
   const s = ME.crawlPending;
@@ -507,6 +535,9 @@ function eraseAt(cx, cy, wx, wy) {
   for (const dc of ME.model.decals) consider(Math.hypot(dc.x - wx, dc.y - wy), () => arrDel(ME.model.decals, dc));
   if (ME.model.lights) for (const l of ME.model.lights)
     consider(Math.hypot(l.cx + 0.5 - wx, l.cy + 0.5 - wy), () => arrDel(ME.model.lights, l));
+  if (ME.model.dark) for (const d of ME.model.dark)
+    if (cx >= d.x0 && cx <= d.x1 && cy >= d.y0 && cy <= d.y1)
+      consider(0.3, () => arrDel(ME.model.dark, d));
   if (ME.model.crawls) for (const cr of ME.model.crawls)
     if (runCells(cr).some(([x, y]) => x === cx && y === cy)) consider(0.2, () => arrDel(ME.model.crawls, cr));
   if (best && best.d < 0.85) { best.del(); return true; }
@@ -532,6 +563,7 @@ function distSeg(px, py, p) {                 /* point-to-segment distance */
 /* ---------- sidebar ---------- */
 function buildLayers() {
   const layers = [['grid', 'Grid'], ['crawl', 'Crawlspace'], ['lights', 'Lights'],
+    ['dark', 'Dark rooms'],
     ['partition', 'Partitions'], ['decal', 'Decals'], ['spawn', 'Spawn'], ['erase', '✕ Delete']];
   const c = $('#layers'); c.innerHTML = '';
   for (const [id, label] of layers) {
@@ -539,7 +571,7 @@ function buildLayers() {
     b.textContent = label; b.dataset.layer = id;
     if (id === 'erase') { b.style.color = '#ff6b6b'; b.style.borderColor = '#7a2b2b'; }  // the red X tool
     b.onclick = () => {
-      ME.layer = id; ME.partPending = ME.crawlPending = null;
+      ME.layer = id; ME.partPending = ME.crawlPending = ME.darkPending = null;
       buildLayers(); buildPalette(); draw();
     };
     if (id === ME.layer) b.classList.add('active');

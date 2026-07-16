@@ -18,6 +18,7 @@
 #define CUSTOM_DECAL_MAX      16    /* == sizeof decals[] in raycast.c */
 #define CUSTOM_CRAWL_MAX       8    /* == MAX_LOWCEIL_RECTS            */
 #define CUSTOM_LIGHT_MAX     512    /* == MAX_LIGHTS in raycast.c      */
+#define CUSTOM_DARK_MAX        8    /* == MAX_DARK_RECTS in raycast.c  */
 
 /* POD mirrors of the engine structures — primitives only, so custom_maps.c
  * compiles without seeing decal_t / the partition decor statics. */
@@ -45,6 +46,7 @@ typedef struct { uint8_t x, y, flags; } cm_pedge_t;
 typedef struct { fx_t x, y, z; uint8_t axis, kind, facing; }          cm_decal_t;  /* facing: engine angle (E0 S64 W128 N192); free-standing kinds use it, wall decals ignore it */
 typedef struct { uint8_t cx, cy; int8_t dx, dy; uint8_t len; }        cm_crawl_t;  /* one ceil_h_add_run (dx,dy signed: N/W = -1) */
 typedef struct cm_light_s { uint8_t cx, cy; }                        cm_light_t;  /* authored ceiling fixture, cell coords */
+typedef struct cm_dark_s { uint8_t x0, y0, x1, y1; }                 cm_dark_t;   /* DARK ROOM: unlit rect, inclusive cells */
 
 typedef struct {
     const char           *name;        /* shown in the menus; keep <= 16 chars  */
@@ -55,7 +57,10 @@ typedef struct {
     const cm_crawl_t     *crawls; uint8_t n_crawls;
     /* Authored ceiling fixtures. n_lights == 0 => init_lights() falls back to
      * its procedural every-other-cell grid (what every map did before). */
-    const cm_light_t     *lights; uint16_t n_lights;   /* >255 is real: a 32x32 can want 468 */
+    const cm_light_t     *lights; uint16_t n_lights;
+    /* Dark rooms: rects that get no ceiling fixtures and render toward fog —
+     * "lit only by whatever leaks in". n_dark == 0 => the map is lit normally. */
+    const cm_dark_t      *dark;   uint8_t n_dark;   /* >255 is real: a 32x32 can want 468 */
     fx_t                  spawn_x, spawn_y;  uint8_t spawn_angle;
     uint8_t               lobby_ceiling;     /* 0 = auto fixture grid (normal)   */
     uint8_t               place_outlets;     /* >0: raycast_place_outlets(N) too */

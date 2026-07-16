@@ -157,8 +157,17 @@ def resolve(path, reg):
             die("%s: light %d,%d is outside the %dx%d grid" % (base, cx, cy, w, h))
         lights.append((cx, cy))
 
+    # Dark rooms: unlit rects. Empty => every cell lit as usual.
+    dark = []
+    for d in m["dark"]:
+        for k in ("x0", "y0", "x1", "y1"):
+            if not (0 <= d[k] < (w if k[0] == "x" else h)):
+                die("%s: dark room %s=%d is outside the %dx%d grid" % (base, k, d[k], w, h))
+        dark.append((d["x0"], d["y0"], d["x1"], d["y1"]))
+
     for cap, lst in (("max_partitions", parts), ("max_decals", decals),
-                     ("max_crawl_runs", crawls), ("max_lights", lights)):
+                     ("max_crawl_runs", crawls), ("max_lights", lights),
+                     ("max_dark_rooms", dark)):
         if len(lst) > lim[cap]:
             die("%s: %d items exceed %s %d" % (base, len(lst), cap, lim[cap]))
     if len(pedges) > 255:
@@ -189,7 +198,7 @@ def resolve(path, reg):
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
             "pedges": pedges,
             "next": (m.get("next") or "").strip(),
-            "decals": decals, "crawls": crawls, "lights": lights, "spawn": spawn,
+            "decals": decals, "crawls": crawls, "lights": lights, "dark": dark, "spawn": spawn,
             "lobby_ceiling": m["options"]["lobby_ceiling"],
             "place_outlets": m["options"]["place_outlets"],
             "place_exit_door": m["options"]["place_exit_door"],
@@ -225,6 +234,11 @@ def emit(maps, out_path):
             for (cx, cy, dx, dy, ln) in m["crawls"]:
                 L.append("    { %d,%d,%d,%d,%d }," % (cx, cy, dx, dy, ln))  # dx,dy signed
             L.append("};")
+        if m["dark"]:
+            L.append("static const cm_dark_t %s_dark[] = {" % p)
+            for (x0, y0, x1, y1) in m["dark"]:
+                L.append("    { %d,%d,%d,%d }," % (x0, y0, x1, y1))
+            L.append("};")
         if m["lights"]:
             L.append("static const cm_light_t %s_lights[] = {" % p)
             for (cx, cy) in m["lights"]:
@@ -240,8 +254,9 @@ def emit(maps, out_path):
             decals = ("%s_decals,%d" % (p, len(m["decals"]))) if m["decals"] else "0,0"
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
             lights = ("%s_lights,%d" % (p, len(m["lights"]))) if m["lights"] else "0,0"
-            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
-                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls, lights,
+            dark   = ("%s_dark,%d"   % (p, len(m["dark"])))   if m["dark"]   else "0,0"
+            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
+                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls, lights, dark,
                       fxlit(sx), fxlit(sy), sa,
                       m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
                       m["next_idx"]))
