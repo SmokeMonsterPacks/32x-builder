@@ -79,6 +79,6 @@
     "max_partitions": 64,
     "max_decals": 16,
     "max_crawl_runs": 8,
-    "max_lights": 200
+    "max_lights": 512
   }
 }

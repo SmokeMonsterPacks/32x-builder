@@ -567,7 +567,12 @@ typedef struct { fx_t x, y; } light_t;
  * Backrooms reference where the drop ceiling holds a fixture roughly
  * every other panel run. 200 slots is enough for the densest possible
  * 32×32 walkable map (~250 cells / 4 = ~62 fixtures in practice). */
-#define MAX_LIGHTS 200
+/* 200 was quietly binding on EVERYTHING: the procedural every-other-cell grid
+ * alone wants 225 on a 32x32, so procgen maps were silently losing their last
+ * 25 fixtures, and a community map came in at 468. 512 covers both. The cost
+ * is per-frame iteration in draw_lights, so the purge below now touches only
+ * the live entries instead of the whole array — see raycast_purge_sprite_cache. */
+#define MAX_LIGHTS 512
 static light_t lights[MAX_LIGHTS];
 static int num_lights = 0;
 #define NUM_LIGHTS num_lights
@@ -686,7 +691,7 @@ static uint8_t cell_light[MAP_H][MAP_W];
  * ghosting. Read by init_lights, which runs from raycast_init AFTER the loader.
  * Not const-folded: the loaders run before raycast_init on every map change. */
 const struct cm_light_s *g_map_lights   = 0;
-uint8_t                  g_map_n_lights = 0;
+uint16_t                 g_map_n_lights = 0;
 
 static void init_lights(void) {
     num_lights = 0;
@@ -2158,7 +2163,9 @@ void raycast_draw_sprites(int col_start, int col_end) {
  * standups[] used to be const (ROM) and needed no purge; it's per-map RAM now.
  * WALL_DIST stays cache-through. */
 void raycast_purge_sprite_cache(void) {
-    purge_cache_range(lights,        sizeof lights);
+    /* Only the LIVE entries: sizeof lights is 4KB now, and purging all of it
+     * every frame would tax every map for the benefit of the densest one. */
+    purge_cache_range(lights,        (unsigned)num_lights * sizeof lights[0]);
     purge_cache_range(&num_lights,   sizeof num_lights);
     purge_cache_range(standups,      sizeof standups);
     purge_cache_range(&num_standups, sizeof num_standups);
