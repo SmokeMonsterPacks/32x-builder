@@ -1548,10 +1548,12 @@ void raycast_shimmer(void) {
 }
 
 
-/* Returns 1 if cell (x, y) is walkable, 0 if blocked or out of bounds. */
+/* Returns 1 if cell (x, y) is walkable, 0 if blocked or out of bounds. A void
+ * EXIT cell (==2) is an opening you walk out through, so it's walkable — the
+ * portal check fires as you reach it. */
 static int cell_passable(int x, int y) {
     if (x < 0 || x >= MAP_W || y < 0 || y >= MAP_H) return 0;
-    return world_map[y][x] == 0;
+    return world_map[y][x] == 0 || world_map[y][x] == 2;
 }
 
 /* Player's body radius in world cells — used by both wall and partition
@@ -3870,15 +3872,16 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         if (drawEnd >= fg_clip) drawEnd = fg_clip - 1;   /* band-covered rows */
         if (drawEnd < drawStart) goto overlay_pass;      /* fully hidden */
 
-        /* Black-exit cell (world_map == 2): a solid void wall — the dark
-         * doorway you walk through to leave the lobby. Fill the column
-         * black and skip all texture/baseboard work. Partitions still
-         * occlude it (they override perpDist above). */
+        /* VOID EXIT cell (world_map == 2): a missing wall — an OPENING, not a
+         * black fill. Draw no wall at all, so the ceiling grid and carpet
+         * already painted for this column show through, floor and ceiling
+         * running out and fogging into the distance: the see-through expanse
+         * of the lobby doorway. The cell is passable (see cell_passable) and
+         * stepping up to it portals out (raycast_door_portal_check). */
         if (hit_cell == 2 && !partition_hit) {
-            uint8_t *pb = (uint8_t *)fb + col + drawStart * SCREEN_W;
-            if (hr) for (int y = drawStart; y <= drawEnd; y++) { *(uint16_t *)pb = 0; pb += SCREEN_W; }
-            else    for (int y = drawStart; y <= drawEnd; y++) { *pb = 0; pb += SCREEN_W; }
-            goto overlay_pass;   /* partials in front must still band over it */
+            WALL_DIST(col) = 0x7FFFFFFF;             /* no wall: nothing to occlude */
+            if (hr) WALL_DIST(col + 1) = 0x7FFFFFFF;
+            goto overlay_pass;
         }
 
         /* Embedded DOOR (decal kind 1): on the columns it covers, draw the door
