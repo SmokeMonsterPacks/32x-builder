@@ -192,6 +192,10 @@ there's a full **web editor** for authoring them — a top-down grid editor plus
 a first-person **walk preview** that renders in the ROM's real palette and
 textures, so you can test a level in the browser before building anything.
 
+**New to it? Read [MAPPING.md](MAPPING.md)** — the full authoring guide:
+layers, budgets, story chains, submitting, and how to make a level read like the
+Backrooms instead of a maze.
+
 - **Try it:** [backrooms-32x-project.fly.dev](https://backrooms-32x-project.fly.dev/)
   (hosted, read-only — your work lives in your browser; use **Export** to save a
   `.map` to disk, or **Submit** to open a pull request).
