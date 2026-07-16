@@ -690,9 +690,13 @@ static uint8_t cell_light[MAP_H][MAP_W];
  * dark end without going pure black — "lit by what leaks in", not "off". */
 #define DARK_ROOM_SHADE 6
 static uint8_t cell_dark_seed[MAP_H][MAP_W];   /* build-time scratch (primary only) */
-#define MAX_DARK_RECTS  8
-static fx_t dark_rect[MAX_DARK_RECTS][4];   /* x0,y0,x1,y1 world, for column-clipping */
-static int  n_dark_rect = 0;
+/* No dark_rect[] here on purpose. The crawlspace keeps its rects because the
+ * bulkhead pass caps each tunnel MOUTH individually; dark rooms have no
+ * geometry, so once the cells are stamped and the union bbox is grown, the
+ * rects have nothing left to say. The renderer only ever needs the per-cell
+ * bit + the union. Per-frame cost therefore scales with the union's SCREEN
+ * COVERAGE, not the room count — two rooms at opposite corners cost more than
+ * eight clustered ones, because the row-reject stops rejecting. */
 int  g_dark_active = 0;                     /* 0 => every dark-room test compiles out */
 fx_t g_dark_x0, g_dark_y0, g_dark_x1, g_dark_y1;   /* union bbox, like g_lowceil_* */
 /* True if the world point is inside a dark room. Mirrors ceil_is_low(). */
@@ -718,18 +722,15 @@ uint8_t                  g_map_n_dark   = 0;
 static void init_lights(void) {
     /* Dark rooms first: the fixture placement below consults them, so a dark
      * room gets no ceiling lights the same way a crawlspace doesn't. */
-    n_dark_rect = 0; g_dark_active = 0;
+    g_dark_active = 0;
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++) cell_dark_seed[y][x] = 0;
-    for (int i = 0; i < g_map_n_dark && n_dark_rect < MAX_DARK_RECTS; i++) {
+    for (int i = 0; i < g_map_n_dark; i++) {
         int x0 = g_map_dark[i].x0, y0 = g_map_dark[i].y0;
         int x1 = g_map_dark[i].x1, y1 = g_map_dark[i].y1;
         for (int y = y0; y <= y1 && y < MAP_H; y++)
             for (int x = x0; x <= x1 && x < MAP_W; x++) cell_dark_seed[y][x] = 1;
         fx_t fx0 = FX(x0), fy0 = FX(y0), fx1 = FX(x1 + 1), fy1 = FX(y1 + 1);
-        dark_rect[n_dark_rect][0] = fx0; dark_rect[n_dark_rect][1] = fy0;
-        dark_rect[n_dark_rect][2] = fx1; dark_rect[n_dark_rect][3] = fy1;
-        n_dark_rect++;
         if (!g_dark_active) {
             g_dark_x0 = fx0; g_dark_x1 = fx1; g_dark_y0 = fy0; g_dark_y1 = fy1;
             g_dark_active = 1;

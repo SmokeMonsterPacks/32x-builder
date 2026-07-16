@@ -121,7 +121,8 @@ def lint_model(m, base, folder, reg, seen_names, errs):
                 e("grid row %d unknown glyph %r" % (ri, ch))
 
     for cap, k in (("max_partitions", "partitions"), ("max_decals", "decals"),
-                   ("max_crawl_runs", "crawls"), ("max_lights", "lights")):
+                   ("max_crawl_runs", "crawls"), ("max_lights", "lights"),
+                   ("max_dark_rooms", "dark")):
         if len(m[k]) > lim[cap]:
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))

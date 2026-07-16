@@ -18,7 +18,7 @@
 #define CUSTOM_DECAL_MAX      16    /* == sizeof decals[] in raycast.c */
 #define CUSTOM_CRAWL_MAX       8    /* == MAX_LOWCEIL_RECTS            */
 #define CUSTOM_LIGHT_MAX     512    /* == MAX_LIGHTS in raycast.c      */
-#define CUSTOM_DARK_MAX        8    /* == MAX_DARK_RECTS in raycast.c  */
+#define CUSTOM_DARK_MAX       64    /* only bound is uint8 n_dark (255) */
 
 /* POD mirrors of the engine structures — primitives only, so custom_maps.c
  * compiles without seeing decal_t / the partition decor statics. */
