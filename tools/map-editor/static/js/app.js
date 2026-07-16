@@ -406,7 +406,10 @@ function wireCanvas() {
           else deleteNearest(ME.model.partitions, p => distSeg(wx, wy, p));
         } else clickPartition(wx, wy);
         break;
-      case 'dark': clickDark(cx, cy); break;
+      case 'dark':
+        if (right) { if (ME.darkPending) ME.darkPending = null; else deleteDarkAt(cx, cy); }
+        else clickDark(cx, cy);
+        break;
       case 'crawl':
         right ? deleteCrawlAt(cx, cy) : clickCrawl(cx, cy); break;
       case 'lights':
@@ -566,6 +569,11 @@ function deleteNearest(arr, distFn, thresh = 0.6) {
 function deleteCrawlAt(cx, cy) {
   ME.model.crawls = ME.model.crawls.filter(c =>
     !runCells(c).some(([x, y]) => x === cx && y === cy));
+}
+function deleteDarkAt(cx, cy) {
+  if (!ME.model.dark) return;
+  ME.model.dark = ME.model.dark.filter(d =>
+    !(cx >= d.x0 && cx <= d.x1 && cy >= d.y0 && cy <= d.y1));
 }
 function distSeg(px, py, p) {                 /* point-to-segment distance */
   const vx = p.x2 - p.x1, vy = p.y2 - p.y1, wx = px - p.x1, wy = py - p.y1;

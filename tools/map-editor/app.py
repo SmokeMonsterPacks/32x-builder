@@ -315,13 +315,20 @@ def _lint_submission(model):
 
     with open(config.REGISTRY) as fh:
         reg = json.load(fh)
-    # Seed the duplicate-name check with every map already in the repo.
+    # Seed the duplicate-name check with the maps already in the repo — EXCEPT
+    # a community map with this same name, which is the one being UPDATED (the
+    # submission overwrites its file, it doesn't add a second copy). Without
+    # this, every resubmission of an existing map failed as a duplicate of
+    # itself. A same-named CORE map still collides: you can't shadow canon.
+    this_name = (model.get("name") or "").upper()
     seen, errs = {}, []
     for folder, name, path in _iter_map_files():
         try:
             nm = (mapfmt.parse(open(path).read()).get("name") or name).upper()
         except Exception:
             nm = name.upper()
+        if nm == this_name and (folder or "") == "community":
+            continue                      # updating this map, not duplicating it
         seen[nm] = "maps/%s/%s.map" % (folder or ".", name)
     lint_maps.lint_model(mapfmt.parse(text), model["name"], "community",
                          reg, seen, errs)
