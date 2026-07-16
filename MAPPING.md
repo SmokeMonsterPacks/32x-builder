@@ -92,20 +92,19 @@ they're 300 partitions.
 Three things get confused, so here's the difference:
 
 - **Exit door** (Decals layer) — a real door you open with A and walk through.
-  The deliberate, framed exit. This is the normal way to end a map or chain to
-  the next one.
-- **Exit void** (Grid layer, the black cell) — a **solid** black opening. It is
-  *not* floor and you do not walk through it; walking *beside* a small one warps
-  you to the next map. Keep it doorway-sized: a void opening of **4 cells or
-  fewer** portals; anything larger stays solid "endless dark" and does nothing.
-  A map may have only a few. It's the no-clip, fall-into-the-black exit.
-- **Dark room** (Dark rooms layer) — this is the one you want for a **dark
-  area you walk around in**. Unlit space, fog, lights turned down. If you're
-  reaching for black cells to make somewhere feel dark, use a Dark room
-  instead — black cells are exits, not shadow.
+  The deliberate, framed exit. A normal way to end a map or chain to the next.
+- **Void exit** (Grid layer, the `X` cell) — a **missing wall cell**. Put one on
+  a border and the wall is simply *gone* there: through the gap the floor and
+  ceiling run out and fade into the fog — the endless expanse, like the lobby
+  doorway. You **walk out through it** to leave. It goes **on a border** (the
+  map edge, or a wall), never floating in the middle of a room — one empty cell
+  is all it takes.
+- **Dark room** (Dark rooms layer) — this is the one for a **dark area you walk
+  around in**: unlit space, fog, lights down. If you want somewhere to *feel*
+  dark, use a Dark room. A void exit is a way *out*, not a shadow.
 
-A `next:` chain needs an exit the player can reach: an exit door, or a small
-void doorway. A wall of black cells is not an exit and won't satisfy a chain.
+A `next:` chain needs an exit the player can reach: an exit door,
+`place_exit_door`, or a void opening on a border.
 
 ## Story chains
 

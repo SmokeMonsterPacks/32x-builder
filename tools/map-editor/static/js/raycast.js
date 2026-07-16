@@ -391,7 +391,9 @@ window.RC = (function () {
         const lineH = wallBot - wallTop;
         const y0 = Math.max(0, Math.ceil(wallTop)), y1 = Math.min(H, Math.ceil(wallBot));
         if (val === 2) {
-          for (let y = y0; y < y1; y++) { const o = (y * W + x) * 4; data[o] = data[o + 1] = data[o + 2] = 0; data[o + 3] = 255; }
+          /* VOID EXIT: a missing wall. Draw NO wall, so the floor+ceiling cast
+           * above show through, running out into the expanse — matches the
+           * engine's see-through opening. */
         } else {
           const tex = A().textures.wall, baseIdx = B.WALL_BASE;
           let bgShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));

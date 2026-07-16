@@ -8,7 +8,7 @@
     "palette": [
       { "value": 0, "id": "open",      "glyph": ".", "label": "Open floor", "color": "#1a1a14" },
       { "value": 1, "id": "wall",      "glyph": "#", "label": "Wall",       "color": "#b8a85a" },
-      { "value": 2, "id": "blackexit", "glyph": "X", "label": "Exit void (SOLID \u2014 small opening warps to next map)", "color": "#000000" }
+      { "value": 2, "id": "blackexit", "glyph": "X", "label": "Void exit (border opening \u2014 walk out into the expanse)", "color": "#1a1a2e" }
     ]
   },
 
@@ -81,7 +81,6 @@
     "max_crawl_runs": 8,
     "max_lights": 512,
     "max_dark_rooms": 64,
-    "max_partition_edges": 255,
-    "max_exit_voids": 4
+    "max_partition_edges": 255
   }
 }

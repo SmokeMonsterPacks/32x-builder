@@ -84,31 +84,25 @@ def parse_map(path, errs):
         return None
 
 
-EXIT_VOID_MAX = 4   # mirror of EXIT_VOID_MAX in raycast.c: a void region this
-                    # small is a walk-through exit doorway; larger stays solid.
-
-def _exit_void_regions(m):
-    """(doorways, oversized): count of black-void ('X') regions that ARE exit
-    doorways (<= EXIT_VOID_MAX cells) and count that are too big to portal."""
+def _void_cells(m):
+    """All void-exit ('X') cells as (x, y)."""
     g = m["grid"]; h = len(g); w = len(g[0]) if h else 0
-    seen = [[False] * w for _ in range(h)]
-    doorways = oversized = 0
-    for y0 in range(h):
-        for x0 in range(w):
-            if g[y0][x0] != 'X' or seen[y0][x0]:
-                continue
-            stack, n = [(x0, y0)], 0
-            seen[y0][x0] = True
-            while stack:
-                x, y = stack.pop(); n += 1
-                for nx, ny in ((x+1,y),(x-1,y),(x,y+1),(x,y-1)):
-                    if 0 <= nx < w and 0 <= ny < h and not seen[ny][nx] and g[ny][nx] == 'X':
-                        seen[ny][nx] = True; stack.append((nx, ny))
-            if n <= EXIT_VOID_MAX:
-                doorways += 1
-            else:
-                oversized += 1
-    return doorways, oversized
+    return [(x, y) for y in range(h) for x in range(w) if g[y][x] == 'X']
+
+def _wall_voids(m):
+    """Void cells that read as a MISSING WALL — on the map's outer edge, or with
+    a wall next to them (a gap in a wall line). An 'X' floating in open floor is
+    not that. The lobby's void (a gap in the playable-room wall) is wall-
+    adjacent, so it qualifies; a stray 'X' in a room does not."""
+    g = m["grid"]; h = len(g); w = len(g[0]) if h else 0
+    out = []
+    for (x, y) in _void_cells(m):
+        if x == 0 or x == w - 1 or y == 0 or y == h - 1:
+            out.append((x, y)); continue
+        if any(0 <= x+dx < w and 0 <= y+dy < h and g[y+dy][x+dx] == '#'
+               for dx, dy in ((1,0),(-1,0),(0,1),(0,-1))):
+            out.append((x, y))
+    return out
 
 
 def lint_model(m, base, folder, reg, seen_names, errs):
@@ -154,16 +148,16 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
-    # Exit voids are SOLID PORTALS, not floor/decoration. A pile of small void
-    # openings (each a warp trigger) means they were painted as dark floor —
-    # steer that to Dark Rooms, which is the real "dark walk-through" tool.
-    dw, _ov = _exit_void_regions(m)
-    void_cap = lim.get("max_exit_voids", 4)
-    if dw > void_cap:
-        e("%d black-void exit doorways — each is a SOLID exit portal (walking "
-          "beside one warps you to the next map), not floor. Max %d. For dark "
-          "walk-through areas use DARK ROOMS instead; keep exits to a few small "
-          "doorways." % (dw, void_cap))
+    # A void exit is a MISSING WALL cell on the border: an opening you walk out
+    # through, floor and ceiling running past it into the expanse. One floating
+    # in the middle of a room is not that. (For a dark room, use Dark Rooms.)
+    interior = [c for c in _void_cells(m) if c not in _wall_voids(m)]
+    if interior:
+        e("void exit cell%s at %s must be on the map border (a missing wall "
+          "cell you walk out through), not floating in a room. For a dark area "
+          "use a Dark Room instead."
+          % ("s" if len(interior) > 1 else "",
+             ", ".join("(%d,%d)" % c for c in interior[:5])))
 
     edge_cap = lim.get("max_partition_edges", 255)
     if edge_total > edge_cap:
@@ -219,12 +213,10 @@ def lint_model(m, base, folder, reg, seen_names, errs):
     if nxt:
         has_door = (any(d.get("kind") == "door" for d in m["decals"])
                     or m["options"].get("place_exit_door"))
-        doorways, _ = _exit_void_regions(m)
-        if not (has_door or doorways):
-            e("next: %s needs an exit — place an exit door, set place_exit_door: 1, "
-              "or add a small black-void doorway (a void opening of %d cells or "
-              "fewer; a larger void stays solid dark and won't portal)"
-              % (nxt, EXIT_VOID_MAX))
+        if not (has_door or _wall_voids(m)):
+            e("next: %s needs an exit the player can reach — an exit door, "
+              "place_exit_door: 1, or a void opening on the border (a missing "
+              "wall cell you walk out through)." % nxt)
         if nxt.upper() == (m.get("name") or "").upper():
             e("next: points at itself")
 
