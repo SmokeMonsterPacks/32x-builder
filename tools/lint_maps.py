@@ -60,15 +60,28 @@ def _reachable(m, glyphs, sx, sy):
     return seen
 
 
-def lint_map(path, reg, seen_names, errs):
-    """Lint one .map FILE (the CI/build gate). Parses, then defers to
-    lint_model — which the editor also calls directly on submissions."""
+def parse_map(path, errs):
+    """Parse one .map FILE, or record a readable error and return None.
+
+    A contributor's first failure is usually 'this isn't a .map at all' (a
+    description typed into the GitHub new-file box, say), so say that plainly
+    instead of leaking a parser error about header keys."""
     base = os.path.relpath(path, ROOT)
     try:
-        m = mapfmt.parse(open(path).read())
+        text = open(path).read()
+    except OSError as ex:
+        errs.append("%s: cannot read (%s)" % (base, ex)); return None
+    try:
+        return mapfmt.parse(text)
     except mapfmt.MapFormatError as ex:
-        errs.append("%s: %s" % (base, ex)); return
-    lint_model(m, base, os.path.basename(os.path.dirname(path)), reg, seen_names, errs)
+        if "[grid]" not in text:
+            errs.append("%s: this doesn't look like a map file — it has no "
+                        "[grid] section. Export a .map from the editor "
+                        "(backrooms-32x-project.fly.dev) and commit that file. "
+                        "(parser said: %s)" % (base, ex))
+        else:
+            errs.append("%s: %s" % (base, ex))
+        return None
 
 
 def lint_model(m, base, folder, reg, seen_names, errs):
@@ -217,16 +230,24 @@ def lint_assets(reg, sh_dir, errs):
 def lint_all(maps_dir, reg, sh_dir):
     errs, seen = [], {}
     paths = sorted(glob.glob(os.path.join(maps_dir, "**", "*.map"), recursive=True))
+    # Parse ONCE, up front. This used to parse every map three times (here, the
+    # story-chain scan, the pickable count) and the last one was unguarded — so
+    # a single unparseable file crashed the whole lint with a traceback AFTER
+    # the readable error had already been recorded. Contributors saw a Python
+    # stack dump instead of "your file isn't a map". Files that fail to parse
+    # are reported and then skipped by everything downstream.
+    models = {}
     for path in paths:
-        lint_map(path, reg, seen, errs)
+        m = parse_map(path, errs)
+        if m is not None:
+            models[path] = m
+    for path, m in models.items():
+        lint_model(m, os.path.relpath(path, ROOT),
+                   os.path.basename(os.path.dirname(path)), reg, seen, errs)
     # Story chains across the whole tree: every next: target must exist, and
     # following the links must never loop (stories END; procgen is the infinite).
     nxt_of, file_of = {}, {}
-    for p in paths:
-        try:
-            mm = mapfmt.parse(open(p).read())
-        except Exception:
-            continue
+    for p, mm in models.items():
         nm = (mm.get("name") or "").upper()
         file_of[nm] = os.path.relpath(p, ROOT)
         if (mm.get("next") or "").strip():
@@ -245,9 +266,9 @@ def lint_all(maps_dir, reg, sh_dir):
             seen_chain.add(cur)
             cur = nxt_of[cur]
 
-    pickable = sum(1 for p in paths
-                   if reg.get("roles", {}).get(mapfmt.parse(open(p).read()).get("role", "community"), {}).get("picker"))
-    if paths and pickable == 0:
+    pickable = sum(1 for m in models.values()
+                   if reg.get("roles", {}).get(m.get("role", "community"), {}).get("picker"))
+    if models and pickable == 0:
         errs.append("maps: no selectable (picker) map exists")
     lint_assets(reg, sh_dir, errs)
     return errs
