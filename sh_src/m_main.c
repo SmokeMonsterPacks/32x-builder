@@ -21,6 +21,13 @@ uint16_t currentFB = 0;
  * controller's MODE button (edge-detected once per frame from any loop). */
 uint8_t g_metrics_on = 0;
 uint8_t g_padtest_on = 0;   /* MODE+Z: raw controller register overlay */
+
+/* HUD text now lives on the GENESIS tile layer (Name Table B via HwMdPuts),
+ * composited over the 3D — every glyph is a framebuffer store the SH-2 no
+ * longer makes (the measured win: offload to the idle 68K, not FB tricks).
+ * 0x4000 = palette line 2 = red (CRAM entry 33). */
+#define HUD_TILE_COLOR 0x4000
+
 /* Automap overlay (MODE+B cycles): 0 = off, 1 = FULL (whole map, north-up,
  * arrow rotates), 2 = ROTATE (player fixed at center pointing screen-up, the
  * world rotating around the reticle in real time). d32xr-style vectors, but
@@ -84,10 +91,23 @@ static void pad_test_draw(uint8_t *fb, uint16_t snap) {
     l4[0]='H';l4[1]=':';
     for (int i = 0; i < 4; i++) { pad_hex4(l4+2+i*5, hist[i]); l4[6+i*5] = ' '; }
     l4[21]=0;
-    font_draw_string(fb, 4, 40, l1, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
-    font_draw_string(fb, 4, 52, l2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
-    font_draw_string(fb, 4, 64, l3, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
-    font_draw_string(fb, 4, 76, l4, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    (void)fb;                                 /* text is on the Genesis layer now */
+    HwMdPuts(l1, HUD_TILE_COLOR, 0, 5);
+    HwMdPuts(l2, HUD_TILE_COLOR, 0, 6);
+    HwMdPuts(l3, HUD_TILE_COLOR, 0, 7);
+    HwMdPuts(l4, HUD_TILE_COLOR, 0, 8);
+}
+
+/* The nametable is single-buffered, so HUD tiles persist after MODE+Y off —
+ * blank the rows the HUD used. One-time on toggle-off; ~one frame of COMM. */
+static void hud_genesis_blank(void) {
+    static char blank[41] = "                                        ";
+    HwMdPuts(blank, 0, 0, 0);    /* X/Y + T/H/S */
+    HwMdPuts(blank, 0, 0, 2);    /* A */
+    HwMdPuts(blank, 0, 0, 24);   /* D/Q/N/V/M (partition campaign) */
+    HwMdPuts(blank, 0, 0, 25);   /* O/P/K/E */
+    HwMdPuts(blank, 0, 0, 26);   /* C/G/R/W/F */
+    HwMdPuts(blank, 0, 0, 27);   /* build stamp */
 }
 
 static void metrics_mode_check(uint16_t pad) {
@@ -100,12 +120,22 @@ static void metrics_mode_check(uint16_t pad) {
     if (pad & SEGA_CTRL_MODE) {
         if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
             SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 4);
-        if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y))
+        if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y)) {
             g_metrics_on ^= 1;
+            if (!g_metrics_on) hud_genesis_blank();
+        }
         if ((pad & SEGA_CTRL_B) && !(prev & SEGA_CTRL_B))
             g_automap_on = (uint8_t)((g_automap_on + 1) % 3);
-        if ((pad & SEGA_CTRL_Z) && !(prev & SEGA_CTRL_Z))
+        if ((pad & SEGA_CTRL_C) && !(prev & SEGA_CTRL_C))   /* partition diag (HUD J) */
+            SHARED_UC->part_diag = (uint8_t)((SHARED_UC->part_diag + 1) % 3);
+        if ((pad & SEGA_CTRL_Z) && !(prev & SEGA_CTRL_Z)) {
             g_padtest_on ^= 1;
+            if (!g_padtest_on) {
+                static char blank[41] = "                                        ";
+                HwMdPuts(blank, 0, 0, 5); HwMdPuts(blank, 0, 0, 6);
+                HwMdPuts(blank, 0, 0, 7); HwMdPuts(blank, 0, 0, 8);
+            }
+        }
         if (g_automap_on) {
             if (pad & SEGA_CTRL_UP) {                    /* held: ramp in */
                 am_s_tgt += am_s_tgt >> 4;
@@ -196,10 +226,10 @@ static void prof_sample_and_draw(uint8_t *fb) {
     text[23] = 0;
     /* Top-right corner. LIGHT_BASE[0] (palette idx 49) is the brightest
      * fixture-white, reads on every background. */
-    font_draw_string(fb, SCREEN_W - 8 * 23 - 4, 4, text, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
-    /* Build stamp on the debug HUD: every metrics screenshot self-identifies
-     * (no more guessing which ROM produced a capture). */
-    font_draw_string(fb, SCREEN_W - 8 * 14 - 4, SCREEN_H - 36, "B" VERSION_BUILD_STR " " VERSION_SHA_STR, AMAP_RED_BRIGHT);
+    HwMdPuts(text, HUD_TILE_COLOR, 16, 0);   /* T/H/S, top-right, GENESIS layer */
+    /* Build stamp: every metrics screenshot self-identifies. GENESIS layer. */
+    HwMdPuts((char *)("B" VERSION_BUILD_STR " " VERSION_SHA_STR),
+             HUD_TILE_COLOR, 25, 27);
 
     /* Second line: primary-half per-pass breakdown — Clear / ceiling-Grid /
      * caRpet / Walls (raw FRT ticks), then F = effective FPS. Per-pass tells
@@ -231,7 +261,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
         t2[pos++] = '0' + (fps / 10);
         t2[pos++] = '0' + (fps % 10);
         t2[pos] = 0;
-        font_draw_string(fb, 4, SCREEN_H - 12, t2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+        HwMdPuts(t2, HUD_TILE_COLOR, 0, 26);   /* C/G/R/W/F, GENESIS layer */
     }
 
     /* Third line: the SERIAL TAIL — primary-only post-sync work that the
@@ -240,13 +270,13 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * the ~25%-of-frame block that was invisible until now. */
     {
         extern volatile uint16_t prof_pass_ovl, prof_pass_sprite;
-        extern volatile uint16_t prof_split_col, prof_dda_fat;
-        static const char lbl[4] = {'O', 'P', 'K', 'E'};
-        uint16_t pv[4] = { prof_pass_ovl, prof_pass_sprite,
+        extern volatile uint16_t prof_split_col, prof_dda_fat, prof_ovl_px;
+        static const char lbl[5] = {'O', 'U', 'P', 'K', 'E'};
+        uint16_t pv[5] = { prof_pass_ovl, prof_ovl_px, prof_pass_sprite,
                            prof_split_col, prof_dda_fat };
-        char t3[36];
+        char t3[42];
         int pos = 0;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             t3[pos++] = lbl[i];
             t3[pos++] = ':';
             uint16_t x = pv[i];
@@ -255,7 +285,37 @@ static void prof_sample_and_draw(uint8_t *fb) {
             t3[pos++] = ' ';
         }
         t3[pos] = 0;
-        font_draw_string(fb, 4, SCREEN_H - 24, t3, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+        HwMdPuts(t3, HUD_TILE_COLOR, 0, 25);   /* O/P/K/E, GENESIS layer */
+    }
+
+    /* Fourth line — the PARTITION CAMPAIGN counters (primary half, per frame):
+     * D = DDA steps walked, Q = run-extent cells re-scanned (per contact per
+     * column!), N = partial contacts kept, V = columns on the slow overlay
+     * path, M = columns promoted to the fast main path. Together with O
+     * (overlay ticks) these say whether the wall pass's time goes to the DDA
+     * walk, the run re-scans, or the overlay draw. */
+    {
+        extern volatile uint16_t prof_dda_steps, prof_runwalk, prof_efg_kept,
+                                 prof_ovl_cols, prof_promote_cols;
+        static const char lbl[5] = {'D', 'Q', 'N', 'V', 'M'};
+        static const uint8_t wid[5] = {5, 5, 5, 3, 3};   /* V/M are column counts <= 320 */
+        uint16_t pv[5] = { prof_dda_steps, prof_runwalk, prof_efg_kept,
+                           prof_ovl_cols, prof_promote_cols };
+        char t4[42];
+        int pos = 0;
+        for (int i = 0; i < 5; i++) {
+            t4[pos++] = lbl[i];
+            t4[pos++] = ':';
+            uint16_t x = pv[i];
+            for (int d = wid[i] - 1; d >= 0; d--) { t4[pos + d] = '0' + (x % 10); x /= 10; }
+            pos += wid[i];
+            t4[pos++] = ' ';
+        }
+        t4[pos++] = 'J';                     /* partition diag mode (MODE+C) */
+        t4[pos++] = ':';
+        t4[pos++] = (char)('0' + SHARED_UC->part_diag);
+        t4[pos] = 0;
+        HwMdPuts(t4, HUD_TILE_COLOR, 0, 24);   /* D/Q/N/V/M + J, GENESIS layer */
     }
 }
 
@@ -472,8 +532,8 @@ static void pos_draw(uint8_t *fb) {
     line2[2] = '0' + (angle % 10);
     line2[5] = 0;
 
-    font_draw_string(fb, 4,  4, line1, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
-    font_draw_string(fb, 4, 16, line2, AMAP_RED_BRIGHT);   /* debug text: red reads on screenshots */
+    HwMdPuts(line1, HUD_TILE_COLOR, 0, 0);   /* X/Y, top-left, GENESIS layer */
+    HwMdPuts(line2, HUD_TILE_COLOR, 0, 2);   /* A, GENESIS layer */
 }
 
 void swapBuffers(void) {
@@ -536,6 +596,121 @@ static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *lab
         lobby_hl_bar(fb, x + 2 * 8, y, nl * 8);
     }
     font_draw_string(fb, x, y, line, 49);   /* menu text — stays white */
+}
+
+/* ---- Start-menu flip-out ------------------------------------------------
+ * On a final selection the whole menu pane is grabbed off the framebuffer and
+ * replayed as a rotating textured quad: it hinges up in perspective and recedes
+ * to nothing over the live lobby, so the menu physically lifts off and you're
+ * standing in the level. This is the payoff for keeping the start menu on the
+ * 32X — a per-pixel warp the framebuffer does for free and tiles never could. */
+#define PANE_X 48
+#define PANE_Y 24
+#define PANE_W 224
+#define PANE_H 156
+static uint8_t pane_buf[PANE_W * PANE_H];   /* SDRAM: captured menu pane */
+
+static void capture_menu_pane(const uint8_t *fb) {
+    for (int v = 0; v < PANE_H; v++) {
+        const uint8_t *s = fb + (PANE_Y + v) * SCREEN_W + PANE_X;
+        uint8_t *d = pane_buf + v * PANE_W;
+        for (int u = 0; u < PANE_W; u++) d[u] = s[u];
+    }
+}
+
+/* Which exit transform the commit plays. Cycled at the start menu with
+ * MODE+A, which also fires an instant slowed preview — the exploration loop
+ * needs no rebuilds. 0 hinge-up, 3 fall-forward, 4 fly-through. */
+static uint8_t g_flip_style = 3;
+
+static void menu_flip_out(int style, int NF) {
+    const int D  = 220;            /* viewer distance, px */
+    const int CX = SCREEN_W / 2;   /* pane centre x */
+    const int CY0 = PANE_Y + PANE_H / 2;
+    const int HY  = PANE_Y + PANE_H;             /* bottom hinge (fall-forward) */
+    for (int f = 1; f <= NF; f++) {
+        SHARED_UC->frame_count++;
+        raycast_render();                            /* live lobby behind */
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+
+        if (style == 4) {
+            /* FLY-THROUGH: zoom about the pane centre (scale 1..8) with a
+             * progressive checker dissolve — the menu blows past the camera
+             * and shreds as you punch through into the level. Per-pixel work
+             * is one add + mask via the incremental u walk. */
+            fx_t k   = FX_ONE + (fx_t)(((int64_t)f * FX(7)) / NF);
+            fx_t inv = FX_DIV(FX_ONE, k);
+            int diss = (f * 17) / NF;                /* dissolve 0..16 */
+            for (int sy = 0; sy < SCREEN_H; sy++) {
+                int v = PANE_H / 2 + (int)(((int64_t)(sy - CY0) * inv) >> FX_SHIFT);
+                if (v < 0 || v >= PANE_H) continue;
+                const uint8_t *srow = pane_buf + v * PANE_W;
+                uint8_t *drow = fb + sy * SCREEN_W;
+                fx_t u_fx = ((fx_t)(PANE_W / 2) << FX_SHIFT) - (fx_t)CX * inv;
+                int hash = (sy * 13) & 15;
+                for (int sx = 0; sx < SCREEN_W; sx++, u_fx += inv) {
+                    hash = (hash + 7) & 15;
+                    if (hash < diss) continue;       /* dissolved away */
+                    int u = (int)(u_fx >> FX_SHIFT);
+                    if ((unsigned)u < (unsigned)PANE_W) drow[sx] = srow[u];
+                }
+            }
+        } else if (style == 3) {
+            /* FALL-FORWARD: hinged at the pane's bottom edge, the top falls
+             * away from the camera until it lies flat — the menu topples like
+             * the neanderthal. v measured up from the hinge:
+             * v = dy*D/(D*cos - dy*sin), width scale 1/s = (D + v*sin)/D. */
+            uint8_t ang = (uint8_t)((f * 60) / NF);  /* 0..~84 deg */
+            int32_t cs = COS_FX(ang), sn = SIN_FX(ang);
+            for (int sy = 0; sy < SCREEN_H; sy++) {
+                int dyp = HY - sy;                   /* px above the hinge */
+                if (dyp < 0) continue;
+                int32_t denom = (int32_t)D * cs - dyp * sn;
+                if (denom <= 0) continue;
+                int32_t vpx = (int32_t)((((int64_t)dyp * D) << 16) / denom);
+                int v = PANE_H - 1 - vpx;            /* source row (top falls) */
+                if (v < 0 || v >= PANE_H) continue;
+                int32_t denom_s = ((int32_t)D << 16) + vpx * sn;  /* D + v*sin */
+                int half_w = (int)((((int64_t)(PANE_W / 2) * D) << 16) / denom_s);
+                int32_t inv_s = (int32_t)((int64_t)denom_s / D);
+                const uint8_t *srow = pane_buf + v * PANE_W;
+                uint8_t *drow = fb + sy * SCREEN_W;
+                int x0 = CX - half_w; if (x0 < 0) x0 = 0;
+                int x1 = CX + half_w; if (x1 > SCREEN_W) x1 = SCREEN_W;
+                for (int sx = x0; sx < x1; sx++) {
+                    int u = PANE_W / 2 + (int)(((int32_t)(sx - CX) * inv_s) >> 16);
+                    if (u >= 0 && u < PANE_W) drow[sx] = srow[u];
+                }
+            }
+        } else {
+            /* HINGE-UP (the original): tilts back at the top and lifts away. */
+            uint8_t ang = (uint8_t)((f * 56) / NF);      /* tilt: 0..~78 deg */
+            int CY = CY0 - (int)((int32_t)f * 46 / NF);  /* drift up as it lifts */
+            int32_t cs = COS_FX(ang);                    /* 16.16 */
+            int32_t sn = SIN_FX(ang);                    /* 16.16 */
+            for (int sy = 0; sy < SCREEN_H; sy++) {
+                int dy = sy - CY;
+                int32_t denom = (int32_t)D * cs + dy * sn;
+                if (denom <= 0) continue;
+                int32_t Y = (int32_t)((((int64_t)dy * D) << 16) / denom);
+                int v = Y + PANE_H / 2;
+                if (v < 0 || v >= PANE_H) continue;
+                int32_t denom_s = ((int32_t)D << 16) - Y * sn;   /* (D - Y*sin) */
+                if (denom_s <= 0) continue;
+                int half_w = (int)((((int64_t)(PANE_W / 2) * D) << 16) / denom_s);
+                int32_t inv_s = (int32_t)((int64_t)denom_s / D);  /* 16.16 = 1/s */
+                const uint8_t *srow = pane_buf + v * PANE_W;
+                uint8_t *drow = fb + sy * SCREEN_W;
+                int x0 = CX - half_w; if (x0 < 0) x0 = 0;
+                int x1 = CX + half_w; if (x1 > SCREEN_W) x1 = SCREEN_W;
+                for (int sx = x0; sx < x1; sx++) {
+                    int u = PANE_W / 2 + (int)(((int32_t)(sx - CX) * inv_s) >> 16);
+                    if (u >= 0 && u < PANE_W) drow[sx] = srow[u];
+                }
+            }
+        }
+        swapBuffers();
+    }
 }
 
 /* SHOW CONTROLS sub-screen: the title and the controls legend over the frozen
@@ -716,6 +891,8 @@ int m_main(void) {
     const int ROW_H = 14, LIST_Y = 52, LIST_H = VIS * ROW_H;
     int scroll_px = 0;
     int nav_hold = 0;             /* frames UP/DOWN held, for key-repeat */
+    int do_flip = 0;              /* selection committed -> play the flip-out */
+    int preview_flip = 0;         /* MODE+A: play a slowed preview this frame */
     uint32_t frame = 0;           /* time-in-lobby — entropy for procgen */
     const uint16_t LOBBY_COMMIT = SEGA_CTRL_START | SEGA_CTRL_A | SEGA_CTRL_B |
                                   SEGA_CTRL_C | SEGA_CTRL_X | SEGA_CTRL_Y | SEGA_CTRL_Z;
@@ -723,6 +900,7 @@ int m_main(void) {
     /* Phase A — frozen menu over the still photo-perspective. */
     {
         uint16_t prev_pad = 0xFFFF;
+        int committing = 0;       /* map/proc chosen -> capture + break this frame */
         for (;;) {
             HwMdReadPad(0);
             uint16_t pad = MARS_SYS_COMM8;
@@ -848,7 +1026,14 @@ int m_main(void) {
                     prev_pad = 0xFFFF;       /* swallow the still-held button */
                     continue;
                 }
-                if (items[cur].kind != IT_FOLD) break;
+                if (items[cur].kind != IT_FOLD) committing = 1;
+            }
+            /* MODE+A: cycle the exit transform and preview it slowed,
+             * right here, no rebuild — 0 hinge-up, 3 fall, 4 fly-through. */
+            if ((pad & SEGA_CTRL_MODE) && (pressed & SEGA_CTRL_A)) {
+                g_flip_style = (g_flip_style == 0) ? 3
+                             : (g_flip_style == 3) ? 4 : 0;
+                preview_flip = 1;
             }
             metrics_mode_check(pad);
             frame++;
@@ -954,7 +1139,15 @@ int m_main(void) {
             font_draw_string(fb_text, 8, 8, padline, 49);
             if (g_metrics_on) { prof_sample_and_draw(fb_text); pos_draw(fb_text); }
             if (g_padtest_on) pad_test_draw(fb_text, pad);
+            if (committing || preview_flip) capture_menu_pane(fb_text);
+            if (committing) do_flip = 1;
             swapBuffers();
+            if (preview_flip) {
+                preview_flip = 0;
+                menu_flip_out(g_flip_style, 12);   /* slowed so it reads */
+                prev_pad = 0xFFFF;                 /* swallow the held combo */
+            }
+            if (committing) break;
         }
     }
 
@@ -971,6 +1164,7 @@ int m_main(void) {
             &g_procgen_params.crawlspaces, &g_procgen_params.outlets,
             &g_procgen_params.spotted,   &g_procgen_params.lowdivs };
         int row = 0;
+        int committing = 0;       /* START locks in -> capture + break this frame */
         uint16_t prev_pad = 0xFFFF;
         for (;;) {
             HwMdReadPad(0);
@@ -982,7 +1176,7 @@ int m_main(void) {
             if ((pressed & SEGA_CTRL_LEFT)  && *wv[row] > 0) (*wv[row])--;
             if ((pressed & SEGA_CTRL_RIGHT) && *wv[row] < PROCGEN_MAX_W) (*wv[row])++;
             if (pressed & SEGA_CTRL_C) procgen_params_default();
-            if (pressed & SEGA_CTRL_START) break;     /* lock in, generate */
+            if (pressed & SEGA_CTRL_START) committing = 1;   /* lock in, generate */
             metrics_mode_check(pad);
             frame++;
 
@@ -1012,9 +1206,14 @@ int m_main(void) {
                              "L/R ADJUST   C DEFAULTS", 49);
             font_draw_string(fb_text, (SCREEN_W - 14 * 8) / 2, SCREEN_H - 14,
                              "START GENERATE", 49);
+            if (committing) { capture_menu_pane(fb_text); do_flip = 1; }
             swapBuffers();
+            if (committing) break;
         }
     }
+
+    if (do_flip)
+        menu_flip_out(g_flip_style, g_flip_style == 4 ? 4 : g_flip_style == 3 ? 3 : 2);
 
     /* Phase B — menu dismissed, choice locked. Walk up to the black void
      * (world_map cell == 2, the dark exit doorway along the east wall) and

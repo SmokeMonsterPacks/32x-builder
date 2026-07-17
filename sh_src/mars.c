@@ -220,6 +220,13 @@ static void NextChr(char c, uint16_t color) {
 		c = c - 'A' + 12;
 	} else if(c >= 'a' && c <= 'z') {
 		c = c - 'a' + 12;
+	} else if(c == ':') { c = 38;
+	} else if(c == '.') { c = 39;
+	} else if(c == '-') { c = 40;
+	} else if(c == '>') { c = 41;
+	} else if(c == '|') { c = 42;
+	} else if(c == '+') { c = 43;
+	} else if(c == '%') { c = 44;
 	} else if(c == ' ') {
 		c = 0;
 	} else {

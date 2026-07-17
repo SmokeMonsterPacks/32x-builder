@@ -141,7 +141,7 @@ _start:
 		move.l	#VRAM_ADDR_CMD,(a1)		/* write VRAM address 0 */
 		lea		(VDP_DATA_PORT),a2		/* VDP data reg */
 		lea		font_data(pc),a0
-		move.w	#38*8-1,d2
+		move.w	#45*8-1,d2
 	7:
 		move.l	(a0)+,d0				/* font fg mask */
 		move.l	d0,d1

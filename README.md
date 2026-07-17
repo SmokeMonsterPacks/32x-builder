@@ -7,7 +7,11 @@ raycaster, procedural liminal-space level generation, first-class **slab
 partitions** (full-height dividers, half-height cubicle walls, and wood
 countertops you can see over), dynamic ceiling lighting, a 3D cardboard-box
 intro rendered live (not a video), crawl/crouch with full eye-height
-perspective, and a settings menu.
+perspective, and a settings menu. All in-game text — debug HUD and menus —
+renders on the **Genesis VDP tile layer** (drawn by the otherwise-idle 68K,
+composited over the 3D for free), and the iconic cardboard neanderthal can be
+shoved over: he tips, falls, and stays on the carpet — face up or face down,
+depending on which side you pushed.
 
 It also ships a **browser-based level editor** with a first-person walk
 preview, and a **community-map pipeline**: design a map, submit it as a GitHub
@@ -176,6 +180,8 @@ of the way by default:
 | **MODE + Y** | Toggle the on-screen profiler (frame/render timers, per-pass ticks) |
 | **MODE + B** | Cycle the automap overlay |
 | **MODE + Z** | Controller-input tester (raw pad register — for diagnosing emulator key binds) |
+| **MODE + C** | Partition-diagnostic mode (HUD `J`): normal / legacy paths / gate-off pricing |
+| **MODE + A** | *(start menu)* Cycle the menu-exit transform — hinge-up / fall-forward / fly-through — with an instant slowed preview |
 
 `WALLS: AUTO` (the default) measures frame time and drops to half-res only when
 a scene gets heavy, so the image stays crisp when it can afford to. `SERL`

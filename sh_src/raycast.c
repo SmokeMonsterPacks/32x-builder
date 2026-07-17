@@ -292,9 +292,28 @@ static const standup_t fixed_standups[] = {
  * sprite-cache purge. */
 static uint8_t standup_armed[MAX_STANDUPS];
 static uint8_t standup_down[MAX_STANDUPS];
+/* Direction a toppled cutout lies, base->tip (engine angle). Set at the shove
+ * to the player's facing, so it falls away from the camera. Read by the
+ * secondary for the fallen-flat draw, so it rides the sprite-cache purge. */
+static uint8_t standup_fall_dir[MAX_STANDUPS];
+/* Tip-over animation progress, 0..STANDUP_FALL_MAX. 0 while standing; set to 1
+ * at the shove and advanced one step per frame. Below MAX it renders as a rigid
+ * panel hinged at the feet, rotating down; at MAX it hands off to the flat
+ * floor bitmap. Read by the secondary for its draw half, so it rides the purge. */
+#define STANDUP_FALL_MAX 5
+static uint8_t standup_fall_prog[MAX_STANDUPS];
+/* Which side hit the floor: 1 = pushed from the FRONT, figure lands face up
+ * (the printed side shows); 0 = pushed from BEHIND, lands face down — the
+ * blank cardboard back shows, mirrored. Set at the shove from the same
+ * front/back dot test the standing billboard uses. */
+static uint8_t standup_fall_face[MAX_STANDUPS];
 static void standups_clear(void) {
     num_standups = 0;
-    for (int i = 0; i < MAX_STANDUPS; i++) { standup_armed[i] = 0; standup_down[i] = 0; }
+    for (int i = 0; i < MAX_STANDUPS; i++) {
+        standup_armed[i] = 0; standup_down[i] = 0;
+        standup_fall_dir[i] = 0; standup_fall_prog[i] = 0;
+        standup_fall_face[i] = 1;
+    }
 }
 
 /* Wall-mounted decals (currently just the lobby outlet): small billboards
@@ -377,10 +396,27 @@ int g_pedge_any = 0;
  * views, taxing the whole game. The tests read edges up to ±1 cell away, so
  * marking a radius-2 halo around each edge can never skip a real hit. */
 uint8_t pedge_cell[MAP_H][MAP_W];
+/* Run-extent LUT: for each flagged edge cell, the [lo,hi] cell span of its
+ * maximal same-flag run. The wall pass's fg gather needs the run ends for the
+ * countertop end-clip; walking the run per contact per column measured
+ * Q:2898 cells/frame at the partition-alley pose. Two byte reads replace the
+ * walk when part_diag==1. Rebuilt by pedge_build_cells on every map load;
+ * the secondary purges these with the same gen-gated path as the pedges. */
+uint8_t prun_lo_w[MAP_H][MAP_W + 1], prun_hi_w[MAP_H][MAP_W + 1];
+uint8_t prun_lo_n[MAP_H + 1][MAP_W], prun_hi_n[MAP_H + 1][MAP_W];
 void pedge_build_cells(void);
 volatile uint16_t prof_dda_steps = 0;   /* primary half: DDA steps walked/frame */
 volatile uint16_t prof_dda_fat   = 0;   /* primary half: steps in the slab-gate path */
+/* Partition-campaign counters (primary half, per frame) — where do the wall
+ * pass's ticks actually go? Kept vs promoted vs overlay columns + the
+ * run-extent walk, which re-scans the whole run per contact per column. */
+volatile uint16_t prof_efg_kept  = 0;   /* partial slab contacts kept (fg slots) */
+volatile uint16_t prof_runwalk   = 0;   /* cells walked in run-extent scans */
+volatile uint16_t prof_ovl_cols  = 0;   /* columns that took the overlay path */
+volatile uint16_t prof_promote_cols = 0; /* columns promoted to the fast main path */
 volatile uint16_t prof_pass_ovl  = 0;   /* primary half: see-over overlay ticks/frame */
+volatile uint16_t prof_ovl_px    = 0;   /* of prof_pass_ovl: just the pixel loops (HUD U);
+                                         * O minus U = per-column setup (shade/divides) */
 volatile uint16_t prof_split_col = 0;   /* adaptive split column (HUD K) */
 static inline uint16_t prof_frt_read(void);
 
@@ -531,6 +567,63 @@ void pedge_build_cells(void) {
             pedge_cell[y][x] = m;
         }
     }
+
+    /* Run-extent LUT (see prun_* decls): group maximal same-flag runs once,
+     * stamping every member cell with the run's [lo,hi]. Exact-equality
+     * grouping matches the wall pass's old per-column walk (== ef). */
+    for (int x = 0; x <= MAP_W; x++)
+        for (int y = 0; y < MAP_H; ) {
+            uint8_t f = pedge_w[y][x];
+            if (!(f & CM_PEDGE_PRESENT)) { y++; continue; }
+            int y2 = y;
+            while (y2 + 1 < MAP_H && pedge_w[y2 + 1][x] == f) y2++;
+            for (int k = y; k <= y2; k++) {
+                prun_lo_w[k][x] = (uint8_t)y;
+                prun_hi_w[k][x] = (uint8_t)y2;
+            }
+            /* GLANCING GATE: a shallow ray pierces the face up to
+             * HALF_THICK/tan(theta) cells past the run end before crossing
+             * the centerline, but the crossing gate only reached +/-1 cell —
+             * the missed-column artifact the span experiment exposed. Arm the
+             * fat bit K=4 cells beyond each end so the recovery (which now
+             * indexes the exact pierce cell) can reach it: covers angles
+             * down to ~0.7 degrees. */
+            for (int e = 1; e <= 4; e++) {
+                int ya = y - e, yb = y2 + e;
+                if (ya >= 0) {
+                    if (x < MAP_W) pedge_cell[ya][x]     |= 16 << 1;
+                    if (x > 0)     pedge_cell[ya][x - 1] |= 16 << 0;
+                }
+                if (yb < MAP_H) {
+                    if (x < MAP_W) pedge_cell[yb][x]     |= 16 << 1;
+                    if (x > 0)     pedge_cell[yb][x - 1] |= 16 << 0;
+                }
+            }
+            y = y2 + 1;
+        }
+    for (int y = 0; y <= MAP_H; y++)
+        for (int x = 0; x < MAP_W; ) {
+            uint8_t f = pedge_n[y][x];
+            if (!(f & CM_PEDGE_PRESENT)) { x++; continue; }
+            int x2 = x;
+            while (x2 + 1 < MAP_W && pedge_n[y][x2 + 1] == f) x2++;
+            for (int k = x; k <= x2; k++) {
+                prun_lo_n[y][k] = (uint8_t)x;
+                prun_hi_n[y][k] = (uint8_t)x2;
+            }
+            for (int e = 1; e <= 4; e++) {   /* glancing gate, horizontal twin */
+                int xa = x - e, xb = x2 + e;
+                if (xa >= 0) {
+                    if (y < MAP_H) pedge_cell[y][xa]     |= 16 << 3;
+                    if (y > 0)     pedge_cell[y - 1][xa] |= 16 << 2;
+                }
+                if (xb < MAP_W) {
+                    if (y < MAP_H) pedge_cell[y][xb]     |= 16 << 3;
+                    if (y > 0)     pedge_cell[y - 1][xb] |= 16 << 2;
+                }
+            }
+            x = x2 + 1;
+        }
 }
 
 partition_t partitions[NUM_PARTITIONS_MAX] = {
@@ -834,6 +927,10 @@ void raycast_purge_cell_light(void) {
         purge_cache_range(pedge_n,    sizeof pedge_n);   /* ride the map gen  */
         purge_cache_range(pedge_cell, sizeof pedge_cell);/* + proximity gate  */
         purge_cache_range(&g_pedge_any, sizeof g_pedge_any);
+        purge_cache_range(prun_lo_w, sizeof prun_lo_w);  /* run-extent LUT    */
+        purge_cache_range(prun_hi_w, sizeof prun_hi_w);
+        purge_cache_range(prun_lo_n, sizeof prun_lo_n);
+        purge_cache_range(prun_hi_n, sizeof prun_hi_n);
         seen_gen = g;
     }
 }
@@ -1816,9 +1913,26 @@ void player_update(uint16_t pad) {
         uint16_t move = pad & MOVE_MASK;
         int fresh_push = (move & ~prev_move) != 0;   /* a direction newly pressed */
         if (shove >= 0) {
-            if (standup_armed[shove] && fresh_push) standup_down[shove] = 1;  /* timber */
-            else standup_armed[shove] = 1;                                    /* first contact */
+            if (standup_armed[shove] && fresh_push) {
+                standup_down[shove] = 1;                       /* timber */
+                standup_fall_dir[shove] = (uint8_t)player.angle;  /* falls away from you */
+                standup_fall_prog[shove] = 1;                  /* start the tip-over */
+                {   /* pushed from the front -> lands face up; from behind ->
+                     * face down (cardboard back). Same dot as the billboard's
+                     * front/back test: (standup-player). forward < 0 = front. */
+                    fx_t fwx = COS_FX(standups[shove].facing_angle);
+                    fx_t fwy = SIN_FX(standups[shove].facing_angle);
+                    fx_t dxs = standups[shove].x - player.x;
+                    fx_t dys = standups[shove].y - player.y;
+                    standup_fall_face[shove] =
+                        (FX_MUL(dxs, fwx) + FX_MUL(dys, fwy)) < 0;
+                }
+            } else standup_armed[shove] = 1;                   /* first contact */
         }
+        /* Advance every toppling cutout's fall one step per frame. */
+        for (int si = 0; si < NUM_STANDUPS; si++)
+            if (standup_down[si] && standup_fall_prog[si] < STANDUP_FALL_MAX)
+                standup_fall_prog[si]++;
         prev_move = move;
     }
 
@@ -1864,6 +1978,213 @@ void player_update(uint16_t pad) {
  * of raycast_draw_walls). decals[] just carries where/how big it is; there is
  * no billboard pass any more. */
 
+/* A toppled cutout, lying flat on the floor as a perspective-scaled bitmap.
+ * The cutout is a world-space rectangle on the floor plane: base at its old
+ * feet, extending `L` along its fall direction, `Wd` wide. We reuse the
+ * carpet's inverse floor-projection — for each screen floor pixel we already
+ * know its world (X,Y), so we just test rectangle membership and sample the
+ * neanderthal texture. Wall occlusion is the same per-column z-test the
+ * billboard uses (rowDist vs WALL_DIST). Bounded to the rect's screen bbox so
+ * it costs a few thousand pixels, not a full floor pass. */
+/* Intersect [*xa,*xb] with the screen-x range where v0 + x*dv stays in [lo,hi].
+ * Returns 0 (skip the row) if the intersection is empty. */
+static inline int fallen_clip_x(int *xa, int *xb, fx_t v0, fx_t dv, fx_t lo, fx_t hi) {
+    if (dv > -64 && dv < 64)                       /* ~parallel: constant across row */
+        return (v0 >= lo && v0 <= hi);
+    int64_t a = (((int64_t)(lo - v0)) << FX_SHIFT) / dv;   /* x (16.16) where v==lo */
+    int64_t b = (((int64_t)(hi - v0)) << FX_SHIFT) / dv;   /* x (16.16) where v==hi */
+    if (a > b) { int64_t t = a; a = b; b = t; }
+    int lo_x = (int)((a + 0xFFFF) >> FX_SHIFT);    /* ceil  */
+    int hi_x = (int) (b            >> FX_SHIFT);    /* floor */
+    if (lo_x > *xa) *xa = lo_x;
+    if (hi_x < *xb) *xb = hi_x;
+    return (*xa <= *xb);
+}
+
+static void draw_fallen_standup(int i, int col_start, int col_end,
+        fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
+        fx_t inv_det, int horizon_y, uint8_t *fb) {
+    const sprite_def_t *sd = &sprite_defs[standups[i].kind];
+    /* Prefer the hi-res texture (4x detail): laid flat across the floor the
+     * lo-res 32x64 reads blocky. hi-res is column-major (column texX starts at
+     * texX*tex_h); lo-res is row-major. */
+    const uint8_t *tex; int tex_w, tex_h, col_major;
+    if (sd->tex_hi) { tex = sd->tex_hi; tex_w = sd->w_hi; tex_h = sd->h_hi; col_major = 1; }
+    else            { tex = sd->tex;    tex_w = sd->w;    tex_h = sd->h;    col_major = 0; }
+    uint8_t front_base = sd->base;
+    int face_up = standup_fall_face[i];
+    uint8_t back_c = (uint8_t)(sd->base + 0);   /* cardboard back fill */
+    int focal_const = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    if (focal_const < 1) focal_const = 1;
+
+    uint8_t fa = standup_fall_dir[i];
+    fx_t fdx = COS_FX(fa), fdy = SIN_FX(fa);
+    fx_t ppx = -fdy, ppy = fdx;             /* unit perpendicular (width axis) */
+    fx_t Bx = standups[i].x, By = standups[i].y;
+    const fx_t L    = FX(0.9);              /* length along the floor */
+    const fx_t HALFW = FX(0.225);           /* half width */
+    fx_t k_t = FX_DIV(FX(tex_h), L);        /* texY units per world-unit along */
+    fx_t k_s = FX_DIV(FX(tex_w), HALFW * 2);/* texX units per world-unit across */
+
+    /* Vertical screen extent from the 4 floor corners. */
+    int miny = SCREEN_H, maxy = -1;
+    for (int c = 0; c < 4; c++) {
+        fx_t t = (c & 2) ? L : 0;
+        fx_t s = (c & 1) ? HALFW : -HALFW;
+        fx_t wx = Bx + FX_MUL(fdx, t) + FX_MUL(ppx, s);
+        fx_t wy = By + FX_MUL(fdy, t) + FX_MUL(ppy, s);
+        fx_t rx = wx - px, ry = wy - py;
+        fx_t tY = FX_MUL(inv_det, FX_MUL(-planeY, rx) + FX_MUL(planeX, ry));
+        if (tY < FX(0.06)) tY = FX(0.06);
+        int scrY = horizon_y + (int)(((int32_t)focal_const << FX_SHIFT) / tY);
+        if (scrY < miny) miny = scrY;
+        if (scrY > maxy) maxy = scrY;
+    }
+    if (miny < horizon_y + 1) miny = horizon_y + 1;
+    if (maxy > SCREEN_H - 1)  maxy = SCREEN_H - 1;
+    if (miny > maxy) return;
+
+    fx_t leftDirX = dirX - planeX, leftDirY = dirY - planeY;
+    fx_t dPlaneX = planeX * 2, dPlaneY = planeY * 2;   /* rightDir - leftDir */
+    for (int y = miny; y <= maxy; y++) {
+        int p = y - horizon_y;
+        if (p <= 0) continue;
+        fx_t rowDist = (fx_t)(((int64_t)focal_const << FX_SHIFT) / p);
+        fx_t stepX = FX_MUL(rowDist, dPlaneX) / SCREEN_W;
+        fx_t stepY = FX_MUL(rowDist, dPlaneY) / SCREEN_W;
+        fx_t rx0 = px + FX_MUL(rowDist, leftDirX) - Bx;   /* rel at screen x=0 */
+        fx_t ry0 = py + FX_MUL(rowDist, leftDirY) - By;
+        fx_t t0 = FX_MUL(rx0, fdx) + FX_MUL(ry0, fdy);    /* along-axis at x=0 */
+        fx_t dt = FX_MUL(stepX, fdx) + FX_MUL(stepY, fdy);
+        fx_t s0 = FX_MUL(rx0, ppx) + FX_MUL(ry0, ppy);    /* across-axis at x=0 */
+        fx_t ds = FX_MUL(stepX, ppx) + FX_MUL(stepY, ppy);
+
+        int xa = col_start, xb = col_end - 1;
+        if (!fallen_clip_x(&xa, &xb, t0, dt, 0, L)) continue;
+        if (!fallen_clip_x(&xa, &xb, s0, ds, -HALFW, HALFW)) continue;
+
+        fx_t tnum = t0 + (fx_t)xa * dt;
+        fx_t snum = s0 + (fx_t)xa * ds;
+        fx_t texY_fx = FX_MUL(tnum, k_t);
+        fx_t texX_fx = FX_MUL(snum + HALFW, k_s);
+        fx_t dtexY = FX_MUL(dt, k_t);
+        fx_t dtexX = FX_MUL(ds, k_s);
+        uint8_t *prow = fb + (uintptr_t)y * SCREEN_W;
+        for (int x = xa; x <= xb; x++) {
+            if (rowDist < WALL_DIST(x)) {               /* not behind a wall */
+                int texY = tex_h - 1 - (int)(texY_fx >> FX_SHIFT);
+                int texX = (int)(texX_fx >> FX_SHIFT);
+                if (texX < 0) texX = 0; else if (texX >= tex_w) texX = tex_w - 1;
+                if (texY < 0) texY = 0; else if (texY >= tex_h) texY = tex_h - 1;
+                /* Polarity aligned to the FALL renderer empirically (the
+                 * settle frame is the continuity that matters): the fall's
+                 * screen-space mapping already lands the back mirrored, so
+                 * the world-anchored rest keeps the unmirrored mapping —
+                 * mirroring here double-flipped, the L/R jump at settle. */
+                uint8_t v = col_major ? tex[texX * tex_h + texY]
+                                      : tex[texY * tex_w + texX];
+                if (v) prow[x] = face_up ? (uint8_t)(front_base + v) : back_c;
+            }
+            texY_fx += dtexY;
+            texX_fx += dtexX;
+        }
+    }
+}
+
+/* Mid-topple: the cutout as a rigid panel hinged at its feet, rotating from
+ * vertical (theta 0) toward flat (theta 90). Rendered as horizontal slices from
+ * feet to head: each slice sits at world floor offset d = v*H*sin(theta) along
+ * the fall direction, raised h = v*H*cos(theta) above the floor, projected with
+ * the same focal length as the billboard. At MAX the caller hands off to the
+ * flat floor bitmap, so this only runs for the few in-flight frames. */
+static void draw_falling_standup(int i, int col_start, int col_end,
+        fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
+        fx_t inv_det, int horizon_y, uint8_t *fb, uint8_t theta) {
+    const sprite_def_t *sd = &sprite_defs[standups[i].kind];
+    const uint8_t *tex; int tex_w, tex_h, col_major;
+    if (sd->tex_hi) { tex = sd->tex_hi; tex_w = sd->w_hi; tex_h = sd->h_hi; col_major = 1; }
+    else            { tex = sd->tex;    tex_w = sd->w;    tex_h = sd->h;    col_major = 0; }
+    uint8_t front_base = sd->base;
+    int face_up = standup_fall_face[i];
+    uint8_t back_c = (uint8_t)(sd->base + 0);   /* cardboard back fill */
+    int focal_const = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    if (focal_const < 1) focal_const = 1;
+
+    uint8_t fa = standup_fall_dir[i];
+    fx_t fdx = COS_FX(fa), fdy = SIN_FX(fa);
+    fx_t Bx = standups[i].x, By = standups[i].y;
+    const fx_t H = FX(0.9);
+    const fx_t HALFW = FX(0.225);
+    fx_t cs = COS_FX(theta), sn = SIN_FX(theta);
+
+    /* Project N+1 sample points feet->head, then rasterize every screen row of
+     * each span BETWEEN adjacent samples, lerping position/width/texture row.
+     * The first cut painted one screen row per slice — up close the panel is
+     * taller (in rows) than there are slices, so unpainted rows striped through
+     * as see-through "tearing". Span-filling covers every row exactly once. */
+    const int N = 48;                       /* sample points feet->head */
+    int  s_sy[N + 1], s_cx[N + 1], s_hw[N + 1], s_ty[N + 1];
+    fx_t s_tY[N + 1];
+    uint8_t s_ok[N + 1];
+    for (int stp = 0; stp <= N; stp++) {
+        s_ok[stp] = 0;
+        fx_t vf = (fx_t)stp * (FX_ONE / N);     /* 0..1 along the panel */
+        fx_t hlen = FX_MUL(vf, H);
+        fx_t h = FX_MUL(hlen, cs);              /* height above floor */
+        fx_t d = FX_MUL(hlen, sn);              /* along-floor offset */
+        fx_t rx = Bx + FX_MUL(fdx, d) - px;
+        fx_t ry = By + FX_MUL(fdy, d) - py;
+        fx_t tY = FX_MUL(inv_det, FX_MUL(-planeY, rx) + FX_MUL(planeX, ry));
+        if (tY < FX(0.15)) continue;
+        fx_t tX = FX_MUL(inv_det, FX_MUL(dirY, rx) - FX_MUL(dirX, ry));
+        int cx  = (SCREEN_W >> 1)
+                + (int)(((int32_t)(SCREEN_W >> 1) * FX_DIV(tX, tY)) >> FX_SHIFT);
+        int fyF = horizon_y + (int)(((int32_t)focal_const << FX_SHIFT) / tY);
+        int sy  = fyF - (int)(((int64_t)h * SCREEN_H) / tY);
+        int half_w = (int)(((int64_t)HALFW * SCREEN_H) / tY);
+        if (half_w < 1) half_w = 1;
+        int texY = tex_h - 1 - (int)(((int64_t)vf * tex_h) >> FX_SHIFT);
+        if (texY < 0) texY = 0; else if (texY >= tex_h) texY = tex_h - 1;
+        s_sy[stp] = sy;  s_cx[stp] = cx;  s_hw[stp] = half_w;
+        s_ty[stp] = texY;  s_tY[stp] = tY;  s_ok[stp] = 1;
+    }
+    for (int k = 0; k < N; k++) {
+        if (!s_ok[k] || !s_ok[k + 1]) continue;
+        int span  = s_sy[k + 1] - s_sy[k];
+        int steps = span < 0 ? -span : span;
+        int sdir  = span < 0 ? -1 : 1;
+        for (int t = 0; t <= steps; t++) {
+            if (t == 0 && k > 0) continue;      /* shared boundary row: drawn by prev span */
+            int y = s_sy[k] + sdir * t;
+            if (y < 0 || y >= SCREEN_H) continue;
+            int div = steps ? steps : 1;
+            int cx     = s_cx[k] + ((s_cx[k + 1] - s_cx[k]) * t) / div;
+            int half_w = s_hw[k] + ((s_hw[k + 1] - s_hw[k]) * t) / div;
+            int texY   = s_ty[k] + ((s_ty[k + 1] - s_ty[k]) * t) / div;
+            fx_t tY    = s_tY[k] + (fx_t)(((int64_t)(s_tY[k + 1] - s_tY[k]) * t) / div);
+            if (half_w < 1) half_w = 1;
+            int x0 = cx - half_w, x1 = cx + half_w;
+            int left = x0;                      /* texture origin (pre-clip) */
+            if (x0 < col_start) x0 = col_start;
+            if (x1 > col_end - 1) x1 = col_end - 1;
+            if (x0 > x1) continue;
+            fx_t dtexX = (fx_t)((((int64_t)tex_w) << FX_SHIFT) / (2 * half_w));
+            fx_t texX_fx = (fx_t)(x0 - left) * dtexX;
+            uint8_t *prow = fb + (uintptr_t)y * SCREEN_W;
+            for (int x = x0; x <= x1; x++) {
+                if (tY < WALL_DIST(x)) {
+                    int texX = (int)(texX_fx >> FX_SHIFT);
+                    if (texX < 0) texX = 0; else if (texX >= tex_w) texX = tex_w - 1;
+                    uint8_t v = col_major ? tex[texX * tex_h + texY]
+                                          : tex[texY * tex_w + texX];
+                    if (v) prow[x] = face_up ? (uint8_t)(front_base + v) : back_c;
+                }
+                texX_fx += dtexX;
+            }
+        }
+    }
+}
+
 RAMTEXT static void draw_standups(int col_start, int col_end) {
     /* Self-contained for the dual-CPU split: read the player snapshot and
      * derive the camera basis locally (same as the ceiling/carpet passes) so
@@ -1885,7 +2206,17 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
 
     for (int i = 0; i < NUM_STANDUPS; i++) {
-        if (standup_down[i]) continue;      /* shoved over — it's on the floor now */
+        if (standup_down[i]) {              /* shoved over */
+            if (standup_fall_prog[i] < STANDUP_FALL_MAX) {   /* mid tip-over */
+                uint8_t theta = (uint8_t)(((int)standup_fall_prog[i] * 64) / STANDUP_FALL_MAX);
+                draw_falling_standup(i, col_start, col_end, px, py, dirX, dirY,
+                                     planeX, planeY, inv_det, horizon_y, fb, theta);
+            } else {                                         /* settled: flat on the floor */
+                draw_fallen_standup(i, col_start, col_end, px, py, dirX, dirY,
+                                    planeX, planeY, inv_det, horizon_y, fb);
+            }
+            continue;
+        }
         fx_t sx = standups[i].x - px;
         fx_t sy = standups[i].y - py;
 
@@ -2232,6 +2563,9 @@ void raycast_purge_sprite_cache(void) {
     purge_cache_range(standups,      sizeof standups);
     purge_cache_range(&num_standups, sizeof num_standups);
     purge_cache_range(standup_down,  sizeof standup_down);
+    purge_cache_range(standup_fall_dir, sizeof standup_fall_dir);
+    purge_cache_range(standup_fall_prog, sizeof standup_fall_prog);
+    purge_cache_range(standup_fall_face, sizeof standup_fall_face);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop
@@ -3125,6 +3459,11 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
 
 RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     int dda_steps = 0, dda_fat = 0;   /* per-frame DDA profiling (HUD D/E) */
+    int efg_kept = 0, runwalk = 0, ovl_cols = 0, promote_cols = 0;
+    uint16_t ovl_px_acc = 0;          /* overlay pixel-loop ticks (setup = O - this) */
+    /* Partition diag mode, hoisted once per pass (uncached read): 0 normal,
+     * 1 run-extent LUT, 2 slab gate off (diagnostic pricing). */
+    int part_diag = SHARED_UC->part_diag;
     int ovl_acc = 0;                  /* FRT ticks in the see-over overlay (HUD O) */
     fx_t px = SHARED_UC->player.x;
     fx_t py = SHARED_UC->player.y;
@@ -3256,7 +3595,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             dda_steps++;
             int gb = (side << 1) | (((side == 0) ? stepX : stepY) > 0);
             uint8_t pgate = (uint8_t)(pedge_cell[mapY][mapX] >> gb);
-            if (pgate & 0x11) {
+            if ((pgate & 0x11) && part_diag != 2) {   /* diag 2: price the pass with no slabs */
                 if (pgate & 0x10) dda_fat++;
                 /* SIDE FACE: the DDA just crossed a flagged centerline — the
                  * slab's near face sits PART_HALF_THICK before it along the
@@ -3310,6 +3649,30 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                                 }
                             }
                         }
+                        if (!(ef & CM_PEDGE_PRESENT) && part_diag != 1) {
+                            /* GLANCING MISS FIX: the pierce can sit >1 cell
+                             * past the run end at shallow angles — index the
+                             * exact pierce cell instead of guessing +/-1.
+                             * J:1 runs the legacy +/-1-only recovery for A/B. */
+                            fx_t uf0 = py + FX_MUL(tc, rayDirY);
+                            int  cu0 = FX_INT(uf0);
+                            if ((unsigned)cu0 < (unsigned)MAP_H && cu0 != ely) {
+                                uint8_t cd = pedge_w[cu0][elx];
+                                if (cd & CM_PEDGE_PRESENT) {
+                                    fx_t pl = SLAB_PULL(cd, slab_pbx, stepX > 0);
+                                    if (tc > pl) {
+                                        fx_t dr = (pl == 0) ? 0
+                                                : (pl == slab_pbx) ? slab_offx
+                                                                   : (slab_offx << 1);
+                                        int cu = FX_INT(uf0 - dr);
+                                        if ((unsigned)cu < (unsigned)MAP_H &&
+                                            (pedge_w[cu][elx] & CM_PEDGE_PRESENT)) {
+                                            ef = pedge_w[cu][elx]; ely = cu;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         fx_t tc = sideDistY - deltaDistY;
                         uint8_t ep = (elx > 0)         ? pedge_n[ely][elx - 1] : 0;
@@ -3338,6 +3701,27 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                                         uint8_t j3 = (ely > 0 ? pedge_w[ely - 1][elx + 1] : 0);
                                         if (fu > FX_ONE - PART_HALF_THICK &&
                                             ((j2 | j3) & CM_PEDGE_PRESENT)) { ef = cd; elx += dl; }
+                                    }
+                                }
+                            }
+                        }
+                        if (!(ef & CM_PEDGE_PRESENT) && part_diag != 1) {
+                            /* Glancing-miss fix, horizontal twin. */
+                            fx_t uf0 = px + FX_MUL(tc, rayDirX);
+                            int  cu0 = FX_INT(uf0);
+                            if ((unsigned)cu0 < (unsigned)MAP_W && cu0 != elx) {
+                                uint8_t cd = pedge_n[ely][cu0];
+                                if (cd & CM_PEDGE_PRESENT) {
+                                    fx_t pl = SLAB_PULL(cd, slab_pby, stepY > 0);
+                                    if (tc > pl) {
+                                        fx_t dr = (pl == 0) ? 0
+                                                : (pl == slab_pby) ? slab_offy
+                                                                   : (slab_offy << 1);
+                                        int cu = FX_INT(uf0 - dr);
+                                        if ((unsigned)cu < (unsigned)MAP_W &&
+                                            (pedge_n[ely][cu] & CM_PEDGE_PRESENT)) {
+                                            ef = pedge_n[ely][cu]; elx = cu;
+                                        }
                                     }
                                 }
                             }
@@ -3563,6 +3947,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             if (et >= perpDist) break;             /* at/behind the background */
             if (et < FX(0.1)) et = FX(0.1);
             int k = fg_n++;
+            efg_kept++;
             fg_t[k] = et;
             fg_side[k] = efg_sd[ei];               /* facing: shade + texture U */
             fg_ax[k]   = efg_ax[ei];               /* run axis: countertop depth */
@@ -3575,12 +3960,19 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             {   /* Run extent along the line (countertop end clip):
                  * walk the edge bytes both ways while the flag matches. */
                 int ex = efg_x[ei], ey = efg_y[ei], lo, hi;
-                if (efg_ax[ei] == 0) {             /* vertical line: run in Y */
-                    lo = ey; while (lo > 0 && pedge_w[lo - 1][ex] == ef) lo--;
-                    hi = ey; while (hi + 1 < MAP_H && pedge_w[hi + 1][ex] == ef) hi++;
+                if (part_diag != 1) {              /* DEFAULT: LUT, two byte reads.
+                                                    * Measured J0-vs-LUT: -299 ticks
+                                                    * (2.6% of W), pixel-identical.
+                                                    * J:1 = legacy walk (regression
+                                                    * pricing only). */
+                    if (efg_ax[ei] == 0) { lo = prun_lo_w[ey][ex]; hi = prun_hi_w[ey][ex]; }
+                    else                 { lo = prun_lo_n[ey][ex]; hi = prun_hi_n[ey][ex]; }
+                } else if (efg_ax[ei] == 0) {      /* vertical line: run in Y */
+                    lo = ey; while (lo > 0 && pedge_w[lo - 1][ex] == ef) { lo--; runwalk++; }
+                    hi = ey; while (hi + 1 < MAP_H && pedge_w[hi + 1][ex] == ef) { hi++; runwalk++; }
                 } else {                           /* horizontal line: run in X */
-                    lo = ex; while (lo > 0 && pedge_n[ey][lo - 1] == ef) lo--;
-                    hi = ex; while (hi + 1 < MAP_W && pedge_n[ey][hi + 1] == ef) hi++;
+                    lo = ex; while (lo > 0 && pedge_n[ey][lo - 1] == ef) { lo--; runwalk++; }
+                    hi = ex; while (hi + 1 < MAP_W && pedge_n[ey][hi + 1] == ef) { hi++; runwalk++; }
                 }
                 fg_ua[k] = (fx_t)lo << FX_SHIFT;
                 fg_ub[k] = (fx_t)(hi + 1) << FX_SHIFT;
@@ -3634,6 +4026,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 part_style = fg_style[0]; part_height = fg_height[0]; side = fg_side[0];
                 spotted = part_style;     /* partition_hit is now 1 */
                 fg_n = 0;                 /* drawn by the fast main path; no overlay */
+                promote_cols++;
             }
         }
 
@@ -4325,10 +4718,97 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 fx_t fpos  = (fx_t)(fds - ftop) * fstep;
                 uint8_t *fp = (uint8_t *)fb + col + fds * SCREEN_W;
                 int y = fds;
-                for (; y <= ftex_end; y++) {
-                    uint8_t fc8 = flut[fcol[(fpos >> FX_SHIFT) & fmask]];
-                    if (hr) *(uint16_t *)fp = WDUP(fc8); else *fp = fc8;
-                    fp += SCREEN_W; fpos += fstep;
+                int frows = ftex_end - y + 1;
+                uint16_t ovl_px_t0 = prof_frt_read();
+                if (frows > 0 && fdetail == 0 && part_diag != 1) {
+                    /* Zero detail: all five flut entries collapse to flut[0],
+                     * so texel loads buy nothing — flat-fill, the main path's
+                     * detail_factor==0 shortcut brought to the overlay. fpos
+                     * is dead after this band (shadow/molding are flat). */
+                    if (hr) {
+                        uint16_t fw = WDUP(flut[0]);
+                        for (; y <= ftex_end; y++) { *(uint16_t *)fp = fw; fp += SCREEN_W; }
+                    } else {
+                        uint8_t f8 = flut[0];
+                        for (; y <= ftex_end; y++) { *fp = f8; fp += SCREEN_W; }
+                    }
+                } else if (frows > 0 && !hr && part_diag != 1) {
+                    /* Textured band, full-res: the main wall loop's 4x-unrolled
+                     * asm shape with the extra texel->flut hop (two indexed
+                     * byte loads per pixel; texel values are 0..4 so the
+                     * sign-extending mov.b is safe). One dt/bf per 4 pixels. */
+                    int it4 = frows >> 2, ftl = frows & 3;
+                    y = ftex_end + 1;              /* loop consumes every row */
+                    if (it4 > 0) {
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wasm-operand-widths"
+#endif
+                        __asm__ __volatile__ (
+                            "1:\n\t"
+                            /* pixel A */
+                            "mov   %[tp], r0\n\t"
+                            "shlr16 r0\n\t"
+                            "and   %[mask], r0\n\t"
+                            "mov.b @(r0,%[tex]), r1\n\t"
+                            "add   %[step], %[tp]\n\t"
+                            "mov   r1, r0\n\t"
+                            "mov.b @(r0,%[lut]), r1\n\t"
+                            "mov.b r1, @%[p]\n\t"
+                            "add   %[sw], %[p]\n\t"
+                            /* pixel B */
+                            "mov   %[tp], r0\n\t"
+                            "shlr16 r0\n\t"
+                            "and   %[mask], r0\n\t"
+                            "mov.b @(r0,%[tex]), r1\n\t"
+                            "add   %[step], %[tp]\n\t"
+                            "mov   r1, r0\n\t"
+                            "mov.b @(r0,%[lut]), r1\n\t"
+                            "mov.b r1, @%[p]\n\t"
+                            "add   %[sw], %[p]\n\t"
+                            /* pixel C */
+                            "mov   %[tp], r0\n\t"
+                            "shlr16 r0\n\t"
+                            "and   %[mask], r0\n\t"
+                            "mov.b @(r0,%[tex]), r1\n\t"
+                            "add   %[step], %[tp]\n\t"
+                            "mov   r1, r0\n\t"
+                            "mov.b @(r0,%[lut]), r1\n\t"
+                            "mov.b r1, @%[p]\n\t"
+                            "add   %[sw], %[p]\n\t"
+                            /* pixel D */
+                            "mov   %[tp], r0\n\t"
+                            "shlr16 r0\n\t"
+                            "and   %[mask], r0\n\t"
+                            "mov.b @(r0,%[tex]), r1\n\t"
+                            "add   %[step], %[tp]\n\t"
+                            "mov   r1, r0\n\t"
+                            "mov.b @(r0,%[lut]), r1\n\t"
+                            "mov.b r1, @%[p]\n\t"
+                            "add   %[sw], %[p]\n\t"
+                            "dt    %[it4]\n\t"
+                            "bf    1b\n\t"
+                            : [tp] "+r"(fpos), [p] "+r"(fp), [it4] "+r"(it4)
+                            : [step] "r"(fstep), [mask] "r"(fmask),
+                              [tex] "r"(fcol), [lut] "r"(flut),
+                              [sw] "r"((int)SCREEN_W)
+                            : "r0", "r1", "memory"
+                        );
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+                    }
+                    while (ftl-- > 0) {
+                        *fp = flut[fcol[(fpos >> FX_SHIFT) & fmask]];
+                        fp += SCREEN_W; fpos += fstep;
+                    }
+                } else {
+                    /* hr textured band, or J:1 legacy pricing. */
+                    for (; y <= ftex_end; y++) {
+                        uint8_t fc8 = flut[fcol[(fpos >> FX_SHIFT) & fmask]];
+                        if (hr) *(uint16_t *)fp = WDUP(fc8); else *fp = fc8;
+                        fp += SCREEN_W; fpos += fstep;
+                    }
                 }
                 int fshadow = fsh + 2; if (fshadow > SHADE_LEVELS - 1) fshadow = SHADE_LEVELS - 1;
                 if (y <= fde) {
@@ -4341,6 +4821,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     if (hr) *(uint16_t *)fp = WDUP(fmold); else *fp = fmold;
                     fp += SCREEN_W;
                 }
+                ovl_px_acc += (uint16_t)(prof_frt_read() - ovl_px_t0);
 
                 /* COUNTERTOP as a bounded strip. Entry = the band's own top
                  * edge (attached by construction); exit = the ray's chord out
@@ -4411,6 +4892,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                                 ? -(int)divu_u32((uint32_t)((s1 - s0) << 8),
                                                  (uint32_t)rows) : 0;
                             uint8_t *cp = (uint8_t *)fb + col + cs0 * SCREEN_W;
+                            uint16_t ct_px_t0 = prof_frt_read();
                             for (int cy2 = cs0; cy2 <= ce0; cy2++) {
                                 int w = sfx >> 9;         /* shade 0..15 -> wood 0..7 */
                                 if (w < 0) w = 0; else if (w > 7) w = 7;
@@ -4418,18 +4900,24 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                                 if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
                                 cp += SCREEN_W; sfx += sstep;
                             }
+                            ovl_px_acc += (uint16_t)(prof_frt_read() - ct_px_t0);
                         }
                     }
                 }
             }
         }
-            if (fg_n) ovl_acc += (uint16_t)(prof_frt_read() - ovl_t0);
+            if (fg_n) { ovl_acc += (uint16_t)(prof_frt_read() - ovl_t0); ovl_cols++; }
         }
     }
     if (col_start == 0) {              /* primary half only: HUD reads these */
         prof_dda_steps = (uint16_t)dda_steps;
         prof_dda_fat   = (uint16_t)dda_fat;
         prof_pass_ovl  = (uint16_t)ovl_acc;
+        prof_efg_kept  = (uint16_t)efg_kept;
+        prof_runwalk   = (uint16_t)runwalk;
+        prof_ovl_cols  = (uint16_t)ovl_cols;
+        prof_promote_cols = (uint16_t)promote_cols;
+        prof_ovl_px    = ovl_px_acc;
     }
 
 }

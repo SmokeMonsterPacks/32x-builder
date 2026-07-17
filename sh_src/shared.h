@@ -131,6 +131,12 @@ typedef struct {
      * The secondary watches it to purge its stale cached cell_light lines once
      * per change, so cell_light can be read cached instead of uncached. */
     volatile uint8_t cell_light_gen;
+    /* Partition-campaign diagnostic (MODE+C cycles, HUD J): 0 = normal,
+     * 1 = run-extent LUT instead of the per-column run walk (candidate fix),
+     * 2 = slab gate OFF — partitions don't render at all; DIAGNOSTIC ONLY,
+     * prices the whole edge-partition machinery for the same pose. Read by
+     * both CPUs' wall pass (hoisted to a local at pass start). */
+    volatile uint8_t part_diag;
 } shared_t;
 
 #define LIGHTING_FLICKER  0x01   /* per-panel random brightness rolls */
