@@ -138,6 +138,54 @@ static int footprint_clear(int x, int y, int w, int h) {
     return 1;
 }
 
+/* Scatter free-standing neanderthal cutouts on clear floor, UPRIGHT. Every
+ * generated level gets at least one (the iconic "something is standing there"
+ * beat) — until now procgen placed none and only ever showed a leaked one from
+ * the previous map (fallen, the bug we just fixed). */
+static void place_neanderthals(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);   /* cardinal */
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 2);
+        placed++;
+    }
+}
+
+/* Scatter live-3D chairs on clear floor. The engine's render guard only draws
+ * the nearest few, so a couple per level reads as furniture without crating
+ * the frame. kind 3 = CHAIR_SPRITE_KIND. */
+static void place_chairs(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 3);
+        placed++;
+    }
+}
+
+/* Carve an unlit dark room on a clear-floor rect away from spawn — an area that
+ * "feels dark", lit only by what leaks in. One per level reads as a beat, not a
+ * frustration. */
+static void place_dark_rooms(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int w = xs32_range(4, 7), h = xs32_range(4, 7);
+        int x = xs32_range(2, MAP_W - 3 - w);
+        int y = xs32_range(2, MAP_H - 3 - h);
+        if (!footprint_clear(x, y, w, h)) continue;
+        raycast_add_dark_room(x, y, x + w - 1, y + h - 1);
+        placed++;
+    }
+}
+
 /* Build `count` enclosed grid-wall rooms: a wall perimeter with ONE doorway,
  * dropped only where the footprint+margin is clear. Reads as a room you step
  * into; the open margin guarantees it never seals off the floor. */
@@ -323,6 +371,9 @@ void procgen_run(uint32_t seed) {
     /* Reset partitions for this generation pass. */
     num_partitions = 0;
     num_decals = 0;                       /* outlet is lobby-only */
+    standups_clear();                     /* drop leftover neanderthals/chairs from
+                                           * the previous map - procgen authors none,
+                                           * and a toppled one leaked in FALLEN */
     g_lobby_ceiling = 0;                  /* auto-grid ceiling for procgen */
     /* Procgen has no authored fixtures: clear any left by a custom map, or the
      * previous map's lights would light this one (init_lights runs after us). */
@@ -365,4 +416,7 @@ void procgen_run(uint32_t seed) {
     raycast_stamp_partition_edges();   /* procgen dividers go first-class */
     place_crawlspaces(g_procgen_params.crawlspaces + 1);
     raycast_place_outlets(g_procgen_params.outlets * 5);
+    place_neanderthals(1 + xs32_range(0, 1));   /* always >= 1, sometimes 2 */
+    place_chairs(2 + xs32_range(0, 1));         /* 2-3 chairs; render guard caps drawn */
+    place_dark_rooms(1);                        /* one unlit room per level */
 }

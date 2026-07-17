@@ -124,5 +124,8 @@ void raycast_purge_lowceil_cache(void);
 void raycast_draw_sprites(int col_start, int col_end);
 /* Secondary CPU: drop stale lights[] cache lines before the sprite pass. */
 void raycast_purge_sprite_cache(void);
+void standups_clear(void);   /* reset free-standing objects (neanderthals/chairs) */
+void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind);
+void raycast_add_dark_room(int x0, int y0, int x1, int y1);
 
 #endif

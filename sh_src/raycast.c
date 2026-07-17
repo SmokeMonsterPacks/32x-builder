@@ -184,6 +184,8 @@ uint8_t world_map[MAP_H][MAP_W];
  * world size and flags so renderers read DATA instead of per-kind #defines.
  * Included here — after the *_BASE macros it references. */
 #include "sprite_defs.h"
+#include "chair3d.h"
+
 
 /* Wall texture comes from wall_tex.h (generated from images/walltile.jpg). */
 #define TEX_W WALL_TEX_WIDTH
@@ -307,13 +309,39 @@ static uint8_t standup_fall_prog[MAX_STANDUPS];
  * blank cardboard back shows, mirrored. Set at the shove from the same
  * front/back dot test the standing billboard uses. */
 static uint8_t standup_fall_face[MAX_STANDUPS];
-static void standups_clear(void) {
+void standups_clear(void) {
     num_standups = 0;
     for (int i = 0; i < MAX_STANDUPS; i++) {
         standup_armed[i] = 0; standup_down[i] = 0;
         standup_fall_dir[i] = 0; standup_fall_prog[i] = 0;
         standup_fall_face[i] = 1;
     }
+}
+
+/* Append a free-standing object (neanderthal kind 2 / chair kind 3) at a world
+ * position, UPRIGHT (down/fall state already cleared by standups_clear). Used
+ * by procgen, which authors its own instead of inheriting the previous map's. */
+void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind) {
+    if (num_standups >= MAX_STANDUPS) return;
+    standups[num_standups].x            = x;
+    standups[num_standups].y            = y;
+    standups[num_standups].facing_angle = facing;
+    standups[num_standups].silhouette   = 0;
+    standups[num_standups].kind         = kind;
+    num_standups++;
+}
+
+/* Procgen dark rooms: it can't see the full cm_dark_t (custom_maps.h isn't in
+ * its include set), so it appends through here. The array is engine-owned and
+ * g_map_dark is pointed at it. */
+#define PROCGEN_DARK_MAX 4
+static cm_dark_t procgen_dark[PROCGEN_DARK_MAX];
+void raycast_add_dark_room(int x0, int y0, int x1, int y1) {
+    if (g_map_dark != procgen_dark) { g_map_dark = procgen_dark; g_map_n_dark = 0; }
+    if (g_map_n_dark >= PROCGEN_DARK_MAX) return;
+    procgen_dark[g_map_n_dark] = (cm_dark_t){ (uint8_t)x0, (uint8_t)y0,
+                                              (uint8_t)x1, (uint8_t)y1 };
+    g_map_n_dark++;
 }
 
 /* Wall-mounted decals (currently just the lobby outlet): small billboards
@@ -1469,7 +1497,10 @@ void raycast_load_custom(int idx) {
     num_decals = 0;
     standups_clear();
     for (int i = 0; i < m->n_decals; i++) {
-        if (m->decals[i].kind == 2) {
+        /* Free-standing objects (neanderthal kind 2, chair kind 3) live in
+         * standups[]: they billboard/render in world and collide. Everything
+         * else is a wall-anchored decal. */
+        if (m->decals[i].kind == 2 || m->decals[i].kind == CHAIR_SPRITE_KIND) {
             if (num_standups < MAX_STANDUPS) {
                 standups[num_standups].x            = m->decals[i].x;
                 standups[num_standups].y            = m->decals[i].y;
@@ -1912,7 +1943,10 @@ void player_update(uint16_t pad) {
                                  | SEGA_CTRL_LEFT | SEGA_CTRL_RIGHT;
         uint16_t move = pad & MOVE_MASK;
         int fresh_push = (move & ~prev_move) != 0;   /* a direction newly pressed */
-        if (shove >= 0) {
+        if (shove >= 0 && standups[shove].kind == CHAIR_SPRITE_KIND) {
+            /* The true-3D chair is solid furniture — it blocks but doesn't
+             * topple (the topple pipeline is billboard/flat-bitmap only). */
+        } else if (shove >= 0) {
             if (standup_armed[shove] && fresh_push) {
                 standup_down[shove] = 1;                       /* timber */
                 standup_fall_dir[shove] = (uint8_t)player.angle;  /* falls away from you */
@@ -2185,6 +2219,170 @@ static void draw_falling_standup(int i, int col_start, int col_end,
     }
 }
 
+/* ---- TRUE-3D chair -------------------------------------------------------
+ * Real geometry projected through the raycaster's own camera, not a billboard:
+ * each model vertex -> world (facing rotation + placement) -> camera space
+ * (the same inv_det transform sprites use) -> perspective screen point, with
+ * height mapped exactly like a standup's feet/top. Faces backface-cull by
+ * screen winding, shade from a fixed light (per-facing constant, so it does
+ * NOT swim as the player moves), painter-sort far->near, and fill with a
+ * per-column z-test against WALL_DIST so walls occlude it. Rides the
+ * neanderthal brown ramp (NEANDER_BASE + 1..7). */
+static uint8_t chair_face_shade(int axis, fx_t fc, fx_t fs) {
+    /* Door brown (DOOR_BASE 0..4, all warm browns) — the chair is wood, not
+     * the neanderthal's tan. Indices returned here are DOOR_BASE offsets. */
+    if (axis == 2) return 4;                 /* top: brightest door brown */
+    if (axis == 3) return 1;                 /* bottom: dark brown        */
+    int32_t nx, nz;
+    switch (axis) {
+    case 0: nx =  FX_ONE; nz = 0; break;     /* +x */
+    case 1: nx = -FX_ONE; nz = 0; break;
+    case 4: nx = 0; nz =  FX_ONE; break;     /* +z */
+    default: nx = 0; nz = -FX_ONE; break;    /* -z */
+    }
+    fx_t wnx = FX_MUL(nx, fc) + FX_MUL(nz, fs);   /* normal rotated by facing */
+    fx_t wnz = -FX_MUL(nx, fs) + FX_MUL(nz, fc);
+    int32_t lum = (int32_t)((-55 * (int64_t)wnx - 83 * (int64_t)wnz) / 100);
+    /* Sides in the door ramp's middle (1..3): darker than the lit top (4). */
+    int s = 2 + (int)((lum * 3) >> FX_SHIFT);
+    if (s < 1) s = 1;
+    if (s > 3) s = 3;
+    return (uint8_t)s;
+}
+
+/* Scanline triangle fill, constant depth (the chair spans ~one cell; WALL_DIST
+ * varies slowly across it), per-pixel wall z-test, clipped to this CPU's
+ * column half. */
+static void chair_tri_fill(int x0, int y0, int x1, int y1, int x2, int y2,
+        uint8_t c, fx_t depth, int zt, int col_start, int col_end, uint8_t *fb) {
+    int t;
+    if (y0 > y1) { t=y0;y0=y1;y1=t; t=x0;x0=x1;x1=t; }
+    if (y0 > y2) { t=y0;y0=y2;y2=t; t=x0;x0=x2;x2=t; }
+    if (y1 > y2) { t=y1;y1=y2;y2=t; t=x1;x1=x2;x2=t; }
+    if (y2 == y0) return;
+    int32_t xl = x0 << 16, xls = ((x2 - x0) << 16) / (y2 - y0);
+    for (int seg = 0; seg < 2; seg++) {
+        int ya = seg ? y1 : y0, yb = seg ? y2 : y1;
+        if (ya != yb) {
+            int32_t xs = (seg ? x1 : x0) << 16;
+            int32_t xss = ((seg ? (x2 - x1) : (x1 - x0)) << 16) / (yb - ya);
+            for (int y = ya; y < yb; y++) {
+                if (y >= 0 && y < SCREEN_H) {
+                    int a = xl >> 16, b = xs >> 16;
+                    if (a > b) { t=a;a=b;b=t; }
+                    if (a < col_start) a = col_start;
+                    if (b > col_end - 1) b = col_end - 1;
+                    uint8_t *row = fb + (uintptr_t)y * SCREEN_W;
+                    if (zt) {                        /* occlusion possible */
+                        for (int x = a; x <= b; x++)
+                            if (depth < WALL_DIST(x)) row[x] = c;
+                    } else {                         /* chair fully in the open */
+                        for (int x = a; x <= b; x++) row[x] = c;
+                    }
+                }
+                xl += xls; xs += xss;
+            }
+        } else if (seg == 0) {
+            /* flat-top: advance the long edge across the (empty) top segment */
+            xl += xls * (y1 - y0);
+        }
+    }
+}
+
+static void draw_chair_3d(int i, int col_start, int col_end,
+        fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
+        fx_t inv_det, int horizon_y, uint8_t *fb) {
+    fx_t cx = standups[i].x, cy = standups[i].y;
+    uint8_t facing = standups[i].facing_angle;
+    fx_t fc = COS_FX(facing), fs = SIN_FX(facing);
+    int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    const fx_t NEARC = FX(0.25);
+
+    typedef struct { int sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
+    cface_t faces[CHAIR_NBOXES * 6];
+    int nf = 0;
+
+    for (int b = 0; b < CHAIR_NBOXES; b++) {
+        const cbox_t *bx = &chair_boxes[b];
+        int csx[8], csy[8], cclip[8];
+        fx_t cdep[8];
+        for (int v = 0; v < 8; v++) {
+            int32_t mx = (v & 1) ? bx->x1 : bx->x0;    /* 8.8 model */
+            int32_t my = (v & 2) ? bx->y1 : bx->y0;
+            int32_t mz = (v & 4) ? bx->z1 : bx->z0;
+            fx_t wx = (fx_t)((mx * CHAIR_WORLD_H_FX) >> 8);   /* model -> world fx */
+            fx_t wy = (fx_t)((my * CHAIR_WORLD_H_FX) >> 8);   /* height above floor */
+            fx_t wz = (fx_t)((mz * CHAIR_WORLD_H_FX) >> 8);
+            fx_t rx = FX_MUL(wx, fc) + FX_MUL(wz, fs);        /* rotate by facing */
+            fx_t rz = -FX_MUL(wx, fs) + FX_MUL(wz, fc);
+            fx_t ddx = (cx + rx) - px, ddy = (cy + rz) - py;
+            fx_t depth = FX_MUL(inv_det, -FX_MUL(planeY, ddx) + FX_MUL(planeX, ddy));
+            cdep[v] = depth;
+            cclip[v] = depth < NEARC;
+            if (cclip[v]) { csx[v] = csy[v] = 0; continue; }
+            /* One reciprocal, then multiplies: screenX, floor row, and the
+             * height offset all divide by depth — three HW divides per vertex
+             * (56 verts x 2 CPUs) was the chair's dominant cost. */
+            fx_t inv_d = fx_div_hw(FX_ONE, depth);            /* 1/depth, 16.16 */
+            fx_t lat = FX_MUL(inv_det, FX_MUL(dirY, ddx) - FX_MUL(dirX, ddy));
+            csx[v] = (SCREEN_W >> 1)
+                   + (int)(((int32_t)(SCREEN_W >> 1) * FX_MUL(lat, inv_d)) >> FX_SHIFT);
+            int floor_y = horizon_y + (int)(((int64_t)focal * inv_d) >> FX_SHIFT);
+            csy[v] = floor_y - (int)((FX_MUL(wy, inv_d) * SCREEN_H) >> FX_SHIFT);
+        }
+        for (int f = 0; f < 6; f++) {
+            const uint8_t *vi = chair_face_v[f];
+            if (cclip[vi[0]] || cclip[vi[1]] || cclip[vi[2]] || cclip[vi[3]]) continue;
+            int32_t ax = csx[vi[1]]-csx[vi[0]], ay = csy[vi[1]]-csy[vi[0]];
+            int32_t bx2 = csx[vi[2]]-csx[vi[0]], by = csy[vi[2]]-csy[vi[0]];
+            if (ax * by - ay * bx2 <= 0) continue;            /* backface */
+            faces[nf].depth = (cdep[vi[0]]+cdep[vi[1]]+cdep[vi[2]]+cdep[vi[3]]) >> 2;
+            faces[nf].shade = chair_face_shade(f, fc, fs);
+            for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
+            nf++;
+        }
+    }
+    for (int a = 1; a < nf; a++)                              /* painter far->near */
+        for (int j = a; j > 0 && faces[j].depth > faces[j-1].depth; j--) {
+            cface_t tq = faces[j];
+            faces[j] = faces[j-1]; faces[j-1] = tq;
+        }
+    /* Occlusion pre-check: if the chair's FARTHEST face is nearer than every
+     * wall across its column span, no pixel can be occluded — the fills skip
+     * the per-pixel WALL_DIST read entirely (the common open-room case). */
+    int minx = SCREEN_W, maxx = -1; fx_t maxdep = 0;
+    for (int q = 0; q < nf; q++) {
+        if (faces[q].depth > maxdep) maxdep = faces[q].depth;
+        for (int k = 0; k < 4; k++) {
+            if (faces[q].sx[k] < minx) minx = faces[q].sx[k];
+            if (faces[q].sx[k] > maxx) maxx = faces[q].sx[k];
+        }
+    }
+    if (minx < col_start) minx = col_start;
+    if (maxx > col_end - 1) maxx = col_end - 1;
+    int zt = 0;
+    for (int x = minx; x <= maxx; x++)
+        if (maxdep >= WALL_DIST(x)) { zt = 1; break; }
+    for (int q = 0; q < nf; q++) {
+        /* Distance fog: chairs used to stay full-bright to the horizon while
+         * everything around them faded. Fade the door shade toward the darkest
+         * brown (index 0) past ~2 cells, reaching full fog by FOG_RAMP_DIST,
+         * same ramp the walls use. Cheap: one calc per face. */
+        int shade = faces[q].shade;
+        fx_t fd = faces[q].depth - FX(2);
+        if (fd > 0) {
+            int fog = (int)(((int64_t)fd * 5) / (FOG_RAMP_DIST - FX(2)));
+            shade -= fog;
+            if (shade < 0) shade = 0;
+        }
+        uint8_t c = (uint8_t)(DOOR_BASE + shade);
+        chair_tri_fill(faces[q].sx[0],faces[q].sy[0], faces[q].sx[1],faces[q].sy[1],
+                       faces[q].sx[2],faces[q].sy[2], c, faces[q].depth, zt, col_start, col_end, fb);
+        chair_tri_fill(faces[q].sx[0],faces[q].sy[0], faces[q].sx[2],faces[q].sy[2],
+                       faces[q].sx[3],faces[q].sy[3], c, faces[q].depth, zt, col_start, col_end, fb);
+    }
+}
+
 RAMTEXT static void draw_standups(int col_start, int col_end) {
     /* Self-contained for the dual-CPU split: read the player snapshot and
      * derive the camera basis locally (same as the ceiling/carpet passes) so
@@ -2205,7 +2403,50 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
      * horizon so they slide with the wall/carpet when the camera pitches. */
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
 
-    for (int i = 0; i < NUM_STANDUPS; i++) {
+    /* Draw FAR -> NEAR so a nearer sprite paints over a farther one: standups
+     * z-test only against walls, not each other, so array order let the chair
+     * (later in the list) show through a nearer neanderthal. Insertion-sort
+     * indices by squared distance, descending (n<=24, once per half). */
+    int order[MAX_STANDUPS];
+    int64_t d2[MAX_STANDUPS];
+    int on = NUM_STANDUPS;
+    for (int i = 0; i < on; i++) {
+        fx_t ddx = standups[i].x - px, ddy = standups[i].y - py;
+        d2[i] = (int64_t)ddx * ddx + (int64_t)ddy * ddy;
+        order[i] = i;
+    }
+    for (int a = 1; a < on; a++) {
+        int io = order[a]; int64_t da = d2[io]; int b = a;
+        while (b > 0 && d2[order[b - 1]] < da) { order[b] = order[b - 1]; b--; }
+        order[b] = io;
+    }
+
+    /* Chair render guard: a true-3D chair is ~2000 ticks, and the frame is
+     * vblank-locked, so an unbounded count craters the scene. Render only the
+     * nearest CHAIR_RENDER_MAX chairs within CHAIR_CULL_D2 — the map cap can be
+     * generous because the ENGINE never draws more than a few at once. (order[]
+     * is far->near, so walking it in reverse hits the nearest first.) */
+    #define CHAIR_RENDER_MAX 3
+    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(9) * FX(9);  /* ~9 cells */
+    uint8_t chair_render[MAX_STANDUPS] = {0};
+    {
+        int seen = 0;
+        for (int oi2 = on - 1; oi2 >= 0 && seen < CHAIR_RENDER_MAX; oi2--) {
+            int j = order[oi2];
+            if (standups[j].kind != CHAIR_SPRITE_KIND) continue;
+            if (d2[j] > CHAIR_CULL_D2) continue;
+            chair_render[j] = 1; seen++;
+        }
+    }
+
+    for (int oi = 0; oi < on; oi++) {
+        int i = order[oi];
+        if (standups[i].kind == CHAIR_SPRITE_KIND) {   /* true 3D, not a billboard */
+            if (chair_render[i])
+                draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
+                              planeX, planeY, inv_det, horizon_y, fb);
+            continue;
+        }
         if (standup_down[i]) {              /* shoved over */
             if (standup_fall_prog[i] < STANDUP_FALL_MAX) {   /* mid tip-over */
                 uint8_t theta = (uint8_t)(((int)standup_fall_prog[i] * 64) / STANDUP_FALL_MAX);

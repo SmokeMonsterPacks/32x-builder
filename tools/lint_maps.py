@@ -146,6 +146,13 @@ def lint_model(m, base, folder, reg, seen_names, errs):
                    ("max_dark_rooms", "dark")):
         if len(m[k]) > lim[cap]:
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
+    # Chairs are their own budget: each live-3D chair costs real per-frame time
+    # and the frame is vblank-locked, so the cap is deliberately tight.
+    n_chairs = sum(1 for d in m["decals"] if d.get("kind") == "chair")
+    if "max_chairs" in lim and n_chairs > lim["max_chairs"]:
+        e("%d chairs exceed max_chairs %d (each live-3D chair is ~2000 ticks; "
+          "the engine only draws the nearest few, but keep placement sane)"
+          % (n_chairs, lim["max_chairs"]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
     # A void exit is a MISSING WALL cell on the border: an opening you walk out
@@ -186,8 +193,10 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("partition (%g,%g)->(%g,%g) is diagonal — partitions are axis-aligned"
               % (p["x1"], p["y1"], p["x2"], p["y2"]))
 
+    standalone_ids = {k["id"] for k in reg.get("decals", {}).get("kinds", [])
+                      if k.get("standalone")}
     for d in m["decals"]:
-        if d.get("kind") == "neanderthal":      # free-standing, not wall-mounted
+        if d.get("kind") in standalone_ids:     # free-standing, not wall-mounted
             continue
         fx, fy = int(d["x"]), int(d["y"])
         adj = [(fx, fy), (fx - 1, fy)] if d.get("face") in ("W", "E") else [(fx, fy), (fx, fy - 1)]

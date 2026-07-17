@@ -105,11 +105,19 @@ function fitCell() {
  * 47/64 segments and still be six from the edge ceiling. Same maths as
  * lint_maps' edge_total, so the panel and the build agree. */
 const partEdges = p => Math.abs(p.x2 - p.x1) + Math.abs(p.y2 - p.y1);
+/* Standalone decals (neanderthal, chair) live in the engine's standups[], NOT
+ * the wall-decal array, so they don't spend the wall-decal budget. */
+const isStandaloneKind = id => {
+  const k = ((ME.reg && ME.reg.decals && ME.reg.decals.kinds) || []).find(x => x.id === id);
+  return !!(k && k.standalone);
+};
 const BUDGET_ROWS = [
   ['partitions', 'Partitions', 'max_partitions', m => m.partitions.length],
   ['edges',      'Partition edges', 'max_partition_edges',
                  m => m.partitions.reduce((n, p) => n + partEdges(p), 0)],
-  ['decals',     'Decals',     'max_decals',     m => m.decals.length],
+  ['decals',     'Decals',     'max_decals',
+                 m => m.decals.filter(d => !isStandaloneKind(d.kind)).length],
+  ['chairs',     'Chairs (3D)','max_chairs',     m => m.decals.filter(d => d.kind === 'chair').length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
   ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
   ['dark',       'Dark rooms', 'max_dark_rooms', m => (m.dark || []).length],
@@ -143,6 +151,27 @@ function updateBudget() {
     val.textContent = n + ' / ' + (cap === Infinity ? '\u2014' : cap);
     row.appendChild(name); row.appendChild(val);
     box.appendChild(row);
+  }
+  /* Playability gradient (measured, see registry.playability): partition edges
+   * -> an fps band. It's a PROXY — dense sightlines run slower than the total
+   * says — so it's advisory, and the real test is the Walk preview. */
+  const play = ME.reg.playability;
+  if (play && play.bands) {
+    const edges = ME.model.partitions.reduce((n, p) => n + partEdges(p), 0);
+    const band = play.bands.find(b => edges <= b.max) || play.bands[play.bands.length - 1];
+    const el = document.createElement('div');
+    el.className = 'brow bplay';
+    el.style.borderLeft = '4px solid ' + band.color;
+    el.style.marginTop = '6px';
+    const name = document.createElement('span');
+    name.textContent = 'Playability';
+    const val = document.createElement('span');
+    val.textContent = band.label + ' · ' + band.fps;
+    val.style.color = band.color;
+    el.appendChild(name); el.appendChild(val);
+    el.title = 'Estimated from partition edges (' + edges + '). Layout matters — '
+             + 'dense sightlines run slower. Walk-test to be sure.';
+    box.appendChild(el);
   }
 }
 
@@ -435,9 +464,10 @@ function wireCanvas() {
   window.addEventListener('mouseup', () => { painting = false; });
 }
 function placeDecal(wx, wy) {
-  if (!budgetRoom('decals', 1)) return;
   const kind = ME.reg.decals.kinds.find(k => k.id === ME.decalKind);
-  if (kind && kind.standalone) {            // free-standing billboard (neanderthal): no wall snap
+  const budgetKind = (ME.decalKind === 'chair') ? 'chairs' : 'decals';
+  if (!budgetRoom(budgetKind, 1)) return;
+  if (kind && kind.standalone) {            // free-standing (neanderthal, chair): no wall snap
     ME.model.decals.push({ kind: ME.decalKind, x: Math.floor(wx) + 0.5, y: Math.floor(wy) + 0.5, face: 'N' });
     return;
   }

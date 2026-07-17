@@ -481,6 +481,15 @@ window.RC = (function () {
     bills.sort((a, b) => b.d2 - a.d2);
     for (const it of bills) drawSprite(data, zbuf, it.dec.x, it.dec.y, spr.neander, 0.45, 0.90, 0.45);
 
+    /* Live-3D chairs — projected geometry, far -> near. */
+    const chairs = [];
+    for (const dec of window.ME.model.decals)
+      if (dec.kind === 'chair') {
+        const ddx = dec.x - px, ddy = dec.y - py; chairs.push({ d2: ddx * ddx + ddy * ddy, dec });
+      }
+    chairs.sort((a, b) => b.d2 - a.d2);
+    for (const it of chairs) drawChair3D(data, zbuf, it.dec);
+
     ctx.putImageData(img, 0, 0);
   }
 
@@ -542,6 +551,96 @@ window.RC = (function () {
         const c = P[idx]; if (!c) continue;
         const o = (y * W + x) * 4;
         data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+      }
+    }
+  }
+
+  /* Live-3D chair — ports draw_chair_3d: the 7-box ladder-back projected
+   * through the camera (not a billboard), backface-culled, shaded from a fixed
+   * light, painter-sorted, distance-fogged, wall z-tested. Rides the DOOR_BASE
+   * brown ramp (palette index 96 + shade). */
+  const CHAIR_H = 0.375, DOOR_BASE = 96;
+  const CHAIR_BOXES = [
+    [-0.26, 0.42, -0.26,  0.26, 0.48,  0.20],   // seat
+    [-0.26, 0.00, -0.26, -0.20, 0.42, -0.20],   // front-L
+    [ 0.20, 0.00, -0.26,  0.26, 0.42, -0.20],   // front-R
+    [-0.26, 0.00,  0.20, -0.20, 1.00,  0.26],   // post BL
+    [ 0.20, 0.00,  0.20,  0.26, 1.00,  0.26],   // post BR
+    [-0.26, 0.90,  0.21,  0.26, 1.00,  0.25],   // top rail
+    [-0.26, 0.68,  0.215, 0.26, 0.76,  0.245],  // mid slat
+  ];
+  const CHAIR_FV = [[1,3,7,5],[0,4,6,2],[2,6,7,3],[0,1,5,4],[4,5,7,6],[0,2,3,1]];
+  const FACE_RAD = { E: 0, S: Math.PI / 2, W: Math.PI, N: 3 * Math.PI / 2 };
+
+  function drawChair3D(data, zbuf, chair) {
+    const fr = FACE_RAD[chair.face] != null ? FACE_RAD[chair.face] : 0;
+    const fc = Math.cos(fr), fs = Math.sin(fr);
+    const dirX = Math.cos(pa), dirY = Math.sin(pa);
+    const planeX = -dirY * 0.66, planeY = dirX * 0.66;
+    const det = planeX * dirY - dirX * planeY;
+    if (Math.abs(det) < 1e-6) return;
+    const invDet = 1 / det, P = A().palette, faces = [];
+    for (const b of CHAIR_BOXES) {
+      const SX = [], SY = [], DE = [], CL = [];
+      for (let v = 0; v < 8; v++) {
+        const mx = ((v & 1) ? b[3] : b[0]) * CHAIR_H;
+        const my = ((v & 2) ? b[4] : b[1]) * CHAIR_H;
+        const mz = ((v & 4) ? b[5] : b[2]) * CHAIR_H;
+        const rx = mx * fc + mz * fs, rz = -mx * fs + mz * fc;
+        const ddx = chair.x + rx - px, ddy = chair.y + rz - py;
+        const d = invDet * (-planeY * ddx + planeX * ddy);
+        DE[v] = d;
+        if (d < 0.06) { CL[v] = 1; SX[v] = SY[v] = 0; continue; }
+        CL[v] = 0;
+        const lat = invDet * (dirY * ddx - dirX * ddy);
+        SX[v] = (W / 2) * (1 + lat / d);
+        SY[v] = MID - (my - eyeH) * H / d;
+      }
+      for (let f = 0; f < 6; f++) {
+        const vi = CHAIR_FV[f];
+        if (CL[vi[0]] || CL[vi[1]] || CL[vi[2]] || CL[vi[3]]) continue;
+        const ax = SX[vi[1]] - SX[vi[0]], ay = SY[vi[1]] - SY[vi[0]];
+        const bx = SX[vi[2]] - SX[vi[0]], by = SY[vi[2]] - SY[vi[0]];
+        if (ax * by - ay * bx <= 0) continue;                 // backface
+        const d = (DE[vi[0]] + DE[vi[1]] + DE[vi[2]] + DE[vi[3]]) / 4;
+        let shade = (f === 2) ? 4 : (f === 3) ? 1 : (f === 1 || f === 5) ? 3 : 2;
+        if (d > 2) { shade -= Math.floor((d - 2) * 5 / 4); }   // distance fog
+        if (shade < 0) shade = 0; if (shade > 4) shade = 4;
+        faces.push({ x: vi.map(i => SX[i]), y: vi.map(i => SY[i]), d, shade });
+      }
+    }
+    faces.sort((a, b) => b.d - a.d);                          // far -> near
+    for (const fa of faces) {
+      const c = P[DOOR_BASE + fa.shade]; if (!c) continue;
+      fillTriZ(data, zbuf, fa.x[0], fa.y[0], fa.x[1], fa.y[1], fa.x[2], fa.y[2], fa.d, c);
+      fillTriZ(data, zbuf, fa.x[0], fa.y[0], fa.x[2], fa.y[2], fa.x[3], fa.y[3], fa.d, c);
+    }
+  }
+
+  function fillTriZ(data, zbuf, x0, y0, x1, y1, x2, y2, depth, c) {
+    let t;
+    if (y0 > y1) { t=y0;y0=y1;y1=t; t=x0;x0=x1;x1=t; }
+    if (y0 > y2) { t=y0;y0=y2;y2=t; t=x0;x0=x2;x2=t; }
+    if (y1 > y2) { t=y1;y1=y2;y2=t; t=x1;x1=x2;x2=t; }
+    if (y2 === y0) return;
+    let xl = x0, xls = (x2 - x0) / (y2 - y0);
+    for (let seg = 0; seg < 2; seg++) {
+      const ya = seg ? y1 : y0, yb = seg ? y2 : y1;
+      if (ya === yb) { if (seg === 0) xl += xls * (y1 - y0); continue; }
+      let xs = seg ? x1 : x0;
+      const xss = (seg ? (x2 - x1) : (x1 - x0)) / (yb - ya);
+      for (let y = Math.floor(ya); y < yb; y++) {
+        if (y >= 0 && y < H) {
+          let a = Math.round(xl), b = Math.round(xs);
+          if (a > b) { t=a;a=b;b=t; }
+          if (a < 0) a = 0; if (b >= W) b = W - 1;
+          for (let x = a; x <= b; x++) {
+            if (depth > zbuf[x] + 0.1) continue;              // behind a wall
+            const o = (y * W + x) * 4;
+            data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+          }
+        }
+        xl += xls; xs += xss;
       }
     }
   }

@@ -47,6 +47,10 @@ canon: Backrooms
 20,11 -> 20,14  style=spotted height=low crawl=no
 
 [decals]
+chair  9.5,15.5 face=E
+chair  23.5,15.5 face=W
+chair  6.5,11.5 face=S
+chair  26.5,11.5 face=S
 outlet 17,26.5 face=W z=0.2
 door   16.5,31 face=S
 neanderthal 16.3,23.5 face=S
