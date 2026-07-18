@@ -79,9 +79,12 @@ void s_main(void) {
             raycast_purge_lowceil_cache();
             raycast_purge_sprite_cache();
             raycast_draw_tail(split, SCREEN_W);
-            /* Sprites AFTER the tail so the slab's z-stamp occludes them. Draws
-             * only [split, SCREEN_W) — disjoint from the primary's half. */
-            raycast_draw_sprites(split, SCREEN_W);
+            /* Sprites AFTER the tail so the slab's z-stamp occludes them. Uses
+             * the DECOUPLED sprite_split (set by the primary before it raised
+             * CMD_TAIL) so a near screen-filling standup is shared, not dumped
+             * on one cpu — disjoint [sprite_split, W) from the primary's half. */
+            int sprite_split = (int)SHARED_UC->sprite_split;
+            raycast_draw_sprites(sprite_split, SCREEN_W);
             break;
         }
         case MARS_CMD_BOX: {

@@ -137,6 +137,22 @@ typedef struct {
      * prices the whole edge-partition machinery for the same pose. Read by
      * both CPUs' wall pass (hoisted to a local at pass start). */
     volatile uint8_t part_diag;
+    /* DEBUG A/B (MODE+A cycles): 0 = chair faces flat-filled (shipping),
+     * 1 = chair faces routed through the textured tex_tri path (sampling
+     * wall_tex as a throwaway) to measure textured-quad cost against the
+     * flat baseline. Read by both CPUs' draw_chair_3d; the flip changes only
+     * the fill method, not geometry, so the primary-half prof_pass_chair
+     * delta between arms is the true per-pixel texturing cost. */
+    volatile uint8_t chair_tex;
+
+    /* Sprite-pass column split, decoupled from the wall split_col. A large
+     * screen-filling standup (the world-quad neanderthal up close) can land
+     * almost entirely in ONE cpu's wall-half, leaving the other idle in the
+     * post-wall barrier while it draws ~30k textured pixels alone. The primary
+     * centers this on the dominant standup so both SH-2s draw half of it in
+     * parallel. Written by the primary before it raises CMD_TAIL; the secondary
+     * reads it for raycast_draw_sprites (the tail/slab pass still uses split_col). */
+    volatile uint16_t sprite_split;
 } shared_t;
 
 #define LIGHTING_FLICKER  0x01   /* per-panel random brightness rolls */

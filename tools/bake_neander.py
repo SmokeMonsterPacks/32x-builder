@@ -46,10 +46,31 @@ def main():
                          "[HEIGHT][WIDTH]. Cache-friendly for sprite column "
                          "scans — each texture column is contiguous in memory "
                          "so the inner sample loop walks sequential bytes.")
+    ap.add_argument("--autocrop", action="store_true",
+                    help="Crop the source to the figure's vertical foreground "
+                         "bounding box before scaling, so his feet land on the "
+                         "BOTTOM output row (no transparent padding). Keeps his "
+                         "feet on the floor line and lets the flat floor-shadow "
+                         "attach exactly. Width is left untouched.")
     args = ap.parse_args()
 
     src = Image.open(args.src).convert("RGBA")
     sw, sh = src.size
+
+    if args.autocrop:
+        top = bot = None
+        for y in range(sh):
+            for x in range(sw):
+                r, g, b, _ = src.getpixel((x, y))
+                if not is_bg(r, g, b):
+                    if top is None:
+                        top = y
+                    bot = y
+                    break
+        if top is not None:
+            src = src.crop((0, top, sw, bot + 1))
+            sw, sh = src.size
+            print(f"autocrop: figure rows {top}..{bot} -> source now {sw}x{sh}")
 
     sx_step = sw / args.out_w
     sy_step = sh / args.out_h
