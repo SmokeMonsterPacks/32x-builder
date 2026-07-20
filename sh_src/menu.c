@@ -14,6 +14,10 @@ extern uint8_t g_metrics_on;
  * Called on menu OPEN so a player stuck with phantom-toggled overlays can
  * always clear them with START, the one button every pad has. */
 extern void debug_overlays_clear(void);
+/* Owned by m_main.c — wipes the metrics overlay's Genesis tile rows. The
+ * VISUALS toggle must blank on OFF or the last-drawn tiles hover forever
+ * (they only redraw while the flag is on). */
+extern void hud_genesis_blank(void);
 /* Owned by m_main.c — the MAPS tab writes the chosen custom-map index here and
  * the main loop drains it into the warp. -1 = no request. */
 extern volatile int g_warp_request;
@@ -174,7 +178,10 @@ void menu_update(uint16_t pad) {
             int m = (int)SHARED_UC->wall_res_mode + dir;
             SHARED_UC->wall_res_mode = (uint8_t)((m + 4) % 4);
         } else if (menu_row == 2) SHARED_UC->vres_half ^= 1;
-        else if (menu_row == 3) g_metrics_on ^= 1;
+        else if (menu_row == 3) {
+            g_metrics_on ^= 1;
+            if (!g_metrics_on) hud_genesis_blank();   /* wipe, don't just stop drawing */
+        }
     }
 }
 

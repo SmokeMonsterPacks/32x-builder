@@ -100,10 +100,12 @@ static void pad_test_draw(uint8_t *fb, uint16_t snap) {
 
 /* The nametable is single-buffered, so HUD tiles persist after MODE+Y off —
  * blank the rows the HUD used. One-time on toggle-off; ~one frame of COMM. */
-static void hud_genesis_blank(void) {
+void hud_genesis_blank(void) {   /* non-static: the menu's METRICS toggle blanks too */
     static char blank[41] = "                                        ";
     HwMdPuts(blank, 0, 0, 0);    /* X/Y + T/H/S */
     HwMdPuts(blank, 0, 0, 2);    /* A */
+    HwMdPuts(blank, 0, 0, 23);   /* H/TX/P6 (chair A/B + pad type) — was MISSING:
+                                  * turning metrics off left this row hovering */
     HwMdPuts(blank, 0, 0, 24);   /* D/Q/N/V/M (partition campaign) */
     HwMdPuts(blank, 0, 0, 25);   /* O/P/K/E */
     HwMdPuts(blank, 0, 0, 26);   /* C/G/R/W/F */
