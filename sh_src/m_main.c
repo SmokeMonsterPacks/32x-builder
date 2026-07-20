@@ -117,7 +117,10 @@ static void metrics_mode_check(uint16_t pad) {
      * loose six-button mappings fire phantom X/MODE singles. MODE alone now
      * does nothing (pure modifier); the combo edge-triggers on the second
      * button. The VISUALS pause-menu tab remains the discoverable path. */
-    if (pad & SEGA_CTRL_MODE) {
+    /* MODE must be held across TWO consecutive frames before any combo is
+     * honored: a deliberate human MODE-hold always is, while a single-frame
+     * phantom MODE (mis-read pad on real hardware) never toggles anything. */
+    if ((pad & SEGA_CTRL_MODE) && (prev & SEGA_CTRL_MODE)) {
         if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
             SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 4);
         if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y)) {
@@ -150,6 +153,21 @@ static void metrics_mode_check(uint16_t pad) {
         }
     }
     prev = pad;
+}
+
+/* Escape hatch: opening the pause menu clears EVERY debug overlay. Field
+ * report (smokemonster, real hardware): phantom MODE combos from a mis-read
+ * pad turned overlays ON that a three-button pad could never turn off —
+ * START is the one button every controller has. Called from menu_update. */
+void debug_overlays_clear(void) {
+    if (g_metrics_on) { g_metrics_on = 0; hud_genesis_blank(); }
+    g_automap_on = 0;
+    if (g_padtest_on) {
+        static char blank[41] = "                                        ";
+        g_padtest_on = 0;
+        HwMdPuts(blank, 0, 0, 5); HwMdPuts(blank, 0, 0, 6);
+        HwMdPuts(blank, 0, 0, 7); HwMdPuts(blank, 0, 0, 8);
+    }
 }
 
 /* Frame-time profiler. Reads the SH-2 free-running timer at Φ/32

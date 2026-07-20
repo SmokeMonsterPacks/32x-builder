@@ -219,15 +219,29 @@ read_joypad:
 		lea		IO_DATA2,a0
 	1:
 		move.w	d2,-(sp)
+		/* Mask interrupts across the 4-phase probe: a VINT landing between
+		 * TH toggles desyncs the controller's six-button counter and returns
+		 * garbage on real hardware (emulators are more forgiving). */
+		move.w	sr,-(sp)
+		move.w	#0x2700,sr
 		bsr.s	get_input		/* - 0 s a 0 0 d u - 1 c b r l d u */
 		move.w	d2,d1
 		bsr.s	get_input		/* - 0 s a 0 0 d u - 1 c b r l d u */
 		bsr.s	get_input		/* - 0 s a 0 0 0 0 - 1 c b m x y z */
 		move.w	d2,d0
 		bsr.s	get_input		/* - 0 s a 1 1 1 1 - 1 c b r l d u */
+		move.w	(sp)+,sr		/* phases done; timing no longer critical */
+		/* Six-button pads answer the 4th TH-low phase with EXACTLY 1111 in
+		 * the r/l/d/u slots. On a three-button pad r/l read as hard 0 there,
+		 * so it can never fake the signature -- but its d/u bits idle HIGH,
+		 * which fooled the old any-bit-set test into six-button mode and
+		 * unpacked phase 3's "c b r l d u" as phantom M X Y Z (RIGHT->MODE,
+		 * LEFT->X, DOWN->Y, UP->Z: smokemonster's ghost overlays and the
+		 * menu that committed on DOWN). Exact match only. */
 		andi.w	#0x0F00,d2		/* 0 0 0 0 1 1 1 1 0 0 0 0 0 0 0 0 */
-		bne.s	common			/* six button pad */
-		move.w	#0x010F,d0		/* three button pad */
+		cmpi.w	#0x0F00,d2
+		beq.s	common			/* six button pad: exact 1111 signature */
+		move.w	#0x010F,d0		/* three button pad: neutral M X Y Z */
 	common:
 		lsl.b	#4,d0			/* - 0 s a 0 0 0 0 m x y z 0 0 0 0 */
 		lsl.w	#4,d0			/* 0 0 0 0 m x y z 0 0 0 0 0 0 0 0 */

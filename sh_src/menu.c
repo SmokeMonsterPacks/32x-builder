@@ -10,6 +10,10 @@
  * toggle it: the MODE-button shortcut is 6-button-only, so this is the way to
  * reach the overlay on a 3-button pad. */
 extern uint8_t g_metrics_on;
+/* Owned by m_main.c — wipes every debug overlay (metrics/automap/padtest).
+ * Called on menu OPEN so a player stuck with phantom-toggled overlays can
+ * always clear them with START, the one button every pad has. */
+extern void debug_overlays_clear(void);
 /* Owned by m_main.c — the MAPS tab writes the chosen custom-map index here and
  * the main loop drains it into the warp. -1 = no request. */
 extern volatile int g_warp_request;
@@ -108,7 +112,7 @@ void menu_update(uint16_t pad) {
 
     if (pressed & SEGA_CTRL_START) {
         menu_active = !menu_active;
-        if (menu_active) { menu_row = 0; menu_dirty = 1; }
+        if (menu_active) { menu_row = 0; menu_dirty = 1; debug_overlays_clear(); }
         else menu_genesis_blank();   /* wipe the menu tiles on close */
         return;
     }
