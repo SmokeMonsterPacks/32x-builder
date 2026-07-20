@@ -100,6 +100,20 @@ void raycast_load_lobby(void);
 /* Load a hand-authored map (index into the generated custom_maps[] table). */
 void raycast_load_custom(int idx);
 void raycast_render(void);
+/* In-ROM asset viewer (pause menu ASSETS tab): preview baked sprite art on
+ * hardware in the real palette. count/name/dims describe the catalog; preview
+ * blits sprite `sel` centered at integer `zoom` into the framebuffer. */
+int         raycast_asset_count(void);
+const char *raycast_asset_name(int sel);
+void        raycast_asset_dims(int sel, int *w, int *h);
+/* Sprite assets preview as a WORLD QUAD (the neanderthal's tex_tri path):
+ * yaw spins it, dist is continuous — smooth scaling via the real rasterizer. */
+void        raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist);
+/* Live 3D mesh viewer: rotate (rotY/rotX 0..255) + project + flat-fill a chair
+ * mesh into fb at zoom_px screen-pixels per world unit. variant 0 = the hero
+ * GLB mesh, 1 = the in-game 7-box model (same scale, honest comparison).
+ * Caller clears the background. */
+void        raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire);
 void player_update(uint16_t pad);
 /* 1 when the player has stepped into the open EXIT door — fire the procgen portal. */
 int  raycast_door_portal_check(void);

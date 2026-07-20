@@ -117,7 +117,7 @@ const BUDGET_ROWS = [
                  m => m.partitions.reduce((n, p) => n + partEdges(p), 0)],
   ['decals',     'Decals',     'max_decals',
                  m => m.decals.filter(d => !isStandaloneKind(d.kind)).length],
-  ['chairs',     'Chairs (3D)','max_chairs',     m => m.decals.filter(d => d.kind === 'chair').length],
+  ['chairs',     'Chairs','max_chairs',     m => m.decals.filter(d => d.kind === 'chair').length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
   ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
   ['dark',       'Dark rooms', 'max_dark_rooms', m => (m.dark || []).length],

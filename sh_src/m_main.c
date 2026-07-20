@@ -128,6 +128,8 @@ static void metrics_mode_check(uint16_t pad) {
             g_automap_on = (uint8_t)((g_automap_on + 1) % 3);
         if ((pad & SEGA_CTRL_C) && !(prev & SEGA_CTRL_C))   /* partition diag (HUD J) */
             SHARED_UC->part_diag = (uint8_t)((SHARED_UC->part_diag + 1) % 3);
+        if ((pad & SEGA_CTRL_A) && !(prev & SEGA_CTRL_A))   /* chair flat/textured A/B (HUD TX) */
+            SHARED_UC->chair_tex ^= 1;
         if ((pad & SEGA_CTRL_Z) && !(prev & SEGA_CTRL_Z)) {
             g_padtest_on ^= 1;
             if (!g_padtest_on) {
@@ -316,6 +318,27 @@ static void prof_sample_and_draw(uint8_t *fb) {
         t4[pos++] = (char)('0' + SHARED_UC->part_diag);
         t4[pos] = 0;
         HwMdPuts(t4, HUD_TILE_COLOR, 0, 24);   /* D/Q/N/V/M + J, GENESIS layer */
+    }
+
+    /* Fifth line — chair fill A/B (MODE+A). H = primary-half chair fill ticks
+     * this frame (the flat/textured cost we're measuring); TX = 0 flat /
+     * 1 textured. Face a rendered chair and toggle: watch H jump. */
+    {
+        extern volatile uint16_t prof_pass_chair;
+        char t5[24];
+        int pos = 0;
+        t5[pos++] = 'H';
+        t5[pos++] = ':';
+        uint16_t x = prof_pass_chair;
+        for (int d = 4; d >= 0; d--) { t5[pos + d] = '0' + (x % 10); x /= 10; }
+        pos += 5;
+        t5[pos++] = ' ';
+        t5[pos++] = 'T';
+        t5[pos++] = 'X';
+        t5[pos++] = ':';
+        t5[pos++] = (char)('0' + (SHARED_UC->chair_tex & 1));
+        t5[pos] = 0;
+        HwMdPuts(t5, HUD_TILE_COLOR, 0, 23);   /* H + TX, GENESIS layer */
     }
 }
 
@@ -743,6 +766,107 @@ static void show_controls_screen(void) {
     }
 }
 
+/* ---- Asset viewer screen (start menu) --------------------------------
+ * Dedicated black screen for inspecting assets WITHOUT loading a level:
+ * the chair renders as the live clustered 3D mesh, free-rotated on both
+ * axes by the D-pad; other assets show as their baked sprites. Self-owned
+ * loop like the controls screen — no raycast_render behind it, index 0 is
+ * true black in the gameplay palette. MODE+START exits back to the menu. */
+static void asset_viewer_screen(void) {
+    HwMdReadPad(0);
+    uint16_t prev = MARS_SYS_COMM8;          /* seed: ignore the held commit button */
+    int sel = 3;                             /* start on CHAIR — the one with a 3D mesh */
+    int variant = 0;                         /* chair only: 0 hero MESH, 1 GAME boxes, 2 SPRITE */
+    uint8_t rotY = 32, rotX = 12;            /* engine angle units, 0..255 */
+    int zoom = 3;                            /* mesh views: screen scale notch */
+    /* Sprite views: a live world quad (tex_tri, the neanderthal's path).
+     * UP/DOWN glides the distance CONTINUOUSLY — smooth scaling through the
+     * real rasterizer — LEFT/RIGHT yaws it (edge-on, cardboard back, LOD). */
+    fx_t adist = FX(2.5);
+    int wire = 1;                            /* Z toggles; default ON — the filled
+                                              * 1,692-tri hero view crawls */
+    for (;;) {
+        HwMdReadPad(0);
+        uint16_t pad = MARS_SYS_COMM8;
+        uint16_t pressed = (uint16_t)(pad & ~prev);
+        prev = pad;
+        if ((pad & SEGA_CTRL_MODE) && (pressed & SEGA_CTRL_START)) break;
+        /* Held D-pad = continuous independent rotation on both axes. */
+        if (pad & SEGA_CTRL_LEFT)  rotY = (uint8_t)(rotY - 2);
+        if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
+        if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
+        if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
+        int mesh_shown = (sel == 3 && variant < 2);
+        if (pressed & SEGA_CTRL_A) sel = (sel + 1) % raycast_asset_count();
+        if (pressed & SEGA_CTRL_B) {
+            if (mesh_shown) zoom = (zoom >= 5) ? 2 : zoom + 1;
+        }
+        if (pressed & SEGA_CTRL_C) { rotY = 32; rotX = 12; adist = FX(2.5); }
+        if (pressed & SEGA_CTRL_X) variant = (variant + 1) % 3;
+        if (pressed & SEGA_CTRL_Z) wire ^= 1;
+        if (!mesh_shown) {                    /* held: glide the quad in/out */
+            if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
+            if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
+        }
+        SHARED_UC->frame_count++;
+
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        /* Clear with 32-bit stores: the 32X framebuffer IGNORES byte writes of
+         * zero (hardware sprite-transparency quirk), so a fb[i]=0 byte loop
+         * silently does nothing. Word writes always land — same trick as
+         * raycast_clear_half. Index 0 = true black in the gameplay palette. */
+        {
+            uint32_t *fb32 = (uint32_t *)fb;
+            for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
+        }
+        if (mesh_shown)
+            raycast_model_view(fb, rotY, rotX, 60 + zoom * 22, variant, wire);
+        else
+            raycast_asset_preview(fb, sel, rotY, adist);
+
+        /* HUD: name + dims, live rotation coordinates, controls. */
+        char line[40]; int p = 0;
+        const char *nm = raycast_asset_name(sel);
+        while (*nm && p < 14) line[p++] = *nm++;
+        line[p++] = ' ';
+        int w = 0, h = 0; raycast_asset_dims(sel, &w, &h);
+        if (w >= 100) line[p++] = (char)('0' + (w / 100) % 10);
+        line[p++] = (char)('0' + (w / 10) % 10); line[p++] = (char)('0' + w % 10);
+        line[p++] = 'X';
+        if (h >= 100) line[p++] = (char)('0' + (h / 100) % 10);
+        line[p++] = (char)('0' + (h / 10) % 10); line[p++] = (char)('0' + h % 10);
+        line[p] = 0;
+        font_draw_string(fb, 8, 8, "ASSET VIEWER", 49);
+        font_draw_string(fb, 8, 22, line, 49);
+        p = 0;
+        line[p++]='Y'; line[p++]=':';
+        line[p++]=(char)('0'+(rotY/100)%10); line[p++]=(char)('0'+(rotY/10)%10); line[p++]=(char)('0'+rotY%10);
+        line[p++]=' '; line[p++]='X'; line[p++]=':';
+        line[p++]=(char)('0'+(rotX/100)%10); line[p++]=(char)('0'+(rotX/10)%10); line[p++]=(char)('0'+rotX%10);
+        line[p++]=' ';
+        if (mesh_shown) {
+            line[p++]='Z'; line[p++]=':'; line[p++]=(char)('0'+zoom);
+        } else {                              /* live distance in cells, one decimal */
+            int d10 = (int)(((int64_t)adist * 10) >> FX_SHIFT);
+            line[p++]='D'; line[p++]=':';
+            line[p++]=(char)('0' + (d10 / 10) % 10);
+            line[p++]='.';
+            line[p++]=(char)('0' + d10 % 10);
+        }
+        line[p]=0;
+        font_draw_string(fb, 8, 36, line, 49);
+        if (sel == 3) {
+            static const char *const vnames[3] = { "MESH", "GAME", "SPRITE" };
+            font_draw_string(fb, 8, 50, vnames[variant], 49);
+            if (variant < 2)
+                font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", 49);
+        }
+        font_draw_string(fb, 8, SCREEN_H - 24, "DPAD ROTATE  A ASSET  B ZOOM  C RESET", 49);
+        font_draw_string(fb, 8, SCREEN_H - 12, "X VARIANT  Z WIRE  MODE+START BACK", 49);
+        swapBuffers();
+    }
+}
+
 /* Walk-through-the-EXIT-door portal: fade to black, generate a fresh procedural
  * map, drop the player at the standard spawn, fade back up. The "way out" only
  * loops you deeper into the backrooms. Mirrors the lobby walk-through fade. */
@@ -855,7 +979,7 @@ int m_main(void) {
      * REBUILT whenever a fold changes, and the unroll is animated by a damped
      * integer spring — rows slide out from under the header (clipped until
      * they emerge) and the rows below visibly bounce as the spring settles. */
-    enum { IT_MAP, IT_PROC, IT_SEP, IT_FOLD, IT_CTRL };
+    enum { IT_MAP, IT_PROC, IT_SEP, IT_FOLD, IT_CTRL, IT_VIEW };
     struct { uint8_t kind; uint8_t map; const char *label; } items[40];
     int n_items = 0;
     const int n_core  = custom_core_count;
@@ -959,6 +1083,8 @@ int m_main(void) {
                 items[n_items].label = ""; n_items++;   /* gap before CONTROLS */
                 items[n_items].kind = IT_CTRL; items[n_items].map = 0;
                 items[n_items].label = "CONTROLS"; n_items++;
+                items[n_items].kind = IT_VIEW; items[n_items].map = 0;
+                items[n_items].label = "ASSET VIEWER"; n_items++;
 
                 if (refocus_grp >= 0) {
                     for (int i = 0; i < n_items; i++)
@@ -1023,6 +1149,11 @@ int m_main(void) {
                  * combos (MODE+X/Y), not commits. */
                 if (items[cur].kind == IT_CTRL) {
                     show_controls_screen();
+                    prev_pad = 0xFFFF;       /* swallow the still-held button */
+                    continue;
+                }
+                if (items[cur].kind == IT_VIEW) {
+                    asset_viewer_screen();
                     prev_pad = 0xFFFF;       /* swallow the still-held button */
                     continue;
                 }

@@ -417,6 +417,9 @@ void procgen_run(uint32_t seed) {
     place_crawlspaces(g_procgen_params.crawlspaces + 1);
     raycast_place_outlets(g_procgen_params.outlets * 5);
     place_neanderthals(1 + xs32_range(0, 1));   /* always >= 1, sometimes 2 */
-    place_chairs(2 + xs32_range(0, 1));         /* 2-3 chairs; render guard caps drawn */
-    place_dark_rooms(1);                        /* one unlit room per level */
+    /* 6-9 chairs: the directional-billboard LOD made count nearly free (far
+     * chairs are small sprites; only the nearest 3 render true-3D), stress-
+     * verified at 21 chairs with no frame drops. Furnished, not spammed. */
+    place_chairs(6 + xs32_range(0, 3));
+    place_dark_rooms(2);                        /* minimum two unlit rooms per level */
 }

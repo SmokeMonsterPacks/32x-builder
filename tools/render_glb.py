@@ -81,6 +81,10 @@ views = {
     "back":  Vector((0,  1, 0)),
     "right": Vector((1,  0, 0)),
     "left":  Vector((-1, 0, 0)),
+    # Facing us, turned ~20deg off dead-front (mostly front, a hint of side),
+    # near eye-level (~12deg up). The legible "parked chair" read; mirror it on
+    # X for the "turned the other way" variant at draw time.
+    "tq":    Vector((0.33, -0.92, 0.21)),
 }
 for name, d in views.items():
     cam.location = center + d * span * 3

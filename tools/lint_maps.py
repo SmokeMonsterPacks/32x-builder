@@ -150,8 +150,9 @@ def lint_model(m, base, folder, reg, seen_names, errs):
     # and the frame is vblank-locked, so the cap is deliberately tight.
     n_chairs = sum(1 for d in m["decals"] if d.get("kind") == "chair")
     if "max_chairs" in lim and n_chairs > lim["max_chairs"]:
-        e("%d chairs exceed max_chairs %d (each live-3D chair is ~2000 ticks; "
-          "the engine only draws the nearest few, but keep placement sane)"
+        e("%d chairs exceed max_chairs %d (far chairs are cheap directional "
+          "billboards and only the nearest 3 render true-3D — the cap now "
+          "tracks the engine's standup table, not per-chair render cost)"
           % (n_chairs, lim["max_chairs"]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
