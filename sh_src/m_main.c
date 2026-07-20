@@ -355,6 +355,13 @@ static void prof_sample_and_draw(uint8_t *fb) {
         t5[pos++] = 'X';
         t5[pos++] = ':';
         t5[pos++] = (char)('0' + (SHARED_UC->chair_tex & 1));
+        /* P6: what the 68K thinks the pad is (1 = six-button handshake
+         * validated / sticky-latched, 0 = three-button). Field diagnostic for
+         * "my MODE combos don't work" — reachable via pause menu -> VISUALS ->
+         * METRICS, which needs no MODE press. */
+        t5[pos++] = ' ';
+        t5[pos++] = 'P'; t5[pos++] = '6'; t5[pos++] = ':';
+        t5[pos++] = (char)('0' + ((MARS_SYS_COMM8 >> 12) & 1));
         t5[pos] = 0;
         HwMdPuts(t5, HUD_TILE_COLOR, 0, 23);   /* H + TX, GENESIS layer */
     }

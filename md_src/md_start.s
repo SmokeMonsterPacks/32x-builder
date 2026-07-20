@@ -255,12 +255,29 @@ read_joypad:
 		rts
 
 get_input:
+		/* Settle time after each TH toggle: wired pads answer in ns, but
+		 * wireless receivers/adapters latch async and return STALE phases
+		 * when probed ~1us after the edge — they then fail the six-button
+		 * signature and demote to 3-button (extended buttons dead). ~8 nops
+		 * = ~4us per edge; whole 4-phase probe still well under 50us. */
 		move.b	#0x00,(a0)
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
 		nop
 		nop
 		move.b	(a0),d2
 		move.b	#0x40,(a0)
 		lsl.w	#8,d2
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
 		move.b	(a0),d2
 		rts
 
