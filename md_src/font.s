@@ -344,3 +344,74 @@ font_data:
 		.long 0x0FF00000
 		.long 0x0FFFFFF0
 		.long 0x00000000
+
+		;// tile 38  ':'
+		.long 0x00000000
+		.long 0x0FF00000
+		.long 0x0FF00000
+		.long 0x00000000
+		.long 0x0FF00000
+		.long 0x0FF00000
+		.long 0x00000000
+		.long 0x00000000
+
+		;// tile 39  '.'
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x0FF00000
+		.long 0x0FF00000
+		.long 0x00000000
+
+		;// tile 40  '-'
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0xFFFFF000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+		.long 0x00000000
+
+		;// tile 41  '>'
+		.long 0x00000000
+		.long 0x0F000000
+		.long 0x0FF00000
+		.long 0x0FFF0000
+		.long 0x0FF00000
+		.long 0x0F000000
+		.long 0x00000000
+		.long 0x00000000
+
+		;// tile 42  '|'
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00000000
+
+		;// tile 43  '+'
+		.long 0x00000000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0xFFFFF000
+		.long 0x00F00000
+		.long 0x00F00000
+		.long 0x00000000
+		.long 0x00000000
+
+		;// tile 44  '%'
+		.long 0xFF00F000
+		.long 0xFF00F000
+		.long 0x000F0000
+		.long 0x00F00000
+		.long 0x0F000000
+		.long 0xF00FF000
+		.long 0xF00FF000
+		.long 0x00000000
+

@@ -10,6 +10,14 @@
  * toggle it: the MODE-button shortcut is 6-button-only, so this is the way to
  * reach the overlay on a 3-button pad. */
 extern uint8_t g_metrics_on;
+/* Owned by m_main.c — wipes every debug overlay (metrics/automap/padtest).
+ * Called on menu OPEN so a player stuck with phantom-toggled overlays can
+ * always clear them with START, the one button every pad has. */
+extern void debug_overlays_clear(void);
+/* Owned by m_main.c — wipes the metrics overlay's Genesis tile rows. The
+ * VISUALS toggle must blank on OFF or the last-drawn tiles hover forever
+ * (they only redraw while the flag is on). */
+extern void hud_genesis_blank(void);
 /* Owned by m_main.c — the MAPS tab writes the chosen custom-map index here and
  * the main loop drains it into the warp. -1 = no request. */
 extern volatile int g_warp_request;
@@ -31,10 +39,12 @@ extern volatile int g_warp_request;
 
 #define AUDIO_CONTENT_ROWS    2   /* AMBIENCE, FOOTSTEPS */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
-#define VISUALS_CONTENT_ROWS  3   /* WALLS (h-res), VERT (v-res), METRICS */
+#define VISUALS_CONTENT_ROWS  4   /* WALLS, VERT, METRICS, SHADOWS */
 #define CREDITS_CONTENT_ROWS  0   /* BUILD/DATE/SHA are read-only display */
 
 static int      menu_active = 0;
+static int      menu_dirty  = 1;   /* menu content changed -> rewrite tiles */
+static int      menu_redraw = 0;   /* this frame's gate (set from menu_dirty) */
 static int      menu_tab    = TAB_AUDIO;
 static int      menu_row    = 0;   /* 0 = tab row, 1..N = content row */
 static uint16_t menu_prev_pad = 0;
@@ -55,6 +65,34 @@ static uint16_t menu_prev_pad = 0;
  * entry, so the live 3D view behind the menu is untouched, and the bright text
  * (49) reads cleanly on top. The bar blinks on/off at ~10 Hz (see hl_blink). */
 #define MENU_HL_BAR    51   /* LIGHT_BASE+2 (50%) */
+/* Genesis-tile HUD: menu text lives on Name Table B now. 0 = palette line 0
+ * (CRAM entry 1 = light gray) — the white-ish menu look. */
+#define MENU_TILE_COLOR 0x0000
+/* px/py (framebuffer) -> Genesis tile x/y. MENU_X/Y are 8-aligned. */
+#define TX(px) ((px) >> 3)
+#define TY(py) ((py) >> 3)
+/* Blank the menu box's tile rows so navigation/value changes leave no ghosts.
+ * The menu box spans tile cols 9..30, rows 9..18. */
+static void menu_genesis_blank(void) {
+    static char blank[24] = "                       ";
+    for (int r = TY(MENU_Y); r <= TY(MENU_Y + MENU_H_PX); r++)
+        HwMdPuts(blank, 0, TX(MENU_X), r);
+}
+
+/* Write s at tile (col, MENU_Y+y_off), space-padded to `width` so it overwrites
+ * whatever was on that row in ONE pass — no separate blank, so navigating never
+ * shows a blanked row mid-scan on the single-buffered nametable (the per-move
+ * flash). Gated by menu_redraw so tiles are touched only when content changes. */
+static void menu_puts_pad(int col, int y_off, const char *s, int width) {
+    if (!menu_redraw) return;
+    char buf[24];
+    if (width > 23) width = 23;
+    int n = 0;
+    while (s[n] && n < width) { buf[n] = s[n]; n++; }
+    while (n < width) buf[n++] = ' ';
+    buf[n] = 0;
+    HwMdPuts(buf, MENU_TILE_COLOR, col, TY(MENU_Y + y_off));
+}
 
 #define VOL_STEP 16
 
@@ -78,10 +116,12 @@ void menu_update(uint16_t pad) {
 
     if (pressed & SEGA_CTRL_START) {
         menu_active = !menu_active;
-        if (menu_active) menu_row = 0;
+        if (menu_active) { menu_row = 0; menu_dirty = 1; debug_overlays_clear(); }
+        else menu_genesis_blank();   /* wipe the menu tiles on close */
         return;
     }
     if (!menu_active) return;
+    if (pressed) menu_dirty = 1;     /* any input can change the tile content */
 
     int total_rows = 1 + content_rows_for(menu_tab);
 
@@ -97,6 +137,7 @@ void menu_update(uint16_t pad) {
         if (menu_row - 1 < custom_pick_count) {
             g_warp_request = menu_row - 1;
             menu_active = 0;
+            menu_genesis_blank();    /* warp-close: wipe tiles like a START close */
         }
         return;
     }
@@ -135,9 +176,13 @@ void menu_update(uint16_t pad) {
          * VERT (vertical half-res) and METRICS overlay are flips. */
         if (menu_row == 1) {
             int m = (int)SHARED_UC->wall_res_mode + dir;
-            SHARED_UC->wall_res_mode = (uint8_t)((m + 3) % 3);
+            SHARED_UC->wall_res_mode = (uint8_t)((m + 4) % 4);
         } else if (menu_row == 2) SHARED_UC->vres_half ^= 1;
-        else if (menu_row == 3) g_metrics_on ^= 1;
+        else if (menu_row == 3) {
+            g_metrics_on ^= 1;
+            if (!g_metrics_on) hud_genesis_blank();   /* wipe, don't just stop drawing */
+        }
+        else if (menu_row == 4) SHARED_UC->shadows_off ^= 1;  /* A/B the shadow cost */
     }
 }
 
@@ -179,35 +224,36 @@ static void draw_word_hl(uint8_t *fb, int y_off, int col, int ncols, uint8_t col
  * which row is currently selected (shows the > prefix). */
 static void draw_row(uint8_t *fb, int y_off, int sel,
                      const char *label, const char *value) {
-    const int X = MENU_X;
-    const int Y = MENU_Y;
-    char left[12];
-    left[0]  = sel ? '>' : ' ';
-    left[1]  = ' ';
-    int i = 0;
-    while (label[i] && i < 9) { left[2 + i] = label[i]; i++; }
-    while (i < 9) { left[2 + i] = ' '; i++; }
-    left[11] = 0;
     /* Blink a concise bar around just the selected row's label (the label sits
-     * at column 3 inside `left`, after the "> " prefix; pad one space each side). */
+     * at column 3, after the "> " prefix; pad one space each side). FB side,
+     * every frame — independent of the tile redraw. */
     if (sel && hl_blink()) {
         int ll = 0; while (label[ll]) ll++;
         draw_word_hl(fb, y_off, 2, ll + 2, MENU_HL_BAR);
     }
-    font_draw_string(fb, X + 8,        Y + y_off, left,  MENU_FG_COLOR);
-    font_draw_string(fb, X + 8 * 13,   Y + y_off, value, MENU_FG_COLOR);
+    /* One full-width line "> LABEL      VALUE" (label at col 2, value at col 12)
+     * so the whole row is overwritten in place — no blank, no flash. */
+    char line[22];
+    for (int k = 0; k < 20; k++) line[k] = ' ';
+    line[0] = sel ? '>' : ' ';
+    for (int i = 0; label[i] && i < 9; i++)   line[2 + i]  = label[i];
+    for (int j = 0; value[j] && 12 + j < 20; j++) line[12 + j] = value[j];
+    line[20] = 0;
+    menu_puts_pad(TX(MENU_X + 8), y_off, line, 20);
 }
 
 void menu_render(uint8_t *fb) {
     if (!menu_active) return;
-    fill_bg(fb);
+    fill_bg(fb);              /* the dimming panel stays on the FB for now */
+    menu_redraw = menu_dirty; menu_dirty = 0;   /* rewrite tiles only on change */
 
     const int X = MENU_X;
-    const int Y = MENU_Y;
 
-    /* Top + bottom rule. */
-    font_draw_string(fb, X, Y,      "+--------------------+", MENU_FG_COLOR);
-    font_draw_string(fb, X, Y + 72, "+--------------------+", MENU_FG_COLOR);
+    /* Top + bottom rule. Every write below is full-width and overwrites its row
+     * in place, so no blank pass is needed on a change — that blank-then-redraw
+     * was the per-move flash. (The close path still blanks to clear the menu.) */
+    menu_puts_pad(TX(X), 0,  "+--------------------+", 22);
+    menu_puts_pad(TX(X), 72, "+--------------------+", 22);
 
     /* Tab row at y=16: the > cursor points at the active tab, with the next
      * tab in the cycle shown after a pipe separator — e.g. "> AUDIO |
@@ -238,7 +284,7 @@ void menu_render(uint8_t *fb) {
         int wl = 0; while (tab_names[menu_tab][wl]) wl++;
         draw_word_hl(fb, 16, 1, wl + 2, MENU_HL_BAR);
     }
-    font_draw_string(fb, X, Y + 16, tab_text, MENU_FG_COLOR);
+    menu_puts_pad(TX(X), 16, tab_text, 22);
 
     /* Content rows at y = 32, 40, 48. */
     char num[4];
@@ -247,6 +293,7 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 32, menu_row == 1, "AMBIENCE",  num);
         fmt_pct(SHARED_UC->step_volume, num);
         draw_row(fb, 40, menu_row == 2, "FOOTSTEPS", num);
+        draw_row(fb, 48, 0, "", "");                 /* 3rd row unused: keep it clear */
     } else if (menu_tab == TAB_LIGHTING) {
         uint8_t f = SHARED_UC->lighting_flags;
         draw_row(fb, 32, menu_row == 1, "FLICKER",
@@ -256,21 +303,25 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 48, menu_row == 3, "SHIMMER",
                  (f & LIGHTING_SHIMMER) ? " ON" : "OFF");
     } else if (menu_tab == TAB_VISUALS) {
-        static const char *res_lbl[3] = { "FULL", "HALF", "AUTO" };
-        uint8_t m = SHARED_UC->wall_res_mode; if (m > 2) m = 1;
+        static const char *res_lbl[4] = { "FULL", "HALF", "AUTO", "SERL" };
+        uint8_t m = SHARED_UC->wall_res_mode; if (m > 3) m = 1;
         draw_row(fb, 32, menu_row == 1, "WALLS", res_lbl[m]);
         draw_row(fb, 40, menu_row == 2, "VERT",
                  SHARED_UC->vres_half ? "HALF" : "FULL");
         draw_row(fb, 48, menu_row == 3, "METRICS",
                  g_metrics_on ? " ON" : "OFF");
+        draw_row(fb, 56, menu_row == 4, "SHADOWS",
+                 SHARED_UC->shadows_off ? "OFF" : " ON");
     } else if (menu_tab == TAB_CREDITS) {
         /* CREDITS — read-only build stamp (no selection cursor). */
-        font_draw_string(fb, X + 8, Y + 32, "BUILD " VERSION_BUILD_STR, MENU_FG_COLOR);
-        font_draw_string(fb, X + 8, Y + 40, "DATE  " VERSION_DATE_STR,  MENU_FG_COLOR);
-        font_draw_string(fb, X + 8, Y + 48, "SHA   " VERSION_SHA_STR,   MENU_FG_COLOR);
+        menu_puts_pad(TX(X + 8), 32, "BUILD " VERSION_BUILD_STR, 20);
+        menu_puts_pad(TX(X + 8), 40, "DATE  " VERSION_DATE_STR,  20);
+        menu_puts_pad(TX(X + 8), 48, "SHA   " VERSION_SHA_STR,   20);
     } else { /* TAB_MAPS — scrolling list of the compiled-in custom maps */
         if (custom_pick_count == 0) {
-            font_draw_string(fb, X + 8, Y + 32, "  (NO MAPS)", MENU_FG_COLOR);
+            menu_puts_pad(TX(X + 8), 32, "  (NO MAPS)", 20);
+            menu_puts_pad(TX(X + 8), 40, "", 20);
+            menu_puts_pad(TX(X + 8), 48, "", 20);
         } else {
             int sel = menu_row - 1;            /* selected map, or -1 on the tab row */
             int off = 0;                       /* 3-row window scrolls with selection */
@@ -279,24 +330,27 @@ void menu_render(uint8_t *fb) {
                 if (off < 0) off = 0;
                 if (off > custom_pick_count - 3) off = custom_pick_count - 3;
             }
-            for (int i = 0; i < 3 && off + i < custom_pick_count; i++) {
+            /* Always paint all 3 window rows (blank when past the end) so the
+             * list self-clears as it scrolls, no blank pass. */
+            for (int i = 0; i < 3; i++) {
                 int mi = off + i;
-                char line[20]; int p = 0;
-                line[p++] = (menu_row == mi + 1) ? '>' : ' ';
-                line[p++] = ' ';
-                for (const char *nm = custom_maps[mi].name; *nm && p < 18; ) line[p++] = *nm++;
-                line[p] = 0;
-                /* Blink a concise bar around the selected map name (name starts
-                 * at column 3; p-2 chars long, padded one space each side). */
-                if (menu_row == mi + 1 && hl_blink())
-                    draw_word_hl(fb, 32 + 8 * i, 2, p, MENU_HL_BAR);
-                font_draw_string(fb, X + 8, Y + 32 + 8 * i, line, MENU_FG_COLOR);
+                if (mi < custom_pick_count) {
+                    char line[22]; int p = 0;
+                    line[p++] = (menu_row == mi + 1) ? '>' : ' ';
+                    line[p++] = ' ';
+                    for (const char *nm = custom_maps[mi].name; *nm && p < 19; ) line[p++] = *nm++;
+                    line[p] = 0;
+                    if (menu_row == mi + 1 && hl_blink())
+                        draw_word_hl(fb, 32 + 8 * i, 2, p, MENU_HL_BAR);
+                    menu_puts_pad(TX(X + 8), 32 + 8 * i, line, 20);
+                } else {
+                    menu_puts_pad(TX(X + 8), 32 + 8 * i, "", 20);
+                }
             }
         }
     }
 
     /* Hint row at y=64. */
-    font_draw_string(fb, X + 8, Y + 64,
-                     (menu_tab == TAB_MAPS) ? "A=GO  START=CLOSE" : "START TO CLOSE",
-                     MENU_FG_COLOR);
+    menu_puts_pad(TX(X + 8), 64,
+                  (menu_tab == TAB_MAPS) ? "A=GO  START=CLOSE" : "START TO CLOSE", 20);
 }

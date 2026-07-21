@@ -13,6 +13,7 @@ window.RC = (function () {
   let px, py, pa;               // player pos (cells) + angle (radians)
   let eyeH = 0.5;               // eye height 0..1; crouches in crawlspaces
   let lightGrid = null, lowGrid = null, fixtureGrid = null, hasLow = false;
+  let darkGrid = null;
   let procOut = [];             // outlets the engine would auto-place (place_outlets)
 
   function A() { return window.ME.assets; }
@@ -30,6 +31,9 @@ window.RC = (function () {
   }
   function lit(cx, cy) { return (lightGrid && cy >= 0 && cx >= 0 && cy < lightGrid.length && cx < lightGrid[0].length) ? lightGrid[cy][cx] : 0; }
   function low(cx, cy) { return (lowGrid && cy >= 0 && cx >= 0 && cy < lowGrid.length && cx < lowGrid[0].length) ? lowGrid[cy][cx] : 0; }
+  /* DARK ROOM (engine: cell_light bit 7). No fixtures, everything toward fog. */
+  function dark(cx, cy) { return (darkGrid && cy >= 0 && cx >= 0 && cy < darkGrid.length && cx < darkGrid[0].length) ? darkGrid[cy][cx] : 0; }
+  const DARK_ROOM_SHADE = 6;   /* == DARK_ROOM_SHADE in raycast.c */
 
   /* port of init_lights: auto-grid fixtures every 2 cells on open non-crawl
    * cells, then the 3x3 cell_light boost (centre +2, neighbours +1, cap 3). */
@@ -37,6 +41,10 @@ window.RC = (function () {
     const m = window.ME.model;
     lightGrid = Array.from({ length: m.h }, () => new Int8Array(m.w));
     lowGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
+    darkGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
+    for (const d of (m.dark || []))
+      for (let y = Math.max(0, d.y0); y <= Math.min(m.h - 1, d.y1); y++)
+        for (let x = Math.max(0, d.x0); x <= Math.min(m.w - 1, d.x1); x++) darkGrid[y][x] = 1;
     fixtureGrid = Array.from({ length: m.h }, () => new Uint8Array(m.w));
     hasLow = false;
     for (const c of m.crawls) for (const [x, y] of runCells(c))
@@ -45,11 +53,12 @@ window.RC = (function () {
     const pts = [];
     if (m.lights && m.lights.length) {
       for (const l of m.lights)
-        if (l.cx >= 0 && l.cy >= 0 && l.cx < m.w && l.cy < m.h) pts.push([l.cx, l.cy]);
+        if (l.cx >= 0 && l.cy >= 0 && l.cx < m.w && l.cy < m.h && !darkGrid[l.cy][l.cx])
+          pts.push([l.cx, l.cy]);
     } else {
       for (let my = 1; my < m.h - 1; my += 2)
         for (let mx = 1; mx < m.w - 1; mx += 2)
-          if (cellVal(mx, my) === 0 && !lowGrid[my][mx]) pts.push([mx, my]);
+          if (cellVal(mx, my) === 0 && !lowGrid[my][mx] && !darkGrid[my][mx]) pts.push([mx, my]);
     }
     const cap = A().bases.LIGHT_BOOST_MAX ?? 3;
     for (const [lx, ly] of pts) {
@@ -136,8 +145,8 @@ window.RC = (function () {
     let t = (wx * vx + wy * vy) / L; t = t < 0 ? 0 : t > 1 ? 1 : t;
     return Math.hypot(x - (x1 + t * vx), y - (y1 + t * vy));
   }
-  function partBlocked(x, y) {           // collide against the partition boxes
-    const r = PT_HALF + 0.14;
+  function partBlocked(x, y) {           // collide against the partition slabs
+    const r = PT_HALF + 0.25;            // slab half-thickness + player radius (ROM feel)
     for (const p of window.ME.model.partitions)
       if (distToSeg(x, y, p.x1, p.y1, p.x2, p.y2) < r) return true;
     return false;
@@ -165,25 +174,91 @@ window.RC = (function () {
     if (t <= 0 || u < 0 || u > 1) return null;
     return { dist: t, side: Math.abs(ex) > Math.abs(ey) ? 1 : 0, u: u };
   }
-  const PT_HALF = 0.08;   // partition half-thickness (cells) -> visible depth, not a 1px line
-  function partitionHit(rx, ry, maxd) {
-    const parts = window.ME.model.partitions; let best = null;
+  const PT_HALF = 0.05;   // slab half-thickness (cells) -> 0.1 total, matches the ROM (PART_HALF_THICK)
+  /* Flush shift (matches the engine): a run collinear with a wall face shifts
+   * so its face lands ON the line instead of centered — no seam jog at the
+   * joint. Returns the signed centerline offset along the perpendicular:
+   * -PT_HALF (slab sits on the + side, face on line), +PT_HALF (- side), or
+   * 0 (centered). Scans the run's cells plus one continuation cell past each
+   * end; a wall on exactly one side votes flush, both sides = tee = centered. */
+  function slabShift(p) {
+    const vertical = Math.round(p.x1) === Math.round(p.x2);
+    const line = vertical ? Math.round(p.x1) : Math.round(p.y1);
+    const a = Math.min(vertical ? p.y1 : p.x1, vertical ? p.y2 : p.x2);
+    const b = Math.max(vertical ? p.y1 : p.x1, vertical ? p.y2 : p.x2);
+    let neg = false, pos = false;   // wall on the - / + side of the line
+    for (let t = Math.floor(a) - 1; t <= Math.ceil(b); t++) {
+      const cLo = vertical ? cellVal(line - 1, t) : cellVal(t, line - 1);
+      const cHi = vertical ? cellVal(line, t)     : cellVal(t, line);
+      if (cLo && cHi) continue;     // tee / wall both sides
+      if (cLo) neg = true;
+      if (cHi) pos = true;
+    }
+    if (neg && !pos) return  PT_HALF;   // wall on - side -> slab on + side, face on line
+    if (pos && !neg) return -PT_HALF;
+    return 0;
+  }
+  /* ALL partitions the ray crosses within maxd (nearest face per partition),
+   * sorted FAR -> NEAR for painter's-order overlay. Returning only the nearest
+   * (as before) meant a half-height counter erased every partition behind it;
+   * the engine keeps and layers the crossings, so we do too. */
+  function partitionHits(rx, ry, maxd) {
+    const parts = window.ME.model.partitions; const out = [];
     for (const p of parts) {
       const dx = p.x2 - p.x1, dy = p.y2 - p.y1, len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len * PT_HALF, ny = dx / len * PT_HALF;     // perpendicular offset
-      const ax = p.x1 + nx, ay = p.y1 + ny, bx = p.x2 + nx, by = p.y2 + ny;   // a thin box:
-      const cx2 = p.x2 - nx, cy2 = p.y2 - ny, ex = p.x1 - nx, ey = p.y1 - ny; // 2 faces + 2 caps
+      const ux = dx / len, uy = dy / len;              // along the run
+      const px0 = -uy, py0 = ux;                       // unit perpendicular
+      const sh = (p._shift !== undefined ? p._shift : (p._shift = slabShift(p)));
+      const cxL = p.x1 + px0 * sh, cyL = p.y1 + py0 * sh;   // shifted centerline
+      const cx1 = p.x2 + px0 * sh, cy1 = p.y2 + py0 * sh;
+      const nx = px0 * PT_HALF, ny = py0 * PT_HALF;    // slab half-thickness offset
+      const ax = cxL + nx, ay = cyL + ny, bx = cx1 + nx, by = cy1 + ny;   // thin box:
+      const cx2 = cx1 - nx, cy2 = cy1 - ny, ex = cxL - nx, ey = cyL - ny; // 2 faces + 2 caps
       const edges = [[ax, ay, bx, by], [bx, by, cx2, cy2], [cx2, cy2, ex, ey], [ex, ey, ax, ay]];
+      let best = null;                                 // nearest face of THIS partition
       for (const e of edges) {
         const h = raySeg(px, py, rx, ry, e[0], e[1], e[2], e[3]);
         if (h && h.dist < maxd && (!best || h.dist < best.dist)) {
           const hx = px + rx * h.dist, hy = py + ry * h.dist;
           const u = ((hx - p.x1) * dx + (hy - p.y1) * dy) / (len * len);   // along the divider
-          best = { dist: h.dist, side: h.side, style: p.style, height: p.height, u: u, seg: p, len: len };
+          const hv = (window.ME.reg.partition.height[p.height] | 0);
+          best = { dist: h.dist, side: h.side, style: p.style, height: p.height,
+                   hfrac: hv > 0 ? hv / 256 : 1,
+                   u: u, seg: p, len: len, shift: sh, ux: ux, uy: uy };
         }
       }
+      if (best) out.push(best);
     }
-    return best;
+    out.sort((a, b) => b.dist - a.dist);               // far -> near (painter's order)
+    return out;
+  }
+  /* Countertop top: the flat horizontal wood plane capping a half/low
+   * partition, drawn the crawl-ceiling way — walk screen rows up from the
+   * band's top edge, map each to a distance on the height plane, and lay
+   * wood while the sampled point is inside the slab's footprint (thickness
+   * band x run extent). Mirrors the ROM's sampled-plane countertop. */
+  function drawCountertop(data, x, ph, hfrac, bandTopY, dirRx, dirRy) {
+    const B = A().bases, P = A().palette;
+    const woodBase = B.WOODTOP_BASE; if (woodBase === undefined) return;
+    const eh = eyeH; if (hfrac >= eh) return;   // top only visible when it sits BELOW the eye
+    const seg = ph.seg, sh = ph.shift, ux = ph.ux, uy = ph.uy;
+    const px0 = -uy, py0 = ux;
+    const lineX = (seg.x1 + px0 * sh), lineY = (seg.y1 + py0 * sh);   // a point on the centerline
+    const ua = 0, ub = ph.len;                                        // run extent (param along u)
+    const sl1 = SL() - 1;
+    for (let y = bandTopY - 1; y > MID; y--) {
+      const d = (eh - hfrac) * H / (y - MID);          // row (below horizon) -> distance on the hfrac plane
+      if (d <= 0) break;
+      const wx = px + dirRx * d, wy = py + dirRy * d;
+      const un = (wx - lineX) * px0 + (wy - lineY) * py0;              // perpendicular offset
+      const uu = (wx - seg.x1) * ux + (wy - seg.y1) * uy;             // along the run
+      if (un < -PT_HALF || un > PT_HALF || uu < ua || uu > ub) break; // left the footprint
+      let s = shadeIdx(d, 0, lit(Math.floor(wx), Math.floor(wy))) >> 1;   // 16 levels -> 8-entry wood ramp
+      if (s > 4) s = 4; if (s < 0) s = 0;   // stay in the BROWN range (6-7 are grey), matching the ROM
+      const c = P[woodBase + s] || [0, 0, 0];
+      const o = (y * W + x) * 4;
+      data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+    }
   }
   /* wallpaper texel (0..4 shade offset). Textures are x-major: data[x*h+y]. */
   const TILE = 2;   // texture repeats per cell (tunable feel)
@@ -206,6 +281,9 @@ window.RC = (function () {
 
   function render() {
     const data = img.data, B = A().bases;
+    /* Recompute flush shifts each frame so wall edits between preview opens
+     * are reflected (cheap — a handful of partitions). */
+    for (const p of window.ME.model.partitions) p._shift = slabShift(p);
     const dirX = Math.cos(pa), dirY = Math.sin(pa);
     const planeX = -dirY * 0.66, planeY = dirX * 0.66;
     const rdxL = dirX - planeX, rdyL = dirY - planeY;
@@ -240,6 +318,7 @@ window.RC = (function () {
           const hx = (Math.floor(wx * 8)) & 0xFF, hy = (Math.floor(wy * 8)) & 0xFF;
           if (((hx * 73 + hy * 31) & 0xF) < 6) idx = B.FLOOR_BASE + Math.min(sl1, sh + 2);
           if (low(cx, cy)) idx = B.FLOOR_BASE + Math.min(sl1, sh + 3);   // dark crawl floor
+          if (dark(cx, cy)) idx = B.FLOOR_BASE + Math.min(sl1, sh + DARK_ROOM_SHADE);
           put(data, o, idx);
         }
       } else {
@@ -265,6 +344,13 @@ window.RC = (function () {
             if (fxf > 0.2 && fxf < 0.8 && fyf > 0.2 && fyf < 0.8) { put(data, o, B.LIGHT_BASE); continue; }
           }
           let sh = fBase - lit(cx, cy) * 2; if (sh < 0) sh = 0;
+          /* DARK ROOM ceiling: the ROM draws its darkness OVER the tile grid
+           * (you can't read tile grid in an unlit room), so skip the grid here
+           * rather than shading it — same resulting look, and it matches. */
+          if (dark(cx, cy)) {
+            put(data, o, B.CEIL_BASE + Math.min(sl1, sh + DARK_ROOM_SHADE));
+            continue;
+          }
           const gx = (fwx * 4) % 1, gy = (fwy * 4) % 1;
           const grid = (gx >= 0 ? gx : gx + 1) < 0.06 || (gy >= 0 ? gy : gy + 1) < 0.06;
           put(data, o, B.CEIL_BASE + (grid ? Math.min(sl1, sh + 3) : sh));
@@ -293,44 +379,70 @@ window.RC = (function () {
       }
       let dist = side === 0 ? sdX - ddx : sdY - ddy; if (dist < 0.02) dist = 0.02;
 
-      let hfrac = 1, voidCol = false, tex = null, baseIdx = 0, distShade = 0, tu = 0;
-      const ph = partitionHit(rx, ry, dist);
-      if (ph) {
-        dist = ph.dist < 0.02 ? 0.02 : ph.dist;
-        tex = ph.style === 'spotted' ? A().textures.partition : A().textures.wall;
-        baseIdx = ph.style === 'spotted' ? B.PARTITION_BASE : B.WALL_BASE;
-        distShade = shadeIdx(dist, ph.side === 1 ? 2 : 0, 0);
-        const segLen = Math.hypot(ph.seg.x2 - ph.seg.x1, ph.seg.y2 - ph.seg.y1) || 1;
-        tu = Math.floor(((ph.u * segLen * TILE) % 1) * tex.w);
-        if (ph.height === 'low') hfrac = 0.75;
-      } else if (val === 2) {
-        voidCol = true;                            // black-exit void
-      } else {
-        tex = A().textures.wall;
-        baseIdx = B.WALL_BASE;
-        distShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
-        const wallX = side === 0 ? (py + dist * ry) : (px + dist * rx);
-        tu = Math.floor((((wallX - Math.floor(wallX)) * TILE) % 1) * tex.w);
+      const eh = eyeH, sl1 = SL() - 1, P = A().palette;
+      zbuf[x] = dist;                              // depth for sprite z-test
+
+      /* ── BACKGROUND: the DDA wall (or black void), full height. A partial
+       * partition is drawn as an OVERLAY on top of this (see-over), matching
+       * the engine — so the wall behind a half-height counter still shows
+       * above the band instead of blanking to floor/ceiling. */
+      {
+        const wallBot = MID + eh * H / dist, wallTop = MID - (1 - eh) * H / dist;
+        const lineH = wallBot - wallTop;
+        const y0 = Math.max(0, Math.ceil(wallTop)), y1 = Math.min(H, Math.ceil(wallBot));
+        if (val === 2) {
+          /* VOID EXIT: a missing wall. Draw NO wall, so the floor+ceiling cast
+           * above show through, running out into the expanse — matches the
+           * engine's see-through opening. */
+        } else {
+          const tex = A().textures.wall, baseIdx = B.WALL_BASE;
+          let bgShade = shadeIdx(dist, side === 1 ? 2 : 0, lit(mapX, mapY));
+          /* A face seen FROM a dark room: the viewer-side cell is the open one
+           * (back-step off the solid wall), same as the engine's model. */
+          if (darkGrid) {
+            const vx = side === 0 ? mapX - stepX : mapX;
+            const vy = side === 1 ? mapY - stepY : mapY;
+            if (dark(vx, vy)) bgShade = Math.min(SL() - 1, bgShade + DARK_ROOM_SHADE);
+          }
+          const wallX = side === 0 ? (py + dist * ry) : (px + dist * rx);
+          const tu = Math.floor((((wallX - Math.floor(wallX)) * TILE) % 1) * tex.w);
+          for (let y = y0; y < y1; y++) {
+            const vf = (y - wallTop) / lineH;
+            const tv = Math.floor((((vf * TILE) % 1 + 1) % 1) * tex.h);
+            let s = bgShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
+            const c = P[baseIdx + s] || [0, 0, 0];
+            const o = (y * W + x) * 4; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+          }
+        }
       }
 
-      const eh = eyeH, sl1 = SL() - 1;
-      zbuf[x] = dist;                              // depth for sprite z-test
-      const wallBot = MID + eh * H / dist, wallTop = MID - (1 - eh) * H / dist;
-      const lineH = wallBot - wallTop;
-      const y0 = Math.max(0, Math.ceil(wallBot - lineH * hfrac));
-      const y1 = Math.min(H, Math.ceil(wallBot));
-      const P = A().palette;
-      for (let y = y0; y < y1; y++) {
-        const o = (y * W + x) * 4;
-        let c;
-        if (voidCol || !tex) { c = [0, 0, 0]; }
-        else {
-          const vf = (y - wallTop) / lineH;
+      /* ── FOREGROUND: every partition slab the ray crosses, drawn FAR->NEAR
+       * over the background so a near half-height counter doesn't erase the
+       * partitions behind it (their tops still show above its band). */
+      const phs = partitionHits(rx, ry, dist);
+      for (const ph of phs) {
+        const pdist = ph.dist < 0.02 ? 0.02 : ph.dist;
+        const tex = ph.style === 'spotted' ? A().textures.partition : A().textures.wall;
+        const baseIdx = ph.style === 'spotted' ? B.PARTITION_BASE : B.WALL_BASE;
+        const pShade = shadeIdx(pdist, ph.side === 1 ? 2 : 0, 0);
+        const segLen = Math.hypot(ph.seg.x2 - ph.seg.x1, ph.seg.y2 - ph.seg.y1) || 1;
+        const tu = Math.floor(((ph.u * segLen * TILE) % 1) * tex.w);
+        const hfrac = ph.hfrac;                    // low=0.75, half=0.375, full=1
+        const pBot = MID + eh * H / pdist, pTop = MID - (1 - eh) * H / pdist;
+        const pLineH = pBot - pTop;
+        const py0 = Math.max(0, Math.ceil(pBot - pLineH * hfrac)), py1 = Math.min(H, Math.ceil(pBot));
+        for (let y = py0; y < py1; y++) {
+          const vf = (y - pTop) / pLineH;
           const tv = Math.floor((((vf * TILE) % 1 + 1) % 1) * tex.h);
-          let s = distShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
-          c = P[baseIdx + s] || [0, 0, 0];
+          let s = pShade + texVal(tex, tu, tv); if (s > sl1) s = sl1;
+          const c = P[baseIdx + s] || [0, 0, 0];
+          const o = (y * W + x) * 4; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
         }
-        data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+        if (hfrac < 1) drawCountertop(data, x, ph, hfrac, py0, rx, ry);
+        /* Nearest partition (partial OR full) is the column's closest solid, so
+         * it sets the sprite depth — matching the engine (WALL_DIST = fg_t[0]),
+         * so the neanderthal behind a counter is occluded, not printed on top. */
+        if (pdist < zbuf[x]) zbuf[x] = pdist;
       }
 
       /* Crawlspace mouth header (lintel): the solid band from the lowered slab
@@ -368,6 +480,15 @@ window.RC = (function () {
       }
     bills.sort((a, b) => b.d2 - a.d2);
     for (const it of bills) drawSprite(data, zbuf, it.dec.x, it.dec.y, spr.neander, 0.45, 0.90, 0.45);
+
+    /* Live-3D chairs — projected geometry, far -> near. */
+    const chairs = [];
+    for (const dec of window.ME.model.decals)
+      if (dec.kind === 'chair') {
+        const ddx = dec.x - px, ddy = dec.y - py; chairs.push({ d2: ddx * ddx + ddy * ddy, dec });
+      }
+    chairs.sort((a, b) => b.d2 - a.d2);
+    for (const it of chairs) drawChair3D(data, zbuf, it.dec);
 
     ctx.putImageData(img, 0, 0);
   }
@@ -430,6 +551,96 @@ window.RC = (function () {
         const c = P[idx]; if (!c) continue;
         const o = (y * W + x) * 4;
         data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+      }
+    }
+  }
+
+  /* Live-3D chair — ports draw_chair_3d: the 7-box ladder-back projected
+   * through the camera (not a billboard), backface-culled, shaded from a fixed
+   * light, painter-sorted, distance-fogged, wall z-tested. Rides the DOOR_BASE
+   * brown ramp (palette index 96 + shade). */
+  const CHAIR_H = 0.375, DOOR_BASE = 96;
+  const CHAIR_BOXES = [
+    [-0.26, 0.42, -0.26,  0.26, 0.48,  0.20],   // seat
+    [-0.26, 0.00, -0.26, -0.20, 0.42, -0.20],   // front-L
+    [ 0.20, 0.00, -0.26,  0.26, 0.42, -0.20],   // front-R
+    [-0.26, 0.00,  0.20, -0.20, 1.00,  0.26],   // post BL
+    [ 0.20, 0.00,  0.20,  0.26, 1.00,  0.26],   // post BR
+    [-0.26, 0.90,  0.21,  0.26, 1.00,  0.25],   // top rail
+    [-0.26, 0.68,  0.215, 0.26, 0.76,  0.245],  // mid slat
+  ];
+  const CHAIR_FV = [[1,3,7,5],[0,4,6,2],[2,6,7,3],[0,1,5,4],[4,5,7,6],[0,2,3,1]];
+  const FACE_RAD = { E: 0, S: Math.PI / 2, W: Math.PI, N: 3 * Math.PI / 2 };
+
+  function drawChair3D(data, zbuf, chair) {
+    const fr = FACE_RAD[chair.face] != null ? FACE_RAD[chair.face] : 0;
+    const fc = Math.cos(fr), fs = Math.sin(fr);
+    const dirX = Math.cos(pa), dirY = Math.sin(pa);
+    const planeX = -dirY * 0.66, planeY = dirX * 0.66;
+    const det = planeX * dirY - dirX * planeY;
+    if (Math.abs(det) < 1e-6) return;
+    const invDet = 1 / det, P = A().palette, faces = [];
+    for (const b of CHAIR_BOXES) {
+      const SX = [], SY = [], DE = [], CL = [];
+      for (let v = 0; v < 8; v++) {
+        const mx = ((v & 1) ? b[3] : b[0]) * CHAIR_H;
+        const my = ((v & 2) ? b[4] : b[1]) * CHAIR_H;
+        const mz = ((v & 4) ? b[5] : b[2]) * CHAIR_H;
+        const rx = mx * fc + mz * fs, rz = -mx * fs + mz * fc;
+        const ddx = chair.x + rx - px, ddy = chair.y + rz - py;
+        const d = invDet * (-planeY * ddx + planeX * ddy);
+        DE[v] = d;
+        if (d < 0.06) { CL[v] = 1; SX[v] = SY[v] = 0; continue; }
+        CL[v] = 0;
+        const lat = invDet * (dirY * ddx - dirX * ddy);
+        SX[v] = (W / 2) * (1 + lat / d);
+        SY[v] = MID - (my - eyeH) * H / d;
+      }
+      for (let f = 0; f < 6; f++) {
+        const vi = CHAIR_FV[f];
+        if (CL[vi[0]] || CL[vi[1]] || CL[vi[2]] || CL[vi[3]]) continue;
+        const ax = SX[vi[1]] - SX[vi[0]], ay = SY[vi[1]] - SY[vi[0]];
+        const bx = SX[vi[2]] - SX[vi[0]], by = SY[vi[2]] - SY[vi[0]];
+        if (ax * by - ay * bx <= 0) continue;                 // backface
+        const d = (DE[vi[0]] + DE[vi[1]] + DE[vi[2]] + DE[vi[3]]) / 4;
+        let shade = (f === 2) ? 4 : (f === 3) ? 1 : (f === 1 || f === 5) ? 3 : 2;
+        if (d > 2) { shade -= Math.floor((d - 2) * 5 / 4); }   // distance fog
+        if (shade < 0) shade = 0; if (shade > 4) shade = 4;
+        faces.push({ x: vi.map(i => SX[i]), y: vi.map(i => SY[i]), d, shade });
+      }
+    }
+    faces.sort((a, b) => b.d - a.d);                          // far -> near
+    for (const fa of faces) {
+      const c = P[DOOR_BASE + fa.shade]; if (!c) continue;
+      fillTriZ(data, zbuf, fa.x[0], fa.y[0], fa.x[1], fa.y[1], fa.x[2], fa.y[2], fa.d, c);
+      fillTriZ(data, zbuf, fa.x[0], fa.y[0], fa.x[2], fa.y[2], fa.x[3], fa.y[3], fa.d, c);
+    }
+  }
+
+  function fillTriZ(data, zbuf, x0, y0, x1, y1, x2, y2, depth, c) {
+    let t;
+    if (y0 > y1) { t=y0;y0=y1;y1=t; t=x0;x0=x1;x1=t; }
+    if (y0 > y2) { t=y0;y0=y2;y2=t; t=x0;x0=x2;x2=t; }
+    if (y1 > y2) { t=y1;y1=y2;y2=t; t=x1;x1=x2;x2=t; }
+    if (y2 === y0) return;
+    let xl = x0, xls = (x2 - x0) / (y2 - y0);
+    for (let seg = 0; seg < 2; seg++) {
+      const ya = seg ? y1 : y0, yb = seg ? y2 : y1;
+      if (ya === yb) { if (seg === 0) xl += xls * (y1 - y0); continue; }
+      let xs = seg ? x1 : x0;
+      const xss = (seg ? (x2 - x1) : (x1 - x0)) / (yb - ya);
+      for (let y = Math.floor(ya); y < yb; y++) {
+        if (y >= 0 && y < H) {
+          let a = Math.round(xl), b = Math.round(xs);
+          if (a > b) { t=a;a=b;b=t; }
+          if (a < 0) a = 0; if (b >= W) b = W - 1;
+          for (let x = a; x <= b; x++) {
+            if (depth > zbuf[x] + 0.1) continue;              // behind a wall
+            const o = (y * W + x) * 4;
+            data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+          }
+        }
+        xl += xls; xs += xss;
       }
     }
   }

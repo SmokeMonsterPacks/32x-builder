@@ -4,6 +4,7 @@
 static volatile uint16_t* const mars_comm0  = (uint16_t*) MARS_COMM0;
 static volatile uint16_t* const mars_comm2  = (uint16_t*) MARS_COMM2;
 static volatile uint16_t* const mars_comm8  = (uint16_t*) MARS_COMM8;
+static volatile uint16_t* const mars_comm10 = (uint16_t*) MARS_COMM10;
 static volatile uint32_t* const mars_comm12 = (uint32_t*) MARS_COMM12;
 
 // VDP
@@ -60,6 +61,26 @@ void do_commands(void) {
 
 const uint16_t color_cycle[10] = { 0xEEE, 0xCCC, 0xAAA, 0x888, 0x666, 0x444, 0x666, 0x888, 0xAAA, 0xCCC };
 
+// Sticky six-button latch. read_joypad returns bit 0x1000 set when the pad
+// validated the six-button signature THIS frame, with M X Y Z in 0x0F00.
+// Wireless receivers/adapters validate intermittently (async latching vs our
+// TH probe), and a miss used to drop MODE mid-hold — which also defeats the
+// SH-2's MODE-held-2-frames debounce. Once a pad has EVER validated, a miss
+// holds the last good extended bits instead. The failed frame's own extended
+// data is never trusted (that way lie the phantoms).
+__attribute__((section(".data")))
+uint16_t pad_sticky(uint8_t n, uint16_t p) {
+	static uint16_t last_ext[2];
+	static uint8_t  is_six[2];
+	if (p & 0x1000) {
+		is_six[n] = 1;
+		last_ext[n] = p & 0x0F00;
+	} else if (is_six[n]) {
+		p = (uint16_t)((p & ~0x0F00u) | last_ext[n] | 0x1000);
+	}
+	return p;
+}
+
 __attribute__((section(".data")))
 void main(void) {
 	uint16_t ticks = 0, col = 0;
@@ -73,6 +94,14 @@ void main(void) {
 		// TODO: Remove this after fixing _vblank
 		while(*vdp_ctrl_port & 8) do_commands();
 		while(!(*vdp_ctrl_port & 8)) do_commands();
+		// Publish both pads UNSOLICITED every frame, exactly like the COMM12
+		// frame tick below. The SH-2 then reads COMM8/COMM10 directly with no
+		// request/response round-trip — the old on-demand handshake (COMM0
+		// command 3, still serviced above for compatibility) is what starved
+		// the bridge under render contention. P2 is published for free; no
+		// gameplay reads COMM10 yet.
+		*mars_comm8  = pad_sticky(0, read_joypad(0));
+		*mars_comm10 = pad_sticky(1, read_joypad(1));
 		*mars_comm12 = ++timer;
 	}
 }

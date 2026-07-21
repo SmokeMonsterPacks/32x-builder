@@ -57,3 +57,11 @@ main { display: flex; height: calc(100vh - 70px); }
 }
 .pv-help { color: var(--ink); display: flex; align-items: center; gap: 18px; }
 .pv-help b { color: var(--accent); }
+
+/* resource budget meter */
+#budget .brow { display:flex; justify-content:space-between; padding:2px 4px;
+  font-size:12px; color:var(--fg); }
+#budget .brow.bfull  { color:#e8c95a; }
+#budget .brow.bover  { color:#ff6b6b; font-weight:bold; }
+#budget .brow.bflash { animation: bflash 0.6s; }
+@keyframes bflash { 0%,100% { background:transparent; } 30% { background:#7a2b2b; } }

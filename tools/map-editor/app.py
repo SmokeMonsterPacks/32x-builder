@@ -66,17 +66,25 @@ def _community_path(name):
 
 
 def _list_maps():
-    """[{name, role, folder, protected}] — the editor shows a lock on protected
-    (core) maps and clones them on edit."""
+    """[{name, title, role, folder, protected}] — the editor shows a lock on
+    protected (core) maps and clones them on edit.
+
+    `name` is the FILE stem (the /maps/<name> key); `title` is the map's
+    `name:` header. They differ ("segapowerbase" vs "SEGA POWER BASE"), and
+    story chains resolve by TITLE (gen_maps matches `next:` against the header
+    name, uppercased) — so the editor's next-map picker needs the title, not
+    the filename. Same parse as the role lookup, so it costs nothing extra."""
     roles = _roles()
     maps = []
     for folder, name, path in sorted(_iter_map_files(), key=lambda t: (t[0], t[1])):
-        role = "community"
+        role, title = "community", ""
         try:
-            role = mapfmt.parse(open(path).read()).get("role", "community")
+            m = mapfmt.parse(open(path).read())
+            role = m.get("role", "community")
+            title = m.get("name") or ""
         except Exception:
             pass
-        maps.append({"name": name, "role": role, "folder": folder,
+        maps.append({"name": name, "title": title, "role": role, "folder": folder,
                      "protected": bool(roles.get(role, {}).get("protected"))})
     return maps
 
@@ -307,16 +315,28 @@ def _lint_submission(model):
 
     with open(config.REGISTRY) as fh:
         reg = json.load(fh)
-    # Seed the duplicate-name check with every map already in the repo.
+    # Seed the duplicate-name check with the maps already in the repo — EXCEPT
+    # a community map with this same name, which is the one being UPDATED (the
+    # submission overwrites its file, it doesn't add a second copy). Without
+    # this, every resubmission of an existing map failed as a duplicate of
+    # itself. A same-named CORE map still collides: you can't shadow canon.
+    this_name = (model.get("name") or "").upper()
     seen, errs = {}, []
     for folder, name, path in _iter_map_files():
         try:
             nm = (mapfmt.parse(open(path).read()).get("name") or name).upper()
         except Exception:
             nm = name.upper()
+        if nm == this_name and (folder or "") == "community":
+            continue                      # updating this map, not duplicating it
         seen[nm] = "maps/%s/%s.map" % (folder or ".", name)
     lint_maps.lint_model(mapfmt.parse(text), model["name"], "community",
                          reg, seen, errs)
+    nxt = (model.get("next") or "").strip().upper()
+    if nxt and nxt not in seen:
+        errs.append("%s: next: %r is not a map in the game yet — submit the "
+                    "later chapters of a story first (chains are built "
+                    "tail-first)" % (model["name"], nxt))
     return model, text, errs
 
 

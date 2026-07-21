@@ -291,3 +291,66 @@ so we already have the instrument to attribute every change.
 
 *Agent transcripts (5 subsystem deep-dives) condensed here; `srcref/d32xr/` is gitignored
 reference. Generated as the pre-work map for the 30fps optimization arc.*
+
+---
+---
+
+# Pass 2 — 2026-06-26 (post-half-res cost model)
+
+Pass 1 concluded "the mine is tapped" — true for its levers (1/2/3 shipped, store-bound
+discovery). Pass 2 re-mines against what is dominant NOW: **partition faces**
+(per-face × per-column intersection), the **door-open drop**, and the **crawlspace slab
+rows**. Four deep-dives: masked-seg pipeline, sprite/masked columns, frame orchestration,
+leftovers. Verified against our raycast.c before ranking.
+
+## TL;DR — ranked, effort-adjusted
+
+| # | Lever | What | Est. | Risk |
+|---|-------|------|------|------|
+| P1 | ~~Partition divide restructure~~ **FALSIFIED ON HARDWARE 2026-07-02 — reverted.** Implemented (hoisted per-frame constants + cross-multiply rejects, host-sim-verified equivalent) and A/B'd via a same-binary runtime toggle (VISUALS>PDIV, both loops compiled in — eliminates build-layout noise, which had poisoned two cross-build A/Bs at ±1600 ticks). Verdict: spawn scene W identical; partition-heavy procgen **NEW +1700 ticks WORSE** (W 26000→27700). Disassembly autopsy: 7 arrays → register starvation — face index spilled + reloaded 3×/candidate, 7 literal-pool base loads/candidate, serialized dmuls→compare chains; the OLD loop's 4 batched loads + overlapped muls are tighter, and most in-span candidates SURVIVE (spans rarely overlap) so the reject fast-path rarely fires. LESSONS: (1) the partition cost is the pixel DRAW, not the intersection divides; (2) on SH-2, address bookkeeping can eat an algorithmic win — count per-iteration instructions in the disassembly, not just ops in C; (3) same-binary runtime toggles are the only trustworthy A/B (layout noise is ±5-10%%). | 0 (reverted) | — |
+| P2 | **Door: stage + hoist** | (a) `door_tex` is sampled from **ROM per pixel** (raycast.c:2582,2662) while walls got `wall_tex_ram` — stage it. (b) `latch_now` & leaf constants depend only on `dopen` — hoist to per-frame, out of per-column. Directly attacks the reported door-open drop. | door-open drop mostly gone | low |
+| P3 | **`rowdist_lut` for slab/bulkhead** | Per-row `divu_u32(focal<<FX, prow)` (raycast.c:2136) is a pure function of `prow` — d32xr's `yslope[]` (r_data.c:595-610, used r_phase7.c:80). LUT rebuilt on pitch change only. ~hundreds of divides/frame in crawl scenes (L:18k). | ~0.5-1k ticks in tunnels | low |
+| P4 | **Billboard `texX` reciprocal** | Per-column int divide (raycast.c:1661) → per-sprite `xiscale`-style reciprocal + mul (d32xr r_phase3.c:157). Fold into sprite_defs Stage 2b. | small, free | low |
+| P5 | **Stage `neander_tex_hi`** | 32KB ROM array sampled per-pixel when close; lo-res (2KB) cache-fits, hi does not. SDRAM copy at boot — check the 0x3FC00 budget first. | small | low |
+| P6 | **Overdraw avoidance** (from the prior audit, still UNBUILT) | d32xr writes every pixel ONCE (visplanes fill only where walls expose them); we clear full 320x224 then overpaint walls — wasted uncached stores in wall-dense scenes. Fix: per-column wall_top/bot band, skip clear/floor/ceiling stores under it (needs pass reorder: walls first). | ~1-1.5k ticks/CPU | med |
+| P7 | **Overlap `partition_build_faces`** | Still serial on primary pre-kick (raycast.c:~1723); secondary idles through it. Grows if P1(c) adds projection precompute. Move to secondary or interleave. | idle recovery | med |
+| P8 | **68K = idle silicon** | d32xr's 68K runs the whole audio pump + streaming + IO dispatch (crt0.s:420-489). Ours naps post-boot. Move `amb_pump`/future music mixing there; frees secondary tail. | frees SH-2 time | med |
+| P9 | **RLE posts for transparency** | Doom columns skip transparent RUNS structurally (r_phase8.c:104-141); our door recess/leaf + billboards test `v!=0` per pixel. Pre-encode posts at bake time (gen_assets could emit them). | med win, door+sprites | med |
+
+**Ruled out — do not resurrect without new evidence:** vertical half-res (line-table
+preview looked too chunky — quality veto, build-107 era); opt-level sweeps (-Ofast/-O2/-Os
+all within noise, build-110 — the hot loop is hand-asm, the compiler only sees cold code);
+work-stealing beyond the adaptive split_col (already ~90% of the win).
+
+## The wedge answer (if we ever revisit projection)
+
+d32xr's masked-seg path (our partition analog) projects each seg ONCE (r_phase2.c:130-216:
+endpoint scales + one DIVU → `scalestep`), then per-column is `scalefrac += scalestep` +
+precomputed `maskedcol[x]`/`spropening[x]` array reads (r_phase8.c:53-143) — zero
+per-column intersection math. Our reverted attempt wedged because we interpolated
+**texture U** between endpoints; d32xr interpolates ONLY the scale and **recomputes the
+texture coordinate per column** from distance + finetangent (r_phase6.c:231-234). Adoption
+would cut partition cost to ~1 add + reads/column — but P1(a)+(b) capture most of the win
+at a fraction of the risk. Do those first, measure, only then consider projection.
+
+## Myth-busters, pass 2
+
+- **Cross-frame pipelining:** d32xr does NOT overlap next-frame prep with current-frame
+  raster (r_main.c:1124-1183 is strictly sequential; P_Ticker runs post-flip). Nothing to mine.
+- **Sprite clip arrays (`spropening`)**: not better than ours — we already z-test WALL_DIST
+  once per COLUMN (not per pixel; one agent misread that). No adoption.
+- **Vblank budget:** theirs is nearly as empty as ours (palette upload only,
+  marshw.c:1044-1053). Validates our shimmer-in-vblank; nothing more to lift.
+- **MIP levels for flats** (r_phase7.c:101-109): real in d32xr but our carpet/ceiling are
+  sparse stamp/grid drawers, not textured spans — inapplicable.
+
+## Suggested sequencing
+
+1. ~~P1~~ falsified + reverted (see table) — partition divides are NOT the bottleneck.
+2. **P2a+P2b** (door stage + hoist) — kills the user-visible door drop. NOW FIRST.
+3. **P3** (rowdist LUT) + **P4/P5** (fold into sprite_defs Stage 2b work).
+4. **P6** (overdraw avoidance prototype) — the remaining structural render lever.
+5. **P7/P8** (idle-CPU structure) — own arc, after the arithmetic wins land.
+
+*Pass 2 agent IDs: masked-seg a467d2eee9fca9b51, sprite/door ab316117ea1eee8fa,
+orchestration ae8708e0615156e2e, leftovers ac257f7a33555c514.*

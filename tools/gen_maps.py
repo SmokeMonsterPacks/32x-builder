@@ -66,6 +66,8 @@ def resolve(path, reg):
     spawn = (sp["x"], sp["y"], facing[sp["facing"]])
 
     parts = []
+    pedges = []
+    hclass = {0: 0, 192: 1, 96: 2}          # height value -> edge height class
     for p in m["partitions"]:
         for enum, table, what in ((p["style"], pstyle, "style"),
                                   (p["height"], pheight, "height"),
@@ -74,6 +76,58 @@ def resolve(path, reg):
                 die("%s: unknown partition %s %r" % (base, what, enum))
         parts.append((p["x1"], p["y1"], p["x2"], p["y2"],
                       pstyle[p["style"]], pheight[p["height"]], pcrawl[p["crawl"]]))
+        # Rasterize to cell edges (the first-class model): integer, axis-
+        # aligned segments only — which is every partition ever authored.
+        x1, y1, x2, y2 = p["x1"], p["y1"], p["x2"], p["y2"]
+        if any(v != int(v) for v in (x1, y1, x2, y2)):
+            die("%s: partition (%g,%g)->(%g,%g) has fractional endpoints — "
+                "partitions live on cell edges (integer coordinates)"
+                % (base, x1, y1, x2, y2))
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        if x1 != x2 and y1 != y2:
+            die("%s: partition (%d,%d)->(%d,%d) is diagonal — partitions are "
+                "axis-aligned" % (base, x1, y1, x2, y2))
+        hv = pheight[p["height"]]
+        if hv not in hclass:
+            die("%s: partition height value %d has no edge class" % (base, hv))
+        flags = 0x80 | (0x01 if pstyle[p["style"]] else 0) | (hclass[hv] << 1) \
+              | (0x08 if pcrawl[p["crawl"]] else 0)
+        # Collinear-wall flush: if the run shares its line with a wall face,
+        # shift the slab so the faces align (0x20 = slab on the negative side,
+        # face on the line; 0x10 = positive side). Mirrors the engine stamper.
+        # Scan the run's own cells AND one continuation cell past each end:
+        # a wall on exactly one side of the line means its face is collinear
+        # with the run — flush the slab to that face. A wall on BOTH sides at
+        # a continuation cell is a perpendicular tee (stays centered).
+        if x1 == x2:                          # vertical: WEST edges on line x
+            ww = we = False
+            ya, yb = min(y1, y2), max(y1, y2)
+            for yy in range(ya - 1, yb + 1):
+                if not (0 <= yy < h): continue
+                cw = x1 > 0 and cells[yy * w + (x1 - 1)] != 0
+                ce = x1 < w and cells[yy * w + x1] != 0
+                if cw and ce: continue        # tee / wall both sides
+                if cw: ww = True
+                if ce: we = True
+            # slab goes on the side OPPOSITE the wall, face on the line
+            if ww and not we:   flags |= 0x10   # wall west -> slab east
+            elif we and not ww: flags |= 0x20   # wall east -> slab west
+            for yy in range(ya, yb):
+                pedges.append((x1, yy, flags))
+        else:                                 # horizontal: NORTH edges on line y
+            wn = ws = False
+            xa, xb = min(x1, x2), max(x1, x2)
+            for xx in range(xa - 1, xb + 1):
+                if not (0 <= xx < w): continue
+                cn = y1 > 0 and cells[(y1 - 1) * w + xx] != 0
+                cs = y1 < h and cells[y1 * w + xx] != 0
+                if cn and cs: continue
+                if cn: wn = True
+                if cs: ws = True
+            if wn and not ws:   flags |= 0x10   # wall north -> slab south
+            elif ws and not wn: flags |= 0x20   # wall south -> slab north
+            for xx in range(xa, xb):
+                pedges.append((xx, y1, flags | 0x40))
 
     decals = []
     for d in m["decals"]:
@@ -82,7 +136,10 @@ def resolve(path, reg):
         if d["face"] not in face_axis:
             die("%s: unknown face %r" % (base, d["face"]))
         z = d.get("z", kinds[d["kind"]]["z"])
-        decals.append((d["x"], d["y"], z, face_axis[d["face"]], kinds[d["kind"]]["kind"]))
+        # A free-standing billboard has no wall to align to, so `axis` is
+        # meaningless for it — carry the real facing angle instead.
+        decals.append((d["x"], d["y"], z, face_axis[d["face"]],
+                       kinds[d["kind"]]["kind"], facing[d["face"]]))
 
     crawls = []
     for c in m["crawls"]:
@@ -91,17 +148,58 @@ def resolve(path, reg):
         dx, dy = cdir[c["dir"]]
         crawls.append((c["cx"], c["cy"], dx, dy, c["len"]))
 
+    # Authored ceiling fixtures. Empty list => the engine falls back to its
+    # procedural grid (init_lights), which is what every map did before this.
+    lights = []
+    for g_ in m["lights"]:
+        cx, cy = int(g_["cx"]), int(g_["cy"])
+        if not (0 <= cx < w and 0 <= cy < h):
+            die("%s: light %d,%d is outside the %dx%d grid" % (base, cx, cy, w, h))
+        lights.append((cx, cy))
+
+    # Dark rooms: unlit rects. Empty => every cell lit as usual.
+    dark = []
+    for d in m["dark"]:
+        for k in ("x0", "y0", "x1", "y1"):
+            if not (0 <= d[k] < (w if k[0] == "x" else h)):
+                die("%s: dark room %s=%d is outside the %dx%d grid" % (base, k, d[k], w, h))
+        dark.append((d["x0"], d["y0"], d["x1"], d["y1"]))
+
     for cap, lst in (("max_partitions", parts), ("max_decals", decals),
-                     ("max_crawl_runs", crawls)):
+                     ("max_crawl_runs", crawls), ("max_lights", lights),
+                     ("max_dark_rooms", dark)):
         if len(lst) > lim[cap]:
             die("%s: %d items exceed %s %d" % (base, len(lst), cap, lim[cap]))
+    if len(pedges) > lim.get("max_partition_edges", 255):
+        die("%s: partitions rasterize to %d cell-edges (max %d per map — "
+            "n_pedges is a uint8_t)"
+            % (base, len(pedges), lim.get("max_partition_edges", 255)))
 
     roles = reg.get("roles", {})
     role = m.get("role", "community")
     if role not in roles:
         die("%s: unknown role %r (valid: %s)" % (base, role, ", ".join(sorted(roles))))
+    # Transitive flush: runs sharing a LINE align with any flushed run on it.
+    # (The lobby spotted run tees into a 2-thick wall — both-sided, so its own
+    # scan stays centered — but it is collinear with the flushed chevron run;
+    # without propagation the two faces jog 0.05 at the gap and the spotted
+    # seam misses the wall corner.)
+    lineflush = {}
+    for (ex, ey, fl) in pedges:
+        key = ("n", ey) if (fl & 0x40) else ("w", ex)
+        if fl & 0x30:
+            lineflush[key] = fl & 0x30
+    if lineflush:
+        pedges = [
+            (ex, ey,
+             (fl | lineflush.get(("n", ey) if (fl & 0x40) else ("w", ex), 0))
+             if not (fl & 0x30) else fl)
+            for (ex, ey, fl) in pedges
+        ]
     return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
-            "decals": decals, "crawls": crawls, "spawn": spawn,
+            "pedges": pedges,
+            "next": (m.get("next") or "").strip(),
+            "decals": decals, "crawls": crawls, "lights": lights, "dark": dark, "spawn": spawn,
             "lobby_ceiling": m["options"]["lobby_ceiling"],
             "place_outlets": m["options"]["place_outlets"],
             "place_exit_door": m["options"]["place_exit_door"],
@@ -122,21 +220,30 @@ def emit(maps, out_path):
             L.append("    " + ",".join(str(c) for c in row) + ",")
         L.append("};")
         total += m["w"] * m["h"]
-        if m["parts"]:
-            L.append("static const cm_partition_t %s_parts[] = {" % p)
-            for (x1, y1, x2, y2, st, ht, cr) in m["parts"]:
-                L.append("    { %s,%s,%s,%s, %d,%d,%d }," %
-                         (fxlit(x1), fxlit(y1), fxlit(x2), fxlit(y2), st, ht, cr))
+        if m["pedges"]:
+            L.append("static const cm_pedge_t %s_pedges[] = {" % p)
+            for (ex, ey, ef) in m["pedges"]:
+                L.append("    { %d,%d,0x%02x }," % (ex, ey, ef))
             L.append("};")
         if m["decals"]:
             L.append("static const cm_decal_t %s_decals[] = {" % p)
-            for (x, y, z, ax, kd) in m["decals"]:
-                L.append("    { %s,%s,%s, %d,%d }," % (fxlit(x), fxlit(y), fxlit(z), ax, kd))
+            for (x, y, z, ax, kd, fa) in m["decals"]:
+                L.append("    { %s,%s,%s, %d,%d,%d }," % (fxlit(x), fxlit(y), fxlit(z), ax, kd, fa))
             L.append("};")
         if m["crawls"]:
             L.append("static const cm_crawl_t %s_crawls[] = {" % p)
             for (cx, cy, dx, dy, ln) in m["crawls"]:
                 L.append("    { %d,%d,%d,%d,%d }," % (cx, cy, dx, dy, ln))  # dx,dy signed
+            L.append("};")
+        if m["dark"]:
+            L.append("static const cm_dark_t %s_dark[] = {" % p)
+            for (x0, y0, x1, y1) in m["dark"]:
+                L.append("    { %d,%d,%d,%d }," % (x0, y0, x1, y1))
+            L.append("};")
+        if m["lights"]:
+            L.append("static const cm_light_t %s_lights[] = {" % p)
+            for (cx, cy) in m["lights"]:
+                L.append("    { %d,%d }," % (cx, cy))
             L.append("};")
         L.append("")
     if maps:
@@ -144,28 +251,35 @@ def emit(maps, out_path):
         for i, m in enumerate(maps):
             p = "map%02d" % i
             sx, sy, sa = m["spawn"]
-            parts = ("%s_parts,%d" % (p, len(m["parts"]))) if m["parts"] else "0,0"
+            pedges = ("%s_pedges,%d" % (p, len(m["pedges"]))) if m["pedges"] else "0,0"
             decals = ("%s_decals,%d" % (p, len(m["decals"]))) if m["decals"] else "0,0"
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
-            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s,%s,%d, %d,%d,%d },' %
-                     (m["name"][:16], m["w"], m["h"], p, parts, decals, crawls,
+            lights = ("%s_lights,%d" % (p, len(m["lights"]))) if m["lights"] else "0,0"
+            dark   = ("%s_dark,%d"   % (p, len(m["dark"])))   if m["dark"]   else "0,0"
+            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
+                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls, lights, dark,
                       fxlit(sx), fxlit(sy), sa,
-                      m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"]))
+                      m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
+                      m["next_idx"]))
         L.append("};")
         L.append("const int custom_map_count = (int)(sizeof custom_maps / sizeof custom_maps[0]);")
         # pickable maps are ordered first (by role priority), so the in-game
         # picker just bounds on this; the lobby sits past it (not selectable).
         L.append("const int custom_pick_count = %d;" % sum(1 for m in maps if m.get("picker")))
-        # core (starter/play) pickable maps sort before community ones, so this
-        # split lets the start menu list a separate Community section: core maps
-        # are [0, custom_core_count), community [custom_core_count, custom_pick_count).
+        # Role-priority ordering gives the start menu clean index boundaries:
+        #   [0, start)        starter maps        ("-- START MAPS --" group)
+        #   [start, core)     play + test maps    ("-- TEST --" group)
+        #   [core, pick)      community maps      (community + story groups)
+        L.append("const int custom_start_count = %d;" %
+                 sum(1 for m in maps if m.get("picker") and m["role"] == "starter"))
         L.append("const int custom_core_count = %d;" %
-                 sum(1 for m in maps if m.get("picker") and m["folder"] == "core"))
+                 sum(1 for m in maps if m.get("picker") and m["role"] != "community"))
     else:
         L.append("/* no maps found */")
         L.append("const custom_map_t custom_maps[1] = {{0}};")
         L.append("const int custom_map_count = 0;")
         L.append("const int custom_pick_count = 0;")
+        L.append("const int custom_start_count = 0;")
         L.append("const int custom_core_count = 0;")
     L.append("")
     text = "\n".join(L)
@@ -203,6 +317,19 @@ def main():
     maps = [resolve(p, reg) for p in files]
     # order: by role priority (pickable first, lobby last), then name -> stable
     maps.sort(key=lambda m: (m["priority"], m["name"]))
+    # Story chains: resolve each map's `next:` NAME to its post-sort index so
+    # the exit door can jump straight to custom_maps[next_map] at runtime.
+    by_name = {m["name"].upper(): i for i, m in enumerate(maps)}
+    for m in maps:
+        if m["next"]:
+            tgt = by_name.get(m["next"].upper())
+            if tgt is None:
+                die("%s: next: %r does not name a map in this build" % (m["name"], m["next"]))
+            if maps[tgt] is m:
+                die("%s: next: points at itself" % m["name"])
+            m["next_idx"] = tgt
+        else:
+            m["next_idx"] = -1
     emit(maps, args.out)
 
 

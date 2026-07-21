@@ -47,6 +47,24 @@ canon: Backrooms
 20,11 -> 20,14  style=spotted height=low crawl=no
 
 [decals]
+chair  9.5,15.5 face=E
+chair  23.5,15.5 face=W
+chair  6.5,11.5 face=S
+chair  26.5,11.5 face=S
+# Dark room (10,23)->(12,25): chairs waiting in the dark.
+chair  10.5,23.5 face=S
+chair  12.5,24.5 face=W
+chair  11.5,25.5 face=N
+# Dark room (1,1)->(3,3): a huddle in the corner gloom.
+chair  1.5,1.5 face=S
+chair  2.5,2.5 face=E
+chair  3.5,3.5 face=N
+# Scattered furnishing — the LOD makes these nearly free.
+chair  19.5,8.5 face=W
+chair  4.5,19.5 face=E
+chair  21.5,26.5 face=N
+chair  13.5,6.5 face=S
+chair  28.5,22.5 face=W
 outlet 17,26.5 face=W z=0.2
 door   16.5,31 face=S
 neanderthal 16.3,23.5 face=S
@@ -59,6 +77,10 @@ outlet 28,16.5 face=E z=0.2
 outlet 24,19.5 face=W z=0.2
 outlet 15,22.5 face=W z=0.2
 outlet 7,26.5 face=E z=0.2
+
+[dark]
+10,23 -> 12,25
+1,1 -> 3,3
 
 [options]
 place_outlets: 0

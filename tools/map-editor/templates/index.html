@@ -23,8 +23,12 @@
     <button id="btn-new">New map</button>
     <span class="sep"></span>
     <label>Name <input id="map-name" maxlength="16" size="14" placeholder="MYMAP"></label>
+    <label title="Story chain: where the EXIT DOOR leads. Pick another map to link them into a sequence; leave as — and the exit drops you into a procedurally generated level. Links by map name, so you can decide the order later.">Next
+      <select id="map-next"><option value="">— procedural —</option></select>
+    </label>
     <button id="btn-export" class="primary" title="Download this map as a .map file to your computer">⬇ Export .map</button>
     <button id="btn-submit" class="primary" title="Submit this map to the game: opens a pre-filled GitHub pull request under your own GitHub account. CI checks it; once merged it ships in the next ROM.">🚀 Submit to game</button>
+    <button id="btn-optimize" title="Losslessly shrink the map's encoding: merge collinear partition segments, re-cover crawl cells with the fewest runs, drop duplicate decals. The map looks identical; it just uses less of the budget.">⚙ Optimize</button>
     <button id="btn-import" title="Open a .map file from your computer">⬆ Import</button>
     <input id="file-import" type="file" accept=".map,text/plain" hidden>
     <button id="btn-save" title="Save into this checkout's maps/community/ (local dev only)">Save to repo</button>
@@ -41,6 +45,10 @@
       <div id="layers" class="btn-col"></div>
     </div>
     <div class="panel">
+      <h2>Budget</h2>
+      <div id="budget"></div>
+    </div>
+    <div class="panel">
       <h2 id="palette-title">Palette</h2>
       <div id="palette"></div>
     </div>
@@ -55,6 +63,7 @@
         <li>Crawl: click 2 cells (same row/col)</li>
         <li>Spawn: click a cell, set facing</li>
       </ul>
+      <p style="margin:6px 0 0"><a href="https://github.com/mholzinger/32x-builder/blob/main/MAPPING.md" target="_blank" rel="noopener">Full guide &rarr;</a></p>
     </div>
   </aside>
 

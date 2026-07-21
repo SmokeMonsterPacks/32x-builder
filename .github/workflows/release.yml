@@ -29,6 +29,12 @@ jobs:
     env:
       MARSDEV_VER: v1.0.0-rc1
       MARSDEV: ${{ github.workspace }}/.marsdev
+      # itch.io publishing. Mapped at JOB level (not on the step) so the step's
+      # own `if:` can read it — that's the only way to skip gracefully when the
+      # secret isn't configured. Add the key with:
+      #   gh secret set BUTLER_API_KEY   (from itch.io/user/settings/api-keys)
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+      ITCH_TARGET: paisleyboxers/backrooms32x:32x
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,3 +117,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Build ${{ steps.tag.outputs.build }} — ${{ steps.tag.outputs.date }} (${{ steps.tag.outputs.sha }})" \
             --notes "${{ steps.notes.outputs.notes }}"
+
+      # Push the SAME artifact we just released, so the GitHub Release asset and
+      # the itch.io download are byte-identical — no separate build, no drift.
+      # itch's version is the build number, which is also what the ROM stamps
+      # into its own CREDITS screen, so a player can always match what they're
+      # running to what the page says. Skips silently until BUTLER_API_KEY is set.
+      - name: Publish to itch.io
+        if: steps.exists.outputs.skip != 'true' && env.BUTLER_API_KEY != ''
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/butler.zip \
+            https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -qq /tmp/butler.zip -d /tmp/butler-bin
+          chmod +x /tmp/butler-bin/butler
+          # --if-changed: don't burn a version when the bytes are identical.
+          /tmp/butler-bin/butler push rom/backrooms.32x "$ITCH_TARGET" \
+            --userversion "${{ steps.tag.outputs.build }}" --if-changed
+          /tmp/butler-bin/butler status "${ITCH_TARGET%%:*}"

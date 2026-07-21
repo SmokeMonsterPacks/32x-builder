@@ -1,3 +1,4 @@
+import re
 """Shared reader/writer for the .map level format.
 
 The ONE place that knows the .map *syntax* (sections, line shapes, the ASCII
@@ -46,16 +47,18 @@ def new_model(name="UNTITLED", w=16, h=16):
             grid.append("#" + "." * (w - 2) + "#")
     return {
         "name": name, "w": w, "h": h, "role": "community", "canon": "", "author": "",
+        "next": "",
         "spawn": {"x": w / 2.0, "y": h - 2.5, "facing": "N"},
-        "grid": grid, "crawls": [], "partitions": [], "decals": [], "lights": [],
+        "grid": grid, "crawls": [], "partitions": [], "decals": [], "lights": [], "dark": [],
         "options": {"place_outlets": 0, "place_exit_door": 0, "lobby_ceiling": 0},
     }
 
 
 def parse(text):
     m = {"name": None, "w": None, "h": None, "role": "community", "canon": "", "author": "",
+         "next": "",
          "spawn": None,
-         "grid": [], "crawls": [], "partitions": [], "decals": [], "lights": [],
+         "grid": [], "crawls": [], "partitions": [], "decals": [], "lights": [], "dark": [],
          "options": {"place_outlets": 0, "place_exit_door": 0, "lobby_ceiling": 0}}
     section = None
 
@@ -104,6 +107,10 @@ def parse(text):
                 m["canon"] = val
             elif key == "author":
                 m["author"] = val
+            elif key == "next":
+                # Story chaining: the map the exit door leads to (linked list,
+                # forward pointer ONLY — "loads from"/"starting map" are derived).
+                m["next"] = val
             else:
                 err(n, "unknown header key %r" % key)
 
@@ -145,6 +152,15 @@ def parse(text):
                 d["z"] = float(kw["z"])
             m["decals"].append(d)
 
+        elif section == "dark":
+            # A DARK ROOM: an unlit rect. "x0,y0 -> x1,y1" (inclusive cells),
+            # mirroring the partition arrow syntax.
+            mm = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*->\s*(\d+)\s*,\s*(\d+)\s*$", line)
+            if not mm:
+                err(n, "dark: expected 'x0,y0 -> x1,y1', got %r" % line)
+            x0, y0, x1, y1 = (int(g) for g in mm.groups())
+            m["dark"].append({"x0": min(x0, x1), "y0": min(y0, y1),
+                              "x1": max(x0, x1), "y1": max(y0, y1)})
         elif section in ("light", "lights"):
             pos, kw = _kv(line.replace(",", " ").split())
             if len(pos) < 2:
@@ -189,6 +205,7 @@ def serialize(model):
     if m.get("role"):   L.append("role: %s" % m["role"])
     if m.get("canon"):  L.append("canon: %s" % m["canon"])
     if m.get("author"): L.append("author: %s" % m["author"])
+    if m.get("next"):   L.append("next: %s" % m["next"])
     L += ["", "[grid]"]
     L.extend(m["grid"])
     L.append("")
@@ -210,6 +227,11 @@ def serialize(model):
             z = (" z=%s" % _num(d["z"])) if "z" in d and d["z"] is not None else ""
             L.append("%-6s %s,%s face=%s%s" % (d["kind"], _num(d["x"]), _num(d["y"]),
                                                d["face"], z))
+        L.append("")
+    if m.get("dark"):
+        L.append("[dark]")
+        for d in m["dark"]:
+            L.append("%d,%d -> %d,%d" % (d["x0"], d["y0"], d["x1"], d["y1"]))
         L.append("")
     if m.get("lights"):
         L.append("[lights]")

@@ -60,15 +60,49 @@ def _reachable(m, glyphs, sx, sy):
     return seen
 
 
-def lint_map(path, reg, seen_names, errs):
-    """Lint one .map FILE (the CI/build gate). Parses, then defers to
-    lint_model — which the editor also calls directly on submissions."""
+def parse_map(path, errs):
+    """Parse one .map FILE, or record a readable error and return None.
+
+    A contributor's first failure is usually 'this isn't a .map at all' (a
+    description typed into the GitHub new-file box, say), so say that plainly
+    instead of leaking a parser error about header keys."""
     base = os.path.relpath(path, ROOT)
     try:
-        m = mapfmt.parse(open(path).read())
+        text = open(path).read()
+    except OSError as ex:
+        errs.append("%s: cannot read (%s)" % (base, ex)); return None
+    try:
+        return mapfmt.parse(text)
     except mapfmt.MapFormatError as ex:
-        errs.append("%s: %s" % (base, ex)); return
-    lint_model(m, base, os.path.basename(os.path.dirname(path)), reg, seen_names, errs)
+        if "[grid]" not in text:
+            errs.append("%s: this doesn't look like a map file — it has no "
+                        "[grid] section. Export a .map from the editor "
+                        "(backrooms-32x-project.fly.dev) and commit that file. "
+                        "(parser said: %s)" % (base, ex))
+        else:
+            errs.append("%s: %s" % (base, ex))
+        return None
+
+
+def _void_cells(m):
+    """All void-exit ('X') cells as (x, y)."""
+    g = m["grid"]; h = len(g); w = len(g[0]) if h else 0
+    return [(x, y) for y in range(h) for x in range(w) if g[y][x] == 'X']
+
+def _wall_voids(m):
+    """Void cells that read as a MISSING WALL — on the map's outer edge, or with
+    a wall next to them (a gap in a wall line). An 'X' floating in open floor is
+    not that. The lobby's void (a gap in the playable-room wall) is wall-
+    adjacent, so it qualifies; a stray 'X' in a room does not."""
+    g = m["grid"]; h = len(g); w = len(g[0]) if h else 0
+    out = []
+    for (x, y) in _void_cells(m):
+        if x == 0 or x == w - 1 or y == 0 or y == h - 1:
+            out.append((x, y)); continue
+        if any(0 <= x+dx < w and 0 <= y+dy < h and g[y+dy][x+dx] == '#'
+               for dx, dy in ((1,0),(-1,0),(0,1),(0,-1))):
+            out.append((x, y))
+    return out
 
 
 def lint_model(m, base, folder, reg, seen_names, errs):
@@ -108,9 +142,36 @@ def lint_model(m, base, folder, reg, seen_names, errs):
                 e("grid row %d unknown glyph %r" % (ri, ch))
 
     for cap, k in (("max_partitions", "partitions"), ("max_decals", "decals"),
-                   ("max_crawl_runs", "crawls")):
+                   ("max_crawl_runs", "crawls"), ("max_lights", "lights"),
+                   ("max_dark_rooms", "dark")):
         if len(m[k]) > lim[cap]:
             e("%d %s exceed %s %d" % (len(m[k]), k, cap, lim[cap]))
+    # Chairs are their own budget: each live-3D chair costs real per-frame time
+    # and the frame is vblank-locked, so the cap is deliberately tight.
+    n_chairs = sum(1 for d in m["decals"] if d.get("kind") == "chair")
+    if "max_chairs" in lim and n_chairs > lim["max_chairs"]:
+        e("%d chairs exceed max_chairs %d (far chairs are cheap directional "
+          "billboards and only the nearest 3 render true-3D — the cap now "
+          "tracks the engine's standup table, not per-chair render cost)"
+          % (n_chairs, lim["max_chairs"]))
+    edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
+                     for p in m["partitions"])
+    # A void exit is a MISSING WALL cell on the border: an opening you walk out
+    # through, floor and ceiling running past it into the expanse. One floating
+    # in the middle of a room is not that. (For a dark room, use Dark Rooms.)
+    interior = [c for c in _void_cells(m) if c not in _wall_voids(m)]
+    if interior:
+        e("void exit cell%s at %s must be on the map border (a missing wall "
+          "cell you walk out through), not floating in a room. For a dark area "
+          "use a Dark Room instead."
+          % ("s" if len(interior) > 1 else "",
+             ", ".join("(%d,%d)" % c for c in interior[:5])))
+
+    edge_cap = lim.get("max_partition_edges", 255)
+    if edge_total > edge_cap:
+        e("partitions rasterize to %d cell-edges (max %d per map — n_pedges is "
+          "a uint8_t). Long runs cost edges even when the segment count is low."
+          % (edge_total, edge_cap))
 
     sp = m["spawn"]; sx, sy = int(sp["x"]), int(sp["y"])
     if _cell(m, glyphs, sx, sy) != 0:
@@ -120,9 +181,23 @@ def lint_model(m, base, folder, reg, seen_names, errs):
         for cx, cy in ((p["x1"], p["y1"]), (p["x2"], p["y2"])):
             if not (0 <= cx <= m["w"] and 0 <= cy <= m["h"]):
                 e("partition endpoint (%g,%g) out of bounds" % (cx, cy))
+        if str(p.get("crawl", "no")).lower() == "yes":
+            e("crawl-under beams are RETIRED (no map ever shipped one; crawl "
+              "gameplay lives in the [crawl] duct system) — use height=low/half "
+              "or a duct instead")
+        # First-class (edge) partitions: integer, axis-aligned segments only.
+        if any(v != int(v) for v in (p["x1"], p["y1"], p["x2"], p["y2"])):
+            e("partition (%g,%g)->(%g,%g) has fractional endpoints — partitions "
+              "sit on cell edges (whole-number coordinates)"
+              % (p["x1"], p["y1"], p["x2"], p["y2"]))
+        elif p["x1"] != p["x2"] and p["y1"] != p["y2"]:
+            e("partition (%g,%g)->(%g,%g) is diagonal — partitions are axis-aligned"
+              % (p["x1"], p["y1"], p["x2"], p["y2"]))
 
+    standalone_ids = {k["id"] for k in reg.get("decals", {}).get("kinds", [])
+                      if k.get("standalone")}
     for d in m["decals"]:
-        if d.get("kind") == "neanderthal":      # free-standing, not wall-mounted
+        if d.get("kind") in standalone_ids:     # free-standing, not wall-mounted
             continue
         fx, fy = int(d["x"]), int(d["y"])
         adj = [(fx, fy), (fx - 1, fy)] if d.get("face") in ("W", "E") else [(fx, fy), (fx, fy - 1)]
@@ -140,6 +215,20 @@ def lint_model(m, base, folder, reg, seen_names, errs):
         adj = [(fx, fy), (fx - 1, fy), (fx, fy - 1), (fx, fy + 1), (fx + 1, fy)]
         if reach and not any((cx, cy) in reach for cx, cy in adj):
             e("exit door at (%g,%g) is unreachable from spawn" % (d["x"], d["y"]))
+
+    # Story chain (next:): the exit door IS the transition, so a chained map
+    # must have one; a map can't chain to itself. Dangling targets + cycles are
+    # cross-map properties checked in lint_all / the editor submit gate.
+    nxt = (m.get("next") or "").strip()
+    if nxt:
+        has_door = (any(d.get("kind") == "door" for d in m["decals"])
+                    or m["options"].get("place_exit_door"))
+        if not (has_door or _wall_voids(m)):
+            e("next: %s needs an exit the player can reach — an exit door, "
+              "place_exit_door: 1, or a void opening on the border (a missing "
+              "wall cell you walk out through)." % nxt)
+        if nxt.upper() == (m.get("name") or "").upper():
+            e("next: points at itself")
 
 
 def lint_assets(reg, sh_dir, errs):
@@ -163,7 +252,7 @@ def lint_assets(reg, sh_dir, errs):
         if s.get("decode") not in (None, "offset", "door"):
             errs.append("assets: sprite %s bad decode %r" % (sid, s["decode"]))
         for f in s.get("flags", []):
-            if f not in ("animated", "lod", "standalone"):
+            if f not in ("animated", "lod", "standalone", "colmajor"):
                 errs.append("assets: sprite %s bad flag %r" % (sid, f))
         if "kind" in s:
             if s["kind"] in kinds_seen:
@@ -189,11 +278,45 @@ def lint_assets(reg, sh_dir, errs):
 def lint_all(maps_dir, reg, sh_dir):
     errs, seen = [], {}
     paths = sorted(glob.glob(os.path.join(maps_dir, "**", "*.map"), recursive=True))
+    # Parse ONCE, up front. This used to parse every map three times (here, the
+    # story-chain scan, the pickable count) and the last one was unguarded — so
+    # a single unparseable file crashed the whole lint with a traceback AFTER
+    # the readable error had already been recorded. Contributors saw a Python
+    # stack dump instead of "your file isn't a map". Files that fail to parse
+    # are reported and then skipped by everything downstream.
+    models = {}
     for path in paths:
-        lint_map(path, reg, seen, errs)
-    pickable = sum(1 for p in paths
-                   if reg.get("roles", {}).get(mapfmt.parse(open(p).read()).get("role", "community"), {}).get("picker"))
-    if paths and pickable == 0:
+        m = parse_map(path, errs)
+        if m is not None:
+            models[path] = m
+    for path, m in models.items():
+        lint_model(m, os.path.relpath(path, ROOT),
+                   os.path.basename(os.path.dirname(path)), reg, seen, errs)
+    # Story chains across the whole tree: every next: target must exist, and
+    # following the links must never loop (stories END; procgen is the infinite).
+    nxt_of, file_of = {}, {}
+    for p, mm in models.items():
+        nm = (mm.get("name") or "").upper()
+        file_of[nm] = os.path.relpath(p, ROOT)
+        if (mm.get("next") or "").strip():
+            nxt_of[nm] = mm["next"].strip().upper()
+    for nm, tgt in sorted(nxt_of.items()):
+        if tgt not in file_of:
+            errs.append("%s: next: %r does not name any map in the tree"
+                        % (file_of.get(nm, nm), tgt))
+    for start in sorted(nxt_of):
+        seen_chain, cur = set(), start
+        while cur in nxt_of:
+            if cur in seen_chain:
+                errs.append("%s: story chain loops (%s -> ... -> %s)"
+                            % (file_of.get(start, start), start, cur))
+                break
+            seen_chain.add(cur)
+            cur = nxt_of[cur]
+
+    pickable = sum(1 for m in models.values()
+                   if reg.get("roles", {}).get(m.get("role", "community"), {}).get("picker"))
+    if models and pickable == 0:
         errs.append("maps: no selectable (picker) map exists")
     lint_assets(reg, sh_dir, errs)
     return errs

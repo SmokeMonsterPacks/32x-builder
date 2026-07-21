@@ -175,9 +175,15 @@ void Hw32xFlipWait(void) {
 // MD Command support code ---------------------------------------------
 
 void HwMdReadPad(uint8_t port) {
-	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
-	MARS_SYS_COMM0 = 0x0300 | port;
-	while(MARS_SYS_COMM0) ;
+	/* No-op. The 68K now publishes both pads to COMM8/COMM10 every frame
+	 * unsolicited (md_main.c), so the value is already fresh — callers read
+	 * MARS_SYS_COMM8 / MARS_SYS_COMM10 directly. Kept so existing call sites
+	 * compile unchanged. The old body was a blocking COMM0 request/response
+	 * round-trip (spin, write 0x0300|port, spin until the 68K clears it): the
+	 * primary stalled on it every frame, and its COMM traffic during render
+	 * collided with the 68K's servicing window — the "joypad bridge" that
+	 * starved under contention and sank the work-stealing experiment. */
+	(void)port;
 }
 
 void HwMdClearScreen(void) {
@@ -214,6 +220,13 @@ static void NextChr(char c, uint16_t color) {
 		c = c - 'A' + 12;
 	} else if(c >= 'a' && c <= 'z') {
 		c = c - 'a' + 12;
+	} else if(c == ':') { c = 38;
+	} else if(c == '.') { c = 39;
+	} else if(c == '-') { c = 40;
+	} else if(c == '>') { c = 41;
+	} else if(c == '|') { c = 42;
+	} else if(c == '+') { c = 43;
+	} else if(c == '%') { c = 44;
 	} else if(c == ' ') {
 		c = 0;
 	} else {

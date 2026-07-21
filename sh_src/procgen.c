@@ -138,6 +138,143 @@ static int footprint_clear(int x, int y, int w, int h) {
     return 1;
 }
 
+/* Scatter free-standing neanderthal cutouts on clear floor, UPRIGHT. Every
+ * generated level gets at least one (the iconic "something is standing there"
+ * beat) — until now procgen placed none and only ever showed a leaked one from
+ * the previous map (fallen, the bug we just fixed). */
+static void place_neanderthals(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
+        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);   /* cardinal */
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 2);
+        placed++;
+    }
+}
+
+/* Scatter live-3D chairs on clear floor. The engine's render guard only draws
+ * the nearest few, so a couple per level reads as furniture without crating
+ * the frame. kind 3 = CHAIR_SPRITE_KIND. */
+static void place_chairs(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
+        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 3);
+        placed++;
+    }
+}
+
+/* Build a wall-enclosed room and mark its interior DARK. Stamps its own
+ * perimeter + one doorway (rather than needing a pre-clear rect that a dense
+ * map rarely has), so it's a guaranteed "dark room surrounded by walls".
+ * Shrinks the target size until a clear footprint is found. Returns the interior
+ * rect via *ix0.. (for the crawl variant to reuse) and 1 on success. */
+static int build_dark_room(int *ix0, int *iy0, int *ix1, int *iy1, int *side_out) {
+    for (int w = 6; w >= 4; w--) {
+        int h = w;
+        for (int a = 0; a < 120; a++) {
+            int rx = xs32_range(3, MAP_W - 4 - w);
+            int ry = xs32_range(3, MAP_H - 4 - h);
+            if (!footprint_clear(rx, ry, w, h)) continue;
+            for (int i = 0; i < w; i++) {
+                world_map[ry][rx + i] = 1; world_map[ry + h - 1][rx + i] = 1;
+            }
+            for (int j = 0; j < h; j++) {
+                world_map[ry + j][rx] = 1; world_map[ry + j][rx + w - 1] = 1;
+            }
+            for (int j = 1; j < h - 1; j++)
+                for (int i = 1; i < w - 1; i++) world_map[ry + j][rx + i] = 0;
+            int side = xs32() & 3;                       /* 0 N 1 S 2 W 3 E */
+            int dx, dy;                                  /* doorway cell */
+            switch (side) {
+                case 0:  dx = rx + 1 + xs32_range(0, w - 3); dy = ry;         break;
+                case 1:  dx = rx + 1 + xs32_range(0, w - 3); dy = ry + h - 1; break;
+                case 2:  dx = rx;         dy = ry + 1 + xs32_range(0, h - 3); break;
+                default: dx = rx + w - 1; dy = ry + 1 + xs32_range(0, h - 3); break;
+            }
+            open_cell(dx, dy);
+            raycast_add_dark_room(rx + 1, ry + 1, rx + w - 2, ry + h - 2);
+            *ix0 = rx; *iy0 = ry; *ix1 = rx + w - 1; *iy1 = ry + h - 1;
+            *side_out = side;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Guaranteed dark room surrounded by walls, entered through a normal doorway. */
+static void place_dark_enclosed(void) {
+    int x0, y0, x1, y1, side;
+    build_dark_room(&x0, &y0, &x1, &y1, &side);
+}
+
+/* Guaranteed dark room whose ONLY entrance is a forced-crouch crawlspace: build
+ * the walled dark room, then tunnel a low-ceiling passage through one wall so
+ * you crawl into the dark instead of walking. */
+static void place_dark_crawlspace(void) {
+    int x0, y0, x1, y1, side;
+    if (!build_dark_room(&x0, &y0, &x1, &y1, &side)) return;
+    /* Tunnel a low-ceiling crawl through whichever wall opens onto reachable
+     * floor (scan all four mid-wall cells). The room already has a doorway; the
+     * crawl is the crouch-in moment. */
+    int w = x1 - x0, h = y1 - y0;
+    const int wc[4][4] = {                        /* {cellx, celly, dx_out, dy_out} */
+        { x0 + 1 + (w >> 1), y1, 0,  1 },         /* S wall */
+        { x0 + 1 + (w >> 1), y0, 0, -1 },         /* N wall */
+        { x1, y0 + 1 + (h >> 1), 1,  0 },         /* E wall */
+        { x0, y0 + 1 + (h >> 1), -1, 0 },         /* W wall */
+    };
+    for (int s = 0; s < 4; s++) {
+        int cx = wc[s][0], cy = wc[s][1], dx = wc[s][2], dy = wc[s][3];
+        int ox = cx + dx, oy = cy + dy;           /* cell just outside the wall */
+        if ((unsigned)ox >= MAP_W || (unsigned)oy >= MAP_H) continue;
+        if (world_map[oy][ox] != 0) continue;     /* need open floor outside */
+        open_cell(cx, cy);                        /* carve the wall cell */
+        ceil_h_add_run(cx - dx, cy - dy, dx, dy, 2); /* low: interior + wall cell */
+        return;
+    }
+}
+
+/* Guaranteed hallway stretch of a few DARK unlit cells: find a straight run of
+ * open floor flanked by walls (a passage), mark 3-5 consecutive cells dark so
+ * the lights that would sit there are suppressed — a corridor where the lights
+ * are out. Falls back to any straight open run if no walled corridor is found. */
+static void place_dark_hallway(void) {
+    for (int pass = 0; pass < 2; pass++) {       /* pass 0: walled corridor; 1: any run */
+        for (int a = 0; a < 300; a++) {
+            int horiz = xs32() & 1;
+            int run = xs32_range(3, 5);
+            int x = xs32_range(2, MAP_W - 3 - (horiz ? run : 0));
+            int y = xs32_range(2, MAP_H - 3 - (horiz ? 0 : run));
+            int ok = 1;
+            for (int k = 0; k < run && ok; k++) {
+                int cx = x + (horiz ? k : 0), cy = y + (horiz ? 0 : k);
+                if (world_map[cy][cx] != 0) { ok = 0; break; }
+                int ddx = cx - SPAWN_CX, ddy = cy - SPAWN_CY;
+                if (ddx > -3 && ddx < 3 && ddy > -3 && ddy < 3) { ok = 0; break; }
+                if (pass == 0) {                 /* require flanking walls (a corridor) */
+                    int wa = horiz ? (world_map[cy - 1][cx] == 1) : (world_map[cy][cx - 1] == 1);
+                    int wb = horiz ? (world_map[cy + 1][cx] == 1) : (world_map[cy][cx + 1] == 1);
+                    if (!(wa && wb)) { ok = 0; break; }
+                }
+            }
+            if (!ok) continue;
+            int ex = x + (horiz ? run - 1 : 0), ey = y + (horiz ? 0 : run - 1);
+            raycast_add_dark_room(x, y, ex, ey);
+            return;
+        }
+    }
+}
+
 /* Build `count` enclosed grid-wall rooms: a wall perimeter with ONE doorway,
  * dropped only where the footprint+margin is clear. Reads as a room you step
  * into; the open margin guarantees it never seals off the floor. */
@@ -268,11 +405,15 @@ static void scatter_partitions(int add) {
 }
 
 /* Assign per-partition decor from the weights: spotted-vs-chevron wallpaper and
- * full-vs-partial (see-over) height, rolled independently for each divider. */
+ * full-vs-partial height, rolled independently for each divider. A partial
+ * divider sub-rolls low (192, see-over cubicle) vs half (96, counter/desk) at
+ * 2:1 — counters read as furniture, so they stay the rarer of the two. Both
+ * heights ride the same SEE-OVER tuning knob. */
 static void assign_partition_decor(void) {
     for (int i = 0; i < num_partitions; i++) {
         partition_style[i]  = prob(g_procgen_params.spotted) ? 1 : 0;
-        partition_height[i] = prob(g_procgen_params.lowdivs) ? 192 : 0;
+        partition_height[i] = prob(g_procgen_params.lowdivs)
+                            ? ((xs32() % 3 == 0) ? 96 : 192) : 0;
     }
 }
 
@@ -312,18 +453,25 @@ static void place_crawlspaces(int count) {
 /* ── Driver ───────────────────────────────────────────────────────── */
 
 void procgen_run(uint32_t seed) {
+    pedge_clear();                     /* procgen partitions stay legacy (inc 3) */
     prng_state = seed ? seed : 1;
     for (int i = 0; i < 8; i++) xs32();   /* mix the small-seed bits */
 
     /* Reset partitions for this generation pass. */
     num_partitions = 0;
     num_decals = 0;                       /* outlet is lobby-only */
+    standups_clear();                     /* drop leftover neanderthals/chairs from
+                                           * the previous map - procgen authors none,
+                                           * and a toppled one leaked in FALLEN */
     g_lobby_ceiling = 0;                  /* auto-grid ceiling for procgen */
+    /* Procgen has no authored fixtures: clear any left by a custom map, or the
+     * previous map's lights would light this one (init_lights runs after us). */
+    g_map_lights = 0; g_map_n_lights = 0;
+    g_map_dark = 0; g_map_n_dark = 0;
     ceil_h_clear();                       /* full ceilings; mark crawlspaces below */
     for (int i = 0; i < NUM_PARTITIONS_MAX; i++) {
         partition_style[i]  = 0;   /* chevron */
         partition_height[i] = 0;   /* full height */
-        partition_crawl[i]  = 0;   /* solid foot */
     }
 
     /* Layout: a big open floor with structure dropped into it — open by
@@ -333,6 +481,11 @@ void procgen_run(uint32_t seed) {
     fill_walls();
     carve_open_field();
     place_enclosed_rooms(xs32_range(5, 8 + dens));
+    /* Guaranteed dark features, placed while the floor is still open so their
+     * footprints land: a walled dark room, a dark room entered by a crawlspace,
+     * and (after structure exists, below) a hallway of unlit cells. */
+    place_dark_enclosed();
+    place_dark_crawlspace();
     place_pillars(xs32_range(10, 14 + dens * 2));
     place_stub_walls(xs32_range(6, 9 + dens));
     enforce_boundary();
@@ -354,6 +507,21 @@ void procgen_run(uint32_t seed) {
      * to 4 + p*3 (up to 16) so even max-divider maps stay inside the budget. */
     scatter_partitions(4 + g_procgen_params.partitions * 3);
     assign_partition_decor();
-    place_crawlspaces(g_procgen_params.crawlspaces + 1);
+    raycast_stamp_partition_edges();   /* procgen dividers go first-class */
+    /* -1 vs before: place_dark_crawlspace now carves one guaranteed crawl (into
+     * the dark room), so the general count drops by one to keep the overall
+     * crawlspace occurrence where it was. */
+    place_crawlspaces(g_procgen_params.crawlspaces);
     raycast_place_outlets(g_procgen_params.outlets * 5);
+    place_neanderthals(2 + xs32_range(0, 2));   /* 2-4: 1-2 was too sparse to find
+                                                 * on the 32x32 field. Billboard-cheap
+                                                 * now; spread out so rarely >1 large
+                                                 * on screen at once. */
+    /* 6-9 chairs: the directional-billboard LOD made count nearly free (far
+     * chairs are small sprites; only the nearest 3 render true-3D), stress-
+     * verified at 21 chairs with no frame drops. Furnished, not spammed. */
+    place_chairs(6 + xs32_range(0, 3));
+    /* Structure exists now, so a walled corridor can be found: a stretch of
+     * unlit hallway cells. */
+    place_dark_hallway();
 }

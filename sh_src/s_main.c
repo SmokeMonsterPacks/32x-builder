@@ -28,7 +28,7 @@ void s_main(void) {
     /* Secondary-side FRT init for profiling parity with primary. Φ/32
      * prescaler = ~720kHz, 1.39μs per tick — same as m_main.c. */
     SH2_FRT_TIER  = 0x01;
-    SH2_FRT_TCR   = 0x01;
+    SH2_FRT_TCR   = 0x02;   /* Phi/128 ~= 180kHz: 364ms before wrap */
     SH2_FRT_FTCSR = 0;
 
     for (;;) {
@@ -64,7 +64,6 @@ void s_main(void) {
             raycast_clear_half(split, SCREEN_W);
             raycast_draw_ceiling_grid(split, SCREEN_W);
             raycast_draw_carpet(split, SCREEN_W);
-            raycast_purge_partition_cache();   /* fresh pface_* before walls */
             raycast_purge_cell_light();        /* fresh cell_light on map change */
             raycast_draw_walls(split, SCREEN_W);
             SHARED_UC->secondary_render_ticks = (uint16_t)(secondary_frt_read() - t0);
@@ -80,9 +79,12 @@ void s_main(void) {
             raycast_purge_lowceil_cache();
             raycast_purge_sprite_cache();
             raycast_draw_tail(split, SCREEN_W);
-            /* Sprites AFTER the tail so the slab's z-stamp occludes them. Draws
-             * only [split, SCREEN_W) — disjoint from the primary's half. */
-            raycast_draw_sprites(split, SCREEN_W);
+            /* Sprites AFTER the tail so the slab's z-stamp occludes them. Uses
+             * the DECOUPLED sprite_split (set by the primary before it raised
+             * CMD_TAIL) so a near screen-filling standup is shared, not dumped
+             * on one cpu — disjoint [sprite_split, W) from the primary's half. */
+            int sprite_split = (int)SHARED_UC->sprite_split;
+            raycast_draw_sprites(sprite_split, SCREEN_W);
             break;
         }
         case MARS_CMD_BOX: {

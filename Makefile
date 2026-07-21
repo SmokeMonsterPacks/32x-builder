@@ -108,6 +108,22 @@ deploy-tv: release
 		echo "==> Copying $(TARGET).32x to $(MISTER_TV):$$DIR/" && \
 		scp $(TARGET).32x $(MISTER_TV):$$DIR/backrooms.32x
 
+# Deploy an ALREADY-BUILT rom to a MiSTer without rebuilding — the point is to
+# put exact bytes there (e.g. a ROM fetched from a GitHub release by
+# ./fetch-release.sh). `deploy` depends on `release`, so it would rebuild and
+# defeat that: CI pins marsdev 13.1.0, this machine may not, so a local rebuild
+# is NOT the released artifact.
+#   make deploy-rom ROM=rom/release/backrooms-build-138.32x
+deploy-rom:
+	@test -n "$(ROM)" || { echo "usage: make deploy-rom ROM=<path to .32x> [MISTER=host]"; exit 1; }
+	@test -f "$(ROM)" || { echo "error: $(ROM) not found"; exit 1; }
+	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+		echo "==> Copying $(ROM) to $(MISTER):$$DIR/" && \
+		scp "$(ROM)" $(MISTER):$$DIR/backrooms.32x
+
+deploy-rom-tv:
+	@$(MAKE) deploy-rom ROM="$(ROM)" MISTER=$(MISTER_TV)
+
 # Build + publish a GitHub Release (ROM as the asset, commit log as notes).
 # Git-derived tag build-<commit-count>. Needs the gh CLI, authenticated.
 # Use 'make publish ARGS=--dry-run' to preview without building/publishing.
@@ -200,8 +216,12 @@ sh_src/version.h: FORCE
 		echo "  VERSION  build $$BUILD ($$SHA) $$DATE"; \
 	else rm -f sh_src/version.h.tmp; fi
 
-# menu.c draws the version strings, so it must see a fresh version.h.
-sh_src/menu.o: sh_src/version.h
+# menu.c and m_main.c both draw the version strings (menu screen + debug HUD),
+# so they must see a fresh version.h. This is also the ORDER dependency that
+# makes a clean checkout work: version.h is generated (not tracked), so without
+# these prerequisites make would compile these TUs before the rule fires — CI
+# has no stale copy to mask it (build-129 release failed exactly this way).
+sh_src/menu.o sh_src/m_main.o: sh_src/version.h
 
 # sh_src/custom_maps.c is codegen'd from maps/*.map + registry.json by the level
 # editor's generator. Regenerate when a .map, the registry, or the generator
@@ -213,6 +233,14 @@ sh_src/menu.o: sh_src/version.h
 sh_src/custom_maps.c: $(wildcard maps/*.map maps/core/*.map maps/community/*.map) \
                       registry.json tools/gen_maps.py tools/mapfmt.py tools/lint_maps.py
 	@python3 tools/gen_maps.py
+
+# sh_src/sprite_defs.h — the data-driven sprite table, codegen'd from
+# registry.json "assets" + the referenced _tex.h (tools/gen_assets.py). raycast.c
+# includes it; generated + gitignored, so the explicit raycast.o dep below makes a
+# clean build emit it first (same pattern as md_start.bin).
+sh_src/sprite_defs.h: registry.json tools/gen_assets.py $(wildcard sh_src/*_tex.h)
+	@python3 tools/gen_assets.py
+sh_src/raycast.o: sh_src/sprite_defs.h
 
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
 lint:
@@ -235,4 +263,5 @@ clean:
 	rm -f $(TARGET).32x $(TARGET).elf $(TARGET).lst
 	rm -f m68k_crt0.bin.o m68k_crt0.bin
 	rm -f sh_src/md_start.bin
+	rm -f sh_src/sprite_defs.h
 	rm -f sh_src/version.h sh_src/version.h.tmp

@@ -141,7 +141,7 @@ _start:
 		move.l	#VRAM_ADDR_CMD,(a1)		/* write VRAM address 0 */
 		lea		(VDP_DATA_PORT),a2		/* VDP data reg */
 		lea		font_data(pc),a0
-		move.w	#38*8-1,d2
+		move.w	#45*8-1,d2
 	7:
 		move.l	(a0)+,d0				/* font fg mask */
 		move.l	d0,d1
@@ -173,6 +173,16 @@ _start:
 		or.w	#0x8000,d0
 		move.w	d0,(0xA15100)		/* set FM - allow SH2 access to MARS hw */
 		move.l	#0,(MARS_COMM0)		/* let Primary SH2 run */
+
+		/* Pad port init (canonical, per d32xr crt0 + SGDK JOY_reset): TH as
+		 * an OUTPUT (CTRL bit6) idling HIGH on both ports. Was never done —
+		 * the six-button phase table assumes the first transition each frame
+		 * is a driven high->low edge; without CTRL setup TH is an input and
+		 * the probe writes may not reach the controller at all. */
+		move.b	#0x40,(IO_CTRL1)	/* 1P: TH output */
+		move.b	#0x40,(IO_CTRL2)	/* 2P: TH output */
+		move.b	#0x40,(IO_DATA1)	/* 1P: TH idle high */
+		move.b	#0x40,(IO_DATA2)	/* 2P: TH idle high */
 
 		;// TODO: Interrupts crash... why?
 
@@ -219,15 +229,34 @@ read_joypad:
 		lea		IO_DATA2,a0
 	1:
 		move.w	d2,-(sp)
+		/* Mask interrupts across the 4-phase probe: a VINT landing between
+		 * TH toggles desyncs the controller's six-button counter and returns
+		 * garbage on real hardware (emulators are more forgiving). */
+		move.w	sr,-(sp)
+		move.w	#0x2700,sr
 		bsr.s	get_input		/* - 0 s a 0 0 d u - 1 c b r l d u */
 		move.w	d2,d1
 		bsr.s	get_input		/* - 0 s a 0 0 d u - 1 c b r l d u */
 		bsr.s	get_input		/* - 0 s a 0 0 0 0 - 1 c b m x y z */
 		move.w	d2,d0
 		bsr.s	get_input		/* - 0 s a 1 1 1 1 - 1 c b r l d u */
-		andi.w	#0x0F00,d2		/* 0 0 0 0 1 1 1 1 0 0 0 0 0 0 0 0 */
-		bne.s	common			/* six button pad */
-		move.w	#0x010F,d0		/* three button pad */
+		move.w	(sp)+,sr		/* phases done; timing no longer critical */
+		/* SGDK-canon detection. The strict 1111 test is KNOWN-FRAGILE:
+		 * SGDK's own source documents six-button pads whose 4th phase reads
+		 * 0s ("should be read as 1 but in some case we read 0" — wireless
+		 * receivers especially), so requiring exact 1111 kills real pads.
+		 * The old any-bit test failed the other way (3-button d/u idle HIGH
+		 * faked six-button -> phantom M X Y Z from phase 3). Canon threads
+		 * it: six-button iff the 3rd TH-low phase shows the 0000 marker AND
+		 * the 4th TH-low r/l slots are not hard-zero (wired 0 on a 3-button
+		 * pad; up+down-both is the impossible combo this guards against). */
+		andi.w	#0x0C00,d2
+		beq.s	9f				/* r/l slots hard-0: three-button pad */
+		move.w	d0,d2
+		andi.w	#0x0F00,d2
+		beq.s	common			/* phase-3 0000 marker present: six-button */
+	9:
+		move.w	#0x010F,d0		/* three button pad: neutral M X Y Z */
 	common:
 		lsl.b	#4,d0			/* - 0 s a 0 0 0 0 m x y z 0 0 0 0 */
 		lsl.w	#4,d0			/* 0 0 0 0 m x y z 0 0 0 0 0 0 0 0 */
@@ -241,12 +270,29 @@ read_joypad:
 		rts
 
 get_input:
+		/* Settle time after each TH toggle: wired pads answer in ns, but
+		 * wireless receivers/adapters latch async and return STALE phases
+		 * when probed ~1us after the edge — they then fail the six-button
+		 * signature and demote to 3-button (extended buttons dead). ~8 nops
+		 * = ~4us per edge; whole 4-phase probe still well under 50us. */
 		move.b	#0x00,(a0)
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
 		nop
 		nop
 		move.b	(a0),d2
 		move.b	#0x40,(a0)
 		lsl.w	#8,d2
+		nop
+		nop
+		nop
+		nop
+		nop
+		nop
 		move.b	(a0),d2
 		rts
 

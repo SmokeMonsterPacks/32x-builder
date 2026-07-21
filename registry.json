@@ -1,63 +1,266 @@
 {
-  "version": 1,
-  "_comment": "Element catalog shared by the web editor (tools/map-editor) and the codegen (tools/gen_maps.py). Adding a new placeable element here teaches BOTH the editor and the build about it. The engine's own rendering of a new decal kind / wallpaper style is still hand-coded in raycast.c; this file is the editor+format+codegen boundary.",
-
-  "cells": {
-    "_doc": "grid glyph -> engine world_map cell value",
-    "glyphs": { ".": 0, "#": 1, "X": 2 },
-    "palette": [
-      { "value": 0, "id": "open",      "glyph": ".", "label": "Open floor", "color": "#1a1a14" },
-      { "value": 1, "id": "wall",      "glyph": "#", "label": "Wall",       "color": "#b8a85a" },
-      { "value": 2, "id": "blackexit", "glyph": "X", "label": "Black-exit void (walk-through doorway)", "color": "#000000" }
-    ]
+ "version": 1,
+ "_comment": "Element catalog shared by the web editor (tools/map-editor) and the codegen (tools/gen_maps.py). Adding a new placeable element here teaches BOTH the editor and the build about it. The engine's own rendering of a new decal kind / wallpaper style is still hand-coded in raycast.c; this file is the editor+format+codegen boundary.",
+ "cells": {
+  "_doc": "grid glyph -> engine world_map cell value",
+  "glyphs": {
+   ".": 0,
+   "#": 1,
+   "X": 2
   },
-
-  "facing": {
-    "_doc": "spawn cardinal -> engine angle (0..255). dir=(cos,sin) of angle*360/256; +Y is south. So 0=E(+X) 64=S(+Y) 128=W(-X) 192=N(-Y). Verified vs fixed_map spawn (192, opens north).",
-    "E": 0, "S": 64, "W": 128, "N": 192
+  "palette": [
+   {
+    "value": 0,
+    "id": "open",
+    "glyph": ".",
+    "label": "Open floor",
+    "color": "#1a1a14"
+   },
+   {
+    "value": 1,
+    "id": "wall",
+    "glyph": "#",
+    "label": "Wall",
+    "color": "#b8a85a"
+   },
+   {
+    "value": 2,
+    "id": "blackexit",
+    "glyph": "X",
+    "label": "Void exit (border opening — walk out into the expanse)",
+    "color": "#1a1a2e"
+   }
+  ]
+ },
+ "facing": {
+  "_doc": "spawn cardinal -> engine angle (0..255). dir=(cos,sin) of angle*360/256; +Y is south. So 0=E(+X) 64=S(+Y) 128=W(-X) 192=N(-Y). Verified vs fixed_map spawn (192, opens north).",
+  "E": 0,
+  "S": 64,
+  "W": 128,
+  "N": 192
+ },
+ "partition": {
+  "_doc": "free-standing wallpaper divider: a line segment with decor enums",
+  "style": {
+   "chevron": 0,
+   "spotted": 1
   },
-
-  "partition": {
-    "_doc": "free-standing wallpaper divider: a line segment with decor enums",
-    "style":  { "chevron": 0, "spotted": 1 },
-    "height": { "full": 0, "low": 192 },
-    "crawl":  { "no": 0, "yes": 1 }
+  "height": {
+   "full": 0,
+   "low": 192,
+   "half": 96
   },
-
   "crawl": {
-    "_doc": "low-ceiling run -> ceil_h_add_run(cx,cy,dx,dy,len). dir gives dx,dy.",
-    "dir": { "E": [1, 0], "N": [0, -1], "W": [-1, 0], "S": [0, 1] }
-  },
-
-  "decals": {
-    "_doc": "wall-mounted fixed elements. face -> axis (N/S walls run along X => axis 1; E/W walls run along Y => axis 0). z is plate-centre height [0..1]. ADD A NEW WALL ELEMENT BY ADDING AN ENTRY HERE (give it the next kind number).",
-    "face_axis": { "N": 1, "S": 1, "E": 0, "W": 0 },
-    "kinds": [
-      { "id": "outlet", "kind": 0, "z": 0.20, "glyph": "⊟", "color": "#d8c070", "label": "Electrical outlet" },
-      { "id": "door",   "kind": 1, "z": 0.49, "glyph": "▯", "color": "#8a5a3a", "label": "Exit door (swinging, EXIT sign)" },
-      { "id": "neanderthal", "kind": 2, "z": 0.45, "glyph": "🗿", "color": "#a87850", "label": "Neanderthal standup (free-standing billboard)", "standalone": true }
-    ]
-  },
-
-  "light": {
-    "_doc": "ceiling light fixture placed per-cell in the editor's Lights layer (the bright fluorescent panel + its 3x3 cell_light pool). The engine auto-derives lights today, so authored lights are editor/preview-only until per-map light support lands in the ROM.",
-    "glyph": "☀",
-    "color": "#fff7d0"
-  },
-
-  "roles": {
-    "_doc": "Map roles. 'protected' = canonical (lives in maps/core/, the editor clones on edit, CODEOWNERS-gated in PRs). 'picker' = appears in the in-game start-menu picker + pause MAPS tab. 'priority' orders custom_maps[] (lower first) so pickable maps sort before the lobby and the engine just bounds the picker on custom_pick_count. 'folder' is where the role lives.",
-    "starter":   { "priority": 0, "protected": true,  "picker": true,  "folder": "core" },
-    "play":      { "priority": 1, "protected": true,  "picker": true,  "folder": "core" },
-    "community": { "priority": 2, "protected": false, "picker": true,  "folder": "community" },
-    "lobby":     { "priority": 3, "protected": true,  "picker": false, "folder": "core" }
-  },
-
-  "limits": {
-    "_doc": "must match the engine caps; the codegen rejects maps that exceed these. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
-    "max_dim": 32,
-    "max_partitions": 32,
-    "max_decals": 16,
-    "max_crawl_runs": 8
+   "no": 0
   }
+ },
+ "crawl": {
+  "_doc": "low-ceiling run -> ceil_h_add_run(cx,cy,dx,dy,len). dir gives dx,dy.",
+  "dir": {
+   "E": [
+    1,
+    0
+   ],
+   "N": [
+    0,
+    -1
+   ],
+   "W": [
+    -1,
+    0
+   ],
+   "S": [
+    0,
+    1
+   ]
+  }
+ },
+ "decals": {
+  "_doc": "wall-mounted fixed elements. face -> axis (N/S walls run along X => axis 1; E/W walls run along Y => axis 0). z is plate-centre height [0..1]. ADD A NEW WALL ELEMENT BY ADDING AN ENTRY HERE (give it the next kind number).",
+  "face_axis": {
+   "N": 1,
+   "S": 1,
+   "E": 0,
+   "W": 0
+  },
+  "kinds": [
+   {
+    "id": "outlet",
+    "kind": 0,
+    "z": 0.2,
+    "glyph": "⊟",
+    "color": "#d8c070",
+    "label": "Electrical outlet"
+   },
+   {
+    "id": "door",
+    "kind": 1,
+    "z": 0.49,
+    "glyph": "▯",
+    "color": "#8a5a3a",
+    "label": "Exit door (swinging, EXIT sign)"
+   },
+   {
+    "id": "neanderthal",
+    "kind": 2,
+    "z": 0.45,
+    "glyph": "🗿",
+    "color": "#a87850",
+    "label": "Neanderthal standup (free-standing billboard)",
+    "standalone": true
+   },
+   {
+    "id": "chair",
+    "kind": 3,
+    "label": "Chair (live 3D, free-standing)",
+    "glyph": "🪑",
+    "color": "#8a5a3a",
+    "standalone": true,
+    "z": 0.19
+   }
+  ]
+ },
+ "assets": {
+  "_doc": "Render catalog for sprite/decal ASSETS — the single source of truth the codegen turns into the engine's data-driven sprite_defs[] table (tools/gen_assets.py -> sh_src/sprite_defs.h) AND that export_assets.py reads to build the editor preview. 'kind' matches decals.kinds. mount='wall' is painted flat into the wall column (outlet/door — fixed to a wall, can't float); mount='billboard' is a camera-facing free-standing standup (neanderthal, and future stop-sign/lightpost). 'decode' names the stored-value -> palette strategy shared by the bake tool + engine ('offset' = 0 transparent, v>0 -> base+v-1; 'door' = the multi-ramp dlut). 'sym' is the C array symbol in the _tex.h; WIDTH/HEIGHT macros are upper(sym)+_WIDTH/_HEIGHT. Adding a sprite here + its _tex.h teaches the build, the preview and the renderer about it with no C edits.",
+  "sprites": [
+   {
+    "id": "outlet",
+    "kind": 0,
+    "mount": "wall",
+    "tex": "outlet_tex.h",
+    "sym": "outlet_tex",
+    "base": "OUTLET_BASE",
+    "world_h": 0.098,
+    "world_hw": 0.031,
+    "z": 0.2,
+    "transparent": 0,
+    "decode": "offset",
+    "flags": []
+   },
+   {
+    "id": "door",
+    "kind": 1,
+    "mount": "wall",
+    "tex": "door_tex.h",
+    "sym": "door_tex",
+    "base": "DOOR_BASE",
+    "world_h": 0.98,
+    "world_hw": 0.24,
+    "z": 0.49,
+    "transparent": 0,
+    "decode": "door",
+    "flags": [
+     "animated",
+     "colmajor"
+    ]
+   },
+   {
+    "id": "neanderthal",
+    "kind": 2,
+    "mount": "billboard",
+    "tex": "neander_tex.h",
+    "sym": "neander_tex",
+    "base": "NEANDER_BASE",
+    "tex_hi": "neander_tex_hi.h",
+    "sym_hi": "neander_tex_hi",
+    "world_h": 1.0,
+    "world_hw": 0.5,
+    "z": 0.0,
+    "transparent": 0,
+    "decode": "offset",
+    "flags": [
+     "lod",
+     "standalone"
+    ]
+   },
+   {
+    "id": "chair",
+    "kind": 3,
+    "mount": "billboard",
+    "tex": "chair_tex.h",
+    "sym": "chair_tex",
+    "base": "DOOR_BASE",
+    "world_h": 0.375,
+    "world_hw": 0.16,
+    "z": 0.0,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "standalone"
+    ]
+   }
+  ]
+ },
+ "light": {
+  "_doc": "ceiling light fixture placed per-cell in the editor's Lights layer (the bright fluorescent panel + its 3x3 cell_light pool). The engine auto-derives lights today, so authored lights are editor/preview-only until per-map light support lands in the ROM.",
+  "glyph": "☀",
+  "color": "#fff7d0"
+ },
+ "roles": {
+  "_doc": "Map roles. 'protected' = canonical (lives in maps/core/, the editor clones on edit, CODEOWNERS-gated in PRs). 'picker' = appears in the in-game start-menu picker + pause MAPS tab. 'priority' orders custom_maps[] (lower first) so pickable maps sort before the lobby and the engine just bounds the picker on custom_pick_count. 'folder' is where the role lives.",
+  "starter": {
+   "priority": 0,
+   "protected": true,
+   "picker": true,
+   "folder": "core"
+  },
+  "play": {
+   "priority": 1,
+   "protected": true,
+   "picker": true,
+   "folder": "core"
+  },
+  "test": {
+   "priority": 2,
+   "protected": false,
+   "picker": true,
+   "folder": "community"
+  },
+  "community": {
+   "priority": 3,
+   "protected": false,
+   "picker": true,
+   "folder": "community"
+  },
+  "lobby": {
+   "priority": 4,
+   "protected": true,
+   "picker": false,
+   "folder": "core"
+  }
+ },
+ "limits": {
+  "_doc": "must match the engine caps; the codegen rejects maps that exceed these. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
+  "max_dim": 32,
+  "max_partitions": 64,
+  "max_decals": 32,
+  "max_crawl_runs": 8,
+  "max_lights": 512,
+  "max_dark_rooms": 64,
+  "max_partition_edges": 255,
+  "max_chairs": 21
+ },
+ "playability": {
+  "_doc": "MEASURED partition-edge -> fps bands (half-res, real hardware). Total edges is a PROXY: dense/aligned sightlines run slower than the total implies, so walk-test to be sure. The frame is vblank-locked, so 15fps needs roughly <=70 edges.",
+  "bands": [
+   {
+    "max": 70,
+    "label": "Smooth",
+    "fps": "~15 fps",
+    "color": "#3fa34d"
+   },
+   {
+    "max": 180,
+    "label": "Playable",
+    "fps": "~12 fps",
+    "color": "#c9a227"
+   },
+   {
+    "max": 99999,
+    "label": "Heavy",
+    "fps": "7-12 fps — walk-test it",
+    "color": "#c15c2c"
+   }
+  ]
+ }
 }

@@ -60,6 +60,10 @@ def main():
                     help="0-19 baked grime/wear level (matches door_grime_NN.png)")
     ap.add_argument("--stipple", type=int, default=0,
                     help="0-11 baked stipple/dither level (matches door_stipple_NN.png)")
+    ap.add_argument("--sign", default="",
+                    help="EXIT sign PNG stamped into the top band, replacing the "
+                         "GLB render's tiny embedded sign (green letters on a white "
+                         "plate). Cropped to the green-text bbox then fit to the band.")
     args = ap.parse_args()
     W, H = args.w, args.h
 
@@ -236,6 +240,75 @@ def main():
         setpx(hx + 3 + i, hy, H_HI)
         setpx(hx + 3 + i, hy + 1, H_DARK)        # under-shadow
     setpx(hx + 1, hy, H_HI)                      # highlight on the plate
+
+    # --- Stamp a real EXIT sign into the top band -------------------------
+    # The GLB render's embedded sign is ~18x7 texels — four letters at ~4px
+    # each, unreadable garble no matter how clean the source. Replace it: crop
+    # the supplied art to its green EXIT text, fit that to the full band width,
+    # and stamp green letters (6/7) on a white plate (8) with transparent
+    # surround (0). Stays inside the top SIGN_BAND rows so the leaf bbox
+    # (computed from rows below it) and the door animation are untouched.
+    if args.sign:
+        sign = Image.open(args.sign).convert("RGBA")
+        sp = sign.load()
+        SW, SH = sign.size
+        gx, gy = [], []
+        for yy in range(SH):
+            for xx in range(SW):
+                r, g, b, a = sp[xx, yy]
+                if a >= 128 and g > 95 and r < 60 and b < 110 and g > b + 20:
+                    gx.append(xx); gy.append(yy)
+        if gx:
+            pad = 3
+            cx0 = max(0, min(gx) - pad); cx1 = min(SW, max(gx) + pad + 1)
+            cy0 = max(0, min(gy) - pad); cy1 = min(SH, max(gy) + pad + 1)
+            sign = sign.crop((cx0, cy0, cx1, cy1))
+            # Target box: band width * 0.85 (15% smaller than full band), height
+            # by the text's own aspect. Leave a 1px grey border ring around the
+            # plate, so the box stays >=2px inside the band edges.
+            SIGN_SCALE = 0.765
+            dst_w = int(round((W - 8) * SIGN_SCALE))
+            asp = (cx1 - cx0) / max(1, (cy1 - cy0))
+            dst_h = min(SIGN_BAND - 4, int(round(dst_w / asp)))
+            dst_w = int(round(dst_h * asp))
+            if dst_w > W - 6:
+                dst_w = W - 6; dst_h = int(round(dst_w / asp))
+            sign = sign.resize((dst_w, dst_h), Image.LANCZOS)
+            sp = sign.load()
+            ox = (W - dst_w) // 2
+            oy = max(1, (SIGN_BAND - dst_h) // 2)
+            # Clear the band first (drop the render's embedded sign entirely).
+            for yy in range(0, SIGN_BAND):
+                for xx in range(W):
+                    rows[yy][xx] = 0
+            SIGN_BORDER_V = 1                        # 1px dark outline around plate
+            # NB: the door ramp is all warm brown now (no true grey entry), so
+            # this is the darkest brown, reading as a neutral dark sign trim.
+            for yy in range(dst_h):
+                for xx in range(dst_w):
+                    r, g, b, a = sp[xx, yy]
+                    if a < 128:
+                        continue
+                    # PRE-MIRROR: the door texture renders horizontally flipped
+                    # (handle authored texture-left -> screen-right), so stamp
+                    # the sign reversed to read forward on screen ("EXIT" not
+                    # "TIX3").
+                    tx = ox + (dst_w - 1 - xx)
+                    ty = oy + yy
+                    if g > 95 and r < 60 and b < 110 and g > b + 20:
+                        v = 6 if (r + g + b) < 220 else 7   # green letter
+                    else:
+                        v = 8                               # white plate / border
+                    rows[ty][tx] = v
+            # 1px grey ring hugging the plate's outer edge.
+            for xx in range(ox - 1, ox + dst_w + 1):
+                for yy in (oy - 1, oy + dst_h):
+                    if 0 <= xx < W and 0 <= yy < SIGN_BAND:
+                        rows[yy][xx] = SIGN_BORDER_V
+            for yy in range(oy - 1, oy + dst_h + 1):
+                for xx in (ox - 1, ox + dst_w):
+                    if 0 <= xx < W and 0 <= yy < SIGN_BAND:
+                        rows[yy][xx] = SIGN_BORDER_V
 
     with open(args.out, "w") as f:
         f.write("#ifndef DOOR_TEX_H_INCLUDED\n#define DOOR_TEX_H_INCLUDED\n")

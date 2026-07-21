@@ -131,6 +131,32 @@ typedef struct {
      * The secondary watches it to purge its stale cached cell_light lines once
      * per change, so cell_light can be read cached instead of uncached. */
     volatile uint8_t cell_light_gen;
+    /* Partition-campaign diagnostic (MODE+C cycles, HUD J): 0 = normal,
+     * 1 = run-extent LUT instead of the per-column run walk (candidate fix),
+     * 2 = slab gate OFF — partitions don't render at all; DIAGNOSTIC ONLY,
+     * prices the whole edge-partition machinery for the same pose. Read by
+     * both CPUs' wall pass (hoisted to a local at pass start). */
+    volatile uint8_t part_diag;
+    /* Floor shadows master switch (VISUALS menu row): 1 = skip every standup/
+     * chair floor shadow. Lives here so BOTH CPUs' sprite halves agree, and
+     * so shadow cost can be A/B'd same-binary per the perf discipline. */
+    volatile uint8_t shadows_off;
+    /* DEBUG A/B (MODE+A cycles): 0 = chair faces flat-filled (shipping),
+     * 1 = chair faces routed through the textured tex_tri path (sampling
+     * wall_tex as a throwaway) to measure textured-quad cost against the
+     * flat baseline. Read by both CPUs' draw_chair_3d; the flip changes only
+     * the fill method, not geometry, so the primary-half prof_pass_chair
+     * delta between arms is the true per-pixel texturing cost. */
+    volatile uint8_t chair_tex;
+
+    /* Sprite-pass column split, decoupled from the wall split_col. A large
+     * screen-filling standup (the world-quad neanderthal up close) can land
+     * almost entirely in ONE cpu's wall-half, leaving the other idle in the
+     * post-wall barrier while it draws ~30k textured pixels alone. The primary
+     * centers this on the dominant standup so both SH-2s draw half of it in
+     * parallel. Written by the primary before it raises CMD_TAIL; the secondary
+     * reads it for raycast_draw_sprites (the tail/slab pass still uses split_col). */
+    volatile uint16_t sprite_split;
 } shared_t;
 
 #define LIGHTING_FLICKER  0x01   /* per-panel random brightness rolls */

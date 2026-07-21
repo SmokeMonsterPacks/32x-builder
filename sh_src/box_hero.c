@@ -7,10 +7,16 @@
  * contiguous framebuffer pixel area). */
 static uint8_t hero_scratch[HERO_W * HERO_H];
 
-void box_hero_show(void) {
-    /* Hero's own 256-colour palette into CRAM. */
+/* Palette alone — lets screens that borrowed CRAM entries (the asset viewer
+ * paints the chair ramp over 53-56) hand them back without a full re-blit. */
+void box_hero_palette(void) {
     for (int i = 0; i < HERO_PAL_N; i++)
         Hw32xSetBGColor(i, hero_palette[i][0], hero_palette[i][1], hero_palette[i][2]);
+}
+
+void box_hero_show(void) {
+    /* Hero's own 256-colour palette into CRAM. */
+    box_hero_palette();
 
     /* RLE-decode once into scratch. */
     const uint8_t *p = hero_data, *end = hero_data + HERO_DATA_LEN;
