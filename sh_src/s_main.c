@@ -61,9 +61,18 @@ void s_main(void) {
              * with primary's [0, split_col), so no mid-frame sync. */
             int split = (int)SHARED_UC->split_col;
             uint16_t t0 = secondary_frt_read();
+            /* amb_pump() checkpoints between passes: a 64 ms audio buffer
+             * can drain past its half-way point inside ONE dense render
+             * chunk, so waiting for the idle loop risked replaying stale
+             * samples (the PWM chop). Between passes the pump's worst
+             * stall is a single pass (~10-30 ms). Costs nothing when no
+             * buffer is flagged; ~0.6 ms at most once per 64 ms when one is. */
             raycast_clear_half(split, SCREEN_W);
+            amb_pump();
             raycast_draw_ceiling_grid(split, SCREEN_W);
+            amb_pump();
             raycast_draw_carpet(split, SCREEN_W);
+            amb_pump();
             raycast_purge_cell_light();        /* fresh cell_light on map change */
             raycast_draw_walls(split, SCREEN_W);
             SHARED_UC->secondary_render_ticks = (uint16_t)(secondary_frt_read() - t0);
@@ -76,9 +85,11 @@ void s_main(void) {
              * from the primary's [0, split). Purge the crawlspace geometry first
              * so we don't draw stale caps from a previous level. */
             int split = (int)SHARED_UC->split_col;
+            amb_pump();   /* audio checkpoint — see CMD_HALF */
             raycast_purge_lowceil_cache();
             raycast_purge_sprite_cache();
             raycast_draw_tail(split, SCREEN_W);
+            amb_pump();
             /* Sprites AFTER the tail so the slab's z-stamp occludes them. Uses
              * the DECOUPLED sprite_split (set by the primary before it raised
              * CMD_TAIL) so a near screen-filling standup is shared, not dumped

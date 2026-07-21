@@ -282,7 +282,10 @@ quadrant folding via `swap.w` + sign flip.
 and `Mars_ClearCacheLines` in `sh_src/sh2_asm.h`.
 
 **7. SH-2 DMA + completion-interrupt audio mixer.** ✅ done.
-`sh_src/sound.c` mixes a ping-pong `amb_pwm_buf[2][256]` on the secondary;
+`sh_src/sound.c` mixes a ping-pong `amb_pwm_buf[2][1024]` on the secondary
+(64 ms per buffer + amb_pump checkpoints between the secondary's render
+passes — so render chunks can't starve the ping-pong; underruns counted
+on the HUD as AU:, old 16 ms arm kept as a menu A/B);
 DMA1 streams the active buffer to `MARS_PWM_MONO`; `amb_dma_handler`
 swaps + re-arms. Mixes buzz + neon + positional hello + footsteps.
 

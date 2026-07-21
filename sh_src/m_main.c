@@ -345,7 +345,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * 1 textured. Face a rendered chair and toggle: watch H jump. */
     {
         extern volatile uint16_t prof_pass_chair;
-        char t5[24];
+        char t5[32];
         int pos = 0;
         t5[pos++] = 'H';
         t5[pos++] = ':';
@@ -364,6 +364,18 @@ static void prof_sample_and_draw(uint8_t *fb) {
         t5[pos++] = ' ';
         t5[pos++] = 'P'; t5[pos++] = '6'; t5[pos++] = ':';
         t5[pos++] = (char)('0' + ((MARS_SYS_COMM8 >> 12) & 1));
+        /* AU: audio underruns — DMA swaps into a buffer the pump never
+         * refilled (each one = an audible stale-fragment replay). Frozen
+         * = healthy; climbing = the ping-pong is starving. Pair with the
+         * AUDIO tab's BUFFER A/B row: 16MS should climb in dense scenes,
+         * 64MS should hold. */
+        t5[pos++] = ' ';
+        t5[pos++] = 'A'; t5[pos++] = 'U'; t5[pos++] = ':';
+        {
+            uint16_t u = amb_get_underruns();
+            for (int d = 4; d >= 0; d--) { t5[pos + d] = '0' + (u % 10); u /= 10; }
+            pos += 5;
+        }
         t5[pos] = 0;
         HwMdPuts(t5, HUD_TILE_COLOR, 0, 23);   /* H + TX, GENESIS layer */
     }

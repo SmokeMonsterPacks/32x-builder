@@ -5,6 +5,7 @@
 #include "shared.h"
 #include "version.h"
 #include "custom_maps.h"
+#include "sound.h"
 
 /* Owned by m_main.c — the metrics-overlay gate. Exposed so the LIGHTING tab can
  * toggle it: the MODE-button shortcut is 6-button-only, so this is the way to
@@ -37,9 +38,9 @@ extern volatile int g_warp_request;
 #define TAB_MAPS     4
 #define NUM_TABS     5
 
-#define AUDIO_CONTENT_ROWS    2   /* AMBIENCE, FOOTSTEPS */
+#define AUDIO_CONTENT_ROWS    3   /* AMBIENCE, FOOTSTEPS, BUFFER */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
-#define VISUALS_CONTENT_ROWS  4   /* WALLS, VERT, METRICS, SHADOWS */
+#define VISUALS_CONTENT_ROWS  3   /* WALLS, METRICS, SHADOWS */
 #define CREDITS_CONTENT_ROWS  0   /* BUILD/DATE/SHA are read-only display */
 
 static int      menu_active = 0;
@@ -154,6 +155,13 @@ void menu_update(uint16_t pad) {
     }
 
     if (menu_tab == TAB_AUDIO) {
+        if (menu_row == 3) {
+            /* BUFFER: underrun-fix A/B — 64MS fixed vs 16MS chop-prone
+             * arm. Either direction flips; pair with the HUD's AU:
+             * counter to hear/see the difference. */
+            amb_toggle_buf_len();
+            return;
+        }
         volatile uint8_t *target =
             (menu_row == 1) ? &SHARED_UC->amb_volume
                             : &SHARED_UC->step_volume;
@@ -172,17 +180,16 @@ void menu_update(uint16_t pad) {
         }
         SHARED_UC->lighting_flags ^= bit;
     } else if (menu_tab == TAB_VISUALS) {
-        /* WALLS res mode cycles FULL/HALF/AUTO (LEFT/RIGHT step the cycle);
-         * VERT (vertical half-res) and METRICS overlay are flips. */
+        /* WALLS res mode cycles FULL/HALF/AUTO/SERL (LEFT/RIGHT step the cycle);
+         * AUTO drives vertical half-res itself now, so no manual VERT row. */
         if (menu_row == 1) {
             int m = (int)SHARED_UC->wall_res_mode + dir;
             SHARED_UC->wall_res_mode = (uint8_t)((m + 4) % 4);
-        } else if (menu_row == 2) SHARED_UC->vres_half ^= 1;
-        else if (menu_row == 3) {
+        } else if (menu_row == 2) {
             g_metrics_on ^= 1;
             if (!g_metrics_on) hud_genesis_blank();   /* wipe, don't just stop drawing */
         }
-        else if (menu_row == 4) SHARED_UC->shadows_off ^= 1;  /* A/B the shadow cost */
+        else if (menu_row == 3) SHARED_UC->shadows_off ^= 1;  /* A/B the shadow cost */
     }
 }
 
@@ -293,7 +300,8 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 32, menu_row == 1, "AMBIENCE",  num);
         fmt_pct(SHARED_UC->step_volume, num);
         draw_row(fb, 40, menu_row == 2, "FOOTSTEPS", num);
-        draw_row(fb, 48, 0, "", "");                 /* 3rd row unused: keep it clear */
+        draw_row(fb, 48, menu_row == 3, "BUFFER",
+                 amb_buf_len_is_big() ? " 64MS" : " 16MS");
     } else if (menu_tab == TAB_LIGHTING) {
         uint8_t f = SHARED_UC->lighting_flags;
         draw_row(fb, 32, menu_row == 1, "FLICKER",
@@ -306,11 +314,9 @@ void menu_render(uint8_t *fb) {
         static const char *res_lbl[4] = { "FULL", "HALF", "AUTO", "SERL" };
         uint8_t m = SHARED_UC->wall_res_mode; if (m > 3) m = 1;
         draw_row(fb, 32, menu_row == 1, "WALLS", res_lbl[m]);
-        draw_row(fb, 40, menu_row == 2, "VERT",
-                 SHARED_UC->vres_half ? "HALF" : "FULL");
-        draw_row(fb, 48, menu_row == 3, "METRICS",
+        draw_row(fb, 40, menu_row == 2, "METRICS",
                  g_metrics_on ? " ON" : "OFF");
-        draw_row(fb, 56, menu_row == 4, "SHADOWS",
+        draw_row(fb, 48, menu_row == 3, "SHADOWS",
                  SHARED_UC->shadows_off ? "OFF" : " ON");
     } else if (menu_tab == TAB_CREDITS) {
         /* CREDITS — read-only build stamp (no selection cursor). */

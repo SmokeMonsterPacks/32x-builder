@@ -1007,6 +1007,76 @@ fractional-step playback for hello and footsteps).
 
 ---
 
+## 2026-07 — BUG: The PWM buzz stutter was a scheduling bug, not a mixer bug
+
+**Context.** The ambient fluorescent buzz + Voyager hellos + footsteps
+played, but under load the audio broke into a rhythmic chop — a short
+fragment repeating like a scratched record, worst in the dense
+chair-filled scenes where the frame rate sags to 7-10 fps. The instinct
+is to suspect the mixer (clipping? a bad sample-rate constant?). The
+mixer was fine. The bug was *when* the mixer runs, not *what* it does.
+
+**Outcome.** DMA1 streams a ping-pong pair of SDRAM buffers to the PWM
+register; the secondary SH-2 refills the drained buffer. The refill
+(`amb_pump`) was only called from the secondary's **idle** COMM4-poll
+loop. During a render command (`CMD_HALF`, `CMD_TAIL`) the secondary is
+busy drawing walls/ceiling for tens of milliseconds and never returns to
+idle, so nothing pumps. The arithmetic told the whole story:
+
+- Buffers were 2 × 256 samples @ 16 kHz = **16 ms each, 32 ms total runway**.
+- A dense render chunk keeps the secondary busy **30-60 ms** straight.
+- 32 < 60, so the DMA reaches the end of fresh audio mid-render, wraps,
+  and replays the previous 16 ms buffer. That replayed fragment *is* the
+  chop. It was never distortion; it was a tiny broken record.
+
+The fix is two halves, both aimed at "make the runway longer than the
+starvation window, and shrink the window":
+
+1. **Bigger buffers.** 2 × 1024 samples = 64 ms each. 2 × 2048 (128 ms)
+   was the first attempt and it *built and linked with zero warnings* —
+   but `nm -n | grep _end` showed `.bss` had crossed the primary stack
+   top at `0x0603F000`. The linker script's RAM window runs 3 KB past
+   where the stacks actually live (`mars.ld` LENGTH ends at `0x0603FC00`),
+   so the overflow was silent and would have corrupted the stack under a
+   deep call chain in some scene weeks later. Backed off to 1024.
+2. **Pump between passes.** `amb_pump()` is now called as a checkpoint
+   between the secondary's render passes (`s_main.c`), not only at idle.
+   The longest the audio can go un-pumped is now one pass (~10-30 ms),
+   not a whole render chunk. The call is free when no buffer is flagged.
+
+Made it falsifiable: `amb_dma_handler` counts every swap into a buffer
+that was never refilled (a guaranteed stale replay) and the metrics HUD
+shows it as `AU:`. Frozen at zero = healthy; climbing = starving. A menu
+A/B (`BUFFER: 64MS / 16MS`) resurrects the old size on demand so the
+counter can be watched to agree with the ear.
+
+**Insight.** When streaming audio stutters on a cooperatively-scheduled
+CPU, price the runway against the longest stretch between refills before
+touching the mixer. Double-buffering only works if a buffer outlasts the
+worst task that delays the producer — here the producer was starved by
+the very render loop it shares a core with, and the fix was scheduling
+(more slack + more checkpoints), not signal processing. And on a target
+with no MMU, verify the *symbol table* against the real stack address
+after growing `.bss`; a clean link is not proof it fits.
+
+**Files.** `sh_src/sound.c` (buffer sizing, `amb_dma_handler` underrun
+count, per-fill shared-state snapshot); `sh_src/s_main.c` (pump
+checkpoints between render passes); `sh_src/menu.c` (`BUFFER` A/B row);
+`sh_src/m_main.c` (`AU:` HUD readout).
+
+**Excerpt.**
+
+```c
+/* amb_dma_handler: swapping into a buffer whose refill bit is still set
+ * means the pump never ran between swaps — DMA is about to replay stale
+ * samples. That is the chop, made countable. */
+amb_current_buf_idx ^= 1;
+if (AMB_ACTIVE && (amb_buf_needs_fill & (1 << amb_current_buf_idx)))
+    AMB_UNDERRUNS++;
+```
+
+---
+
 ## Template for new entries
 
 ```

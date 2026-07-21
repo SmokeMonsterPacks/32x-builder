@@ -37,26 +37,70 @@
 #define SOFT_HIGH 1290   /* SAMPLE_CENTER + 571 (~80% of 711 budget) */
 #define SOFT_LOW   148   /* SAMPLE_CENTER - 571 */
 
-/* Step A of the secondary-fills-buffer refactor — allocate ping-pong
- * SDRAM buffers that the secondary will write into (with optional gain /
- * eventual synth math) while DMA1 drains the other one. DMA reads
- * from cached SDRAM here; SH-2 cache is write-through, so the secondary's
- * stores reach memory before the DMA accesses them.
+/* Ping-pong SDRAM buffers the secondary mixes into while DMA1 drains
+ * the other one. DMA reads from cached SDRAM here; SH-2 cache is
+ * write-through, so the secondary's stores reach memory before the DMA
+ * accesses them.
  *
- * 256 samples per buffer at 11025 Hz = ~23 ms per drain — gives the
- * secondary 23 ms of headroom between buffer swaps to fill the next one,
- * vs. the actual fill cost of ~150 μs. Plenty of slack even when the
- * secondary is doing ceiling+carpet+walls work in foreground.
+ * SIZED FOR RENDER STARVATION. amb_pump() historically ran only in the
+ * secondary's idle COMM4 loop — during a CMD_HALF/CMD_TAIL render
+ * chunk nothing pumped for tens of ms. The original 2×256 @16kHz gave
+ * 16 ms per buffer / 32 ms total runway, LESS than one render chunk in
+ * a dense scene, so DMA looped back into a stale buffer mid-chunk and
+ * replayed 16 ms fragments — the audible PWM chop. The fix is two
+ * halves: 1024 samples = 64 ms per buffer here, and pump checkpoints
+ * BETWEEN the secondary's render passes (s_main.c) so the longest
+ * pump-starved stretch is one pass (~10-30 ms), not a whole chunk.
+ * Cost: 4 KB SDRAM, fill ~0.6 ms per 64 ms.
  *
- * Wired up in Step B (amb_dma_handler swap) and Step C (amb_pump
- * fill loop). For now they're just allocated and initialized to
- * silence so the initial frames after boot don't pop. */
-#define AMB_SAMPLES_PER_BUF 256
+ * 2048 (128 ms) would be nicer margin but does NOT fit: .bss ends
+ * ~7 KB below the primary stack top (0x0603F000, mars_start.s), and
+ * 2×2048×2B pushed _end past it — silently, since mars.ld's ram
+ * LENGTH runs to 0x0603FC00. Check `nm -n | grep _end` against
+ * 0x0603F000 before growing ANYTHING in .bss. */
+#define AMB_SAMPLES_PER_BUF 1024   /* 64 ms per buffer @ 16 kHz */
+#define AMB_SAMPLES_OLD      256   /* pre-fix size, kept as the A/B arm */
 
 static uint16_t amb_pwm_buf[2][AMB_SAMPLES_PER_BUF]
                             __attribute__((aligned(16)));
 static volatile uint8_t amb_current_buf_idx;
 static volatile uint8_t amb_buf_needs_fill;   /* bit i = buf i needs fill */
+
+/* Title-screen gate. The ambient pump stays fully idle (skipping its
+ * fill work) until the game world loads — so the title burns no
+ * secondary cycles on audio, and the PWM is free for dedicated title SFX.
+ * Primary flips it on via amb_set_active(); the secondary reads it through
+ * the cache-through alias for coherency. */
+static uint8_t amb_active_storage = 0;
+#define AMB_ACTIVE (*(volatile uint8_t *)((uintptr_t)&amb_active_storage | 0x20000000))
+
+void amb_set_active(int on) { AMB_ACTIVE = (uint8_t)(on ? 1 : 0); }
+
+/* Runtime buffer length — the underrun fix's same-binary A/B knob
+ * (AUDIO menu tab, BUFFER row: 64MS vs 16MS). The primary toggles it;
+ * the secondary's IRQ handler and pump read it. Cache-through alias
+ * for coherency, same pattern as AMB_ACTIVE below. Flipping mid-stream
+ * causes one transient glitch (a partially-stale buffer plays once) —
+ * fine for a diagnostic knob. */
+static uint16_t amb_buf_len_storage = AMB_SAMPLES_PER_BUF;
+#define AMB_BUF_LEN \
+    (*(volatile uint16_t *)((uintptr_t)&amb_buf_len_storage | 0x20000000))
+
+/* Underrun counter — incremented by amb_dma_handler when it swaps into
+ * a buffer the pump never got to refill (i.e. DMA is about to replay
+ * stale samples: the audible chop, made countable). Primary reads it
+ * for the metrics HUD (AU:). Only counted while AMB_ACTIVE — at the
+ * title the pump idles by design and every swap would false-positive. */
+static uint16_t amb_underruns_storage = 0;
+#define AMB_UNDERRUNS \
+    (*(volatile uint16_t *)((uintptr_t)&amb_underruns_storage | 0x20000000))
+
+void     amb_toggle_buf_len(void) {
+    AMB_BUF_LEN = (AMB_BUF_LEN == AMB_SAMPLES_PER_BUF)
+                      ? AMB_SAMPLES_OLD : AMB_SAMPLES_PER_BUF;
+}
+int      amb_buf_len_is_big(void) { return AMB_BUF_LEN == AMB_SAMPLES_PER_BUF; }
+uint16_t amb_get_underruns(void)  { return AMB_UNDERRUNS; }
 
 /* Mars_InitPWM — lifted verbatim from d32xr's marshw.c. Three writes
  * to the MONO register flush the FIFO; PWM_CYCLE sets the period
@@ -98,11 +142,9 @@ static void Mars_InitPWM(int sample_rate, int min_sample, int max_sample) {
     }
 }
 
-/* Step B: handler swaps to the OTHER ping-pong buffer and marks the
- * just-drained one as needing refill. The pump (step C) reads that
- * flag in the secondary's idle loop and refills. While the pump isn't
- * wired in yet, audio is silence after the first buffer pass — the
- * structural plumbing has to land first. */
+/* DMA-complete handler: swaps to the OTHER ping-pong buffer and marks
+ * the just-drained one as needing refill. The pump reads that flag in
+ * the secondary's idle loop and refills. */
 void amb_dma_handler(void) {
     /* The buffer we WERE draining is now empty — flag for refill. */
     amb_buf_needs_fill |= (uint8_t)(1 << amb_current_buf_idx);
@@ -110,9 +152,17 @@ void amb_dma_handler(void) {
     /* Swap to the other buffer. */
     amb_current_buf_idx ^= 1;
 
+    /* UNDERRUN: the buffer we're about to drain still has its
+     * needs-fill bit set — the pump never got scheduled between swaps,
+     * so DMA will replay stale samples. This is the chop, counted.
+     * Gated on AMB_ACTIVE: at the title the pump idles by design and
+     * both buffers hold silence, so a swap there proves nothing. */
+    if (AMB_ACTIVE && (amb_buf_needs_fill & (uint8_t)(1 << amb_current_buf_idx)))
+        AMB_UNDERRUNS++;
+
     /* Point DMA at the new current buffer. */
     SH2_DMA_SAR1  = (uint32_t)(uintptr_t)amb_pwm_buf[amb_current_buf_idx];
-    SH2_DMA_TCR1  = AMB_SAMPLES_PER_BUF;
+    SH2_DMA_TCR1  = AMB_BUF_LEN;
     SH2_DMA_CHCR1 = 0x14E5;
 }
 
@@ -154,9 +204,9 @@ static int      neon_active = 0;
  * but its mix amplitude is scaled by distance from the neanderthal
  * sprite. Out beyond HELLO_FADE_RADIUS_SQ cells, contributes zero.
  *
- * Stored as int8_t at AMB_HELLO_SAMPLE_RATE (4000 Hz) — 82% smaller
- * than 16-bit at 11025 Hz, with a "lo-fi radio" character that fits
- * the Backrooms aesthetic. Played back at the buzz's 11025 Hz rate,
+ * Stored as int8_t at AMB_HELLO_SAMPLE_RATE (6000 Hz) — far smaller
+ * than 16-bit at the output rate, with a "lo-fi radio" character that
+ * fits the Backrooms aesthetic. Played back at the 16 kHz output rate,
  * so hello_pos is a 16.16 fixed-point index that advances by
  * HELLO_STEP_FX per output sample. */
 static uint32_t hello_pos_fx = 0;
@@ -185,25 +235,23 @@ static int buzz_env_amp   = 256;
 static int buzz_env_phase = 0;
 static int buzz_env_timer = 0;
 
-/* Title-screen gate. The ambient pump stays fully idle (skipping its
- * ~150us fill work) until the game world loads — so the title burns no
- * secondary cycles on audio, and the PWM is free for dedicated title SFX.
- * Primary flips it on via amb_set_active(); the secondary reads it through
- * the cache-through alias for coherency. */
-static uint8_t amb_active_storage = 0;
-#define AMB_ACTIVE (*(volatile uint8_t *)((uintptr_t)&amb_active_storage | 0x20000000))
-
-void amb_set_active(int on) { AMB_ACTIVE = (uint8_t)(on ? 1 : 0); }
-
 void amb_pump(void) {
     if (!AMB_ACTIVE) return;        /* title: silent, zero fill cost */
     uint8_t needs = amb_buf_needs_fill;
     if (needs == 0) return;
 
     int buf_idx = (needs & 1) ? 0 : 1;
-    /* Snapshot the volume once per buffer to avoid the primary's
-     * mid-fill writes producing a discontinuity within a buffer. */
-    int vol = (int)SHARED_UC->amb_volume;
+    /* Snapshot shared state once per buffer: (a) the primary's mid-fill
+     * writes can't produce a discontinuity within a buffer, and (b) the
+     * per-sample loop stays free of ~12-cycle uncached SDRAM reads —
+     * at 1024 samples per fill those reads were about to become the
+     * fill's dominant cost. Walking latency doesn't suffer: the buffer
+     * plays 64-128 ms after it's mixed regardless, so per-sample
+     * re-reads of is_walking bought nothing. */
+    int vol      = (int)SHARED_UC->amb_volume;
+    int walking  = (int)SHARED_UC->is_walking;
+    int step_vol = (int)SHARED_UC->step_volume;
+    int len      = (int)AMB_BUF_LEN;
 
     /* Neon sting trigger — rare, 1/512 ≈ avg 12 s. */
     if (!neon_active && (prng_next() & 0x1FF) == 0) {
@@ -256,7 +304,7 @@ void amb_pump(void) {
     }
 
     static uint32_t buzz_pos = 0;
-    for (int i = 0; i < AMB_SAMPLES_PER_BUF; i++) {
+    for (int i = 0; i < len; i++) {
         /* Buzz with envelope. >>9 (was >>8) halves the contribution so
          * the source's fade-in/out events sit underneath neon rather
          * than overpowering it. Buzz is the atmospheric bed, not the
@@ -293,10 +341,9 @@ void amb_pump(void) {
          * >>9 (was >>8) halves its contribution so it shares the
          * budget evenly with buzz/neon/hello. Source baked 11kHz/16-bit. */
         int step_delta = 0;
-        if (SHARED_UC->is_walking) {
+        if (walking) {
             uint32_t step_idx = step_pos_fx >> 16;
             int step = (int)amb_step_samples[step_idx] - SAMPLE_CENTER;
-            int step_vol = (int)SHARED_UC->step_volume;
             step_delta = (step * step_vol) >> 9;
             step_pos_fx += STEP_STEP_FX;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
@@ -320,7 +367,12 @@ void amb_pump(void) {
         if (buzz_pos >= AMB_BUZZ_SAMPLE_COUNT) buzz_pos = 0;
     }
 
-    amb_buf_needs_fill = (uint8_t)(needs & ~(1 << buf_idx));
+    /* Clear only OUR bit, against a FRESH read — not the `needs` value
+     * snapshotted before the fill. The DMA IRQ can set the other
+     * buffer's bit during the ~0.6 ms fill; storing the stale snapshot
+     * would erase that request for a whole swap cycle. Re-reading here
+     * shrinks the race window from the full fill to a few instructions. */
+    amb_buf_needs_fill = (uint8_t)(amb_buf_needs_fill & ~(1 << buf_idx));
 }
 
 void amb_sound_init(void) {
@@ -332,11 +384,15 @@ void amb_sound_init(void) {
     SHARED_UC->step_volume = 140;   /* 25% above the 11kHz/16-bit re-bake baseline */
     AMB_ACTIVE = 0;                 /* gated silent until the game starts */
 
-    /* Step A: initialize the ping-pong state and prefill both buffers
-     * with silence (DC center). Steps B+C swap to using these instead
-     * of streaming straight from ROM. */
+    /* Initialize the ping-pong state and prefill both buffers FULLY
+     * with silence (DC center) — the whole array, not just AMB_BUF_LEN,
+     * so an A/B toggle to the long buffer never drains uninitialized
+     * SDRAM. Runtime knobs re-initialized here (like the volumes above)
+     * for the same crt0 .data-copy robustness. */
     amb_current_buf_idx = 0;
     amb_buf_needs_fill  = 0;
+    AMB_BUF_LEN   = AMB_SAMPLES_PER_BUF;
+    AMB_UNDERRUNS = 0;
     for (int b = 0; b < 2; b++)
         for (int i = 0; i < AMB_SAMPLES_PER_BUF; i++)
             amb_pwm_buf[b][i] = SAMPLE_CENTER;
@@ -362,10 +418,11 @@ void amb_sound_init(void) {
     SH2_DMA_VCR1 = 66;
 
     /* Fire the first transfer. Both ping-pong buffers start at silence
-     * (DC center), so the first ~46 ms is silent until the pump (step
-     * C) gets going. After that, completions are handled by the IRQ
-     * → amb_dma_handler swap chain. */
+     * (DC center), so the first ~128 ms is silent until the pump gets
+     * going — inaudible at boot; the game gates audio on amb_set_active
+     * anyway. After that, completions are handled by the IRQ →
+     * amb_dma_handler swap chain. */
     SH2_DMA_SAR1  = (uint32_t)(uintptr_t)amb_pwm_buf[0];
-    SH2_DMA_TCR1  = AMB_SAMPLES_PER_BUF;
+    SH2_DMA_TCR1  = AMB_BUF_LEN;
     SH2_DMA_CHCR1 = 0x14E5;
 }
