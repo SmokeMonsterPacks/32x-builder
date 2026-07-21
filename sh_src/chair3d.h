@@ -24,7 +24,14 @@ typedef struct { int16_t x0, y0, z0, x1, y1, z1; } cbox_t;
  * slivers painted through the seat top, rail notches through the posts).
  * Hence: posts split at the seat-top plane (0.48), rails butted against the
  * posts' inner faces (|x| <= 0.20), seat flush behind at z=0.20. With disjoint
- * boxes a strict painting order exists and painter is exact. */
+ * boxes a strict painting order exists and painter is exact.
+ *
+ * DELIBERATE DETAIL: the two back slats are RECESSED in depth. Their front
+ * face sits at z=0.23, a 0.03 step behind the posts' front face (z=0.20),
+ * so the posts stand proud and the notch reads as an intentional recessed-
+ * panel joint instead of a rendering seam. The slat FACES (x width, y height)
+ * are unchanged — only their depth is pulled back. They stay wholly within
+ * the posts' z-span [0.20, 0.26], so the disjoint painter sort is preserved. */
 static const cbox_t chair_boxes[CHAIR_NBOXES] = {
     { CM(-0.26), CM(0.42), CM(-0.26), CM( 0.26), CM(0.48), CM( 0.20) },  /* seat */
     { CM(-0.26), CM(0.00), CM(-0.26), CM(-0.20), CM(0.42), CM(-0.20) },  /* front-L */
@@ -33,8 +40,8 @@ static const cbox_t chair_boxes[CHAIR_NBOXES] = {
     { CM( 0.20), CM(0.00), CM( 0.20), CM( 0.26), CM(0.48), CM( 0.26) },  /* post BR low */
     { CM(-0.26), CM(0.48), CM( 0.20), CM(-0.20), CM(1.00), CM( 0.26) },  /* post BL up */
     { CM( 0.20), CM(0.48), CM( 0.20), CM( 0.26), CM(1.00), CM( 0.26) },  /* post BR up */
-    { CM(-0.20), CM(0.90), CM( 0.21), CM( 0.20), CM(1.00), CM( 0.25) },  /* top rail */
-    { CM(-0.20), CM(0.68), CM( 0.215),CM( 0.20), CM(0.76), CM( 0.245) }, /* mid slat */
+    { CM(-0.20), CM(0.90), CM( 0.23), CM( 0.20), CM(1.00), CM( 0.245) }, /* top rail — recessed, thin */
+    { CM(-0.20), CM(0.68), CM( 0.23), CM( 0.20), CM(0.76), CM( 0.245) }, /* mid slat — recessed, thin */
 };
 #undef CM
 

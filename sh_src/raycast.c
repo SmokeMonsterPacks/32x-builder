@@ -1913,6 +1913,7 @@ static int position_clear(fx_t px, fx_t py) {
  * — the single biggest immersion bump per line of code. */
 static uint8_t bob_phase   = 0;
 static uint8_t is_walking  = 0;
+static uint8_t is_running  = 0;   /* moving AND holding A (sprint) — speeds footstep cadence */
 /* Eased manual pitch (signed pixels). C button drives it toward +40
  * (look down) when held, eases back to 0 on release. Walking pitch bob
  * (±1 from SIN_FX(bob_phase)) is added on top each frame. */
@@ -2133,6 +2134,9 @@ void player_update(uint16_t pad) {
 
     /* Track walking state and advance bob phase. */
     is_walking = (dx != 0 || dy != 0);
+    /* Running = actually moving while sprinting (A held). The pump reads this
+     * to play the carpet footsteps at a faster cadence to match the stride. */
+    is_running = (is_walking && sprinting) ? 1 : 0;
     if (is_walking) bob_phase += 20;         /* ~4.7 Hz — tight micro-bob cadence */
 
     /* INTERACT: the run button (A) doubles as "use" when you're within reach of
@@ -6459,6 +6463,7 @@ void raycast_render(void) {
     SHARED_UC->player.y     = player.y;
     SHARED_UC->player.angle = player.angle;
     SHARED_UC->is_walking   = is_walking;   /* gates carpet footsteps in pump */
+    SHARED_UC->is_running   = is_running;   /* pump plays them faster when sprinting */
 
     /* Camera pitch — eased manual hold-C tilt (pitch_smooth_y) plus
      * the ±1 walking pitch bob from bob_phase. The bob couples to the

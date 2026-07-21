@@ -213,6 +213,32 @@ static uint32_t hello_pos_fx = 0;
 #define HELLO_STEP_FX \
     ((uint32_t)(((uint64_t)AMB_HELLO_SAMPLE_RATE << 16) / AMB_BUZZ_SAMPLE_RATE))
 
+/* Voyager-hello playback-speed trim. On real hardware the hellos drag
+ * slightly slower than in Ares while the buzz bed sounds right, so this
+ * scales ONLY the hello's fractional read step: the voice speeds up and
+ * rises in pitch, buzz/neon/footsteps are untouched. Baseline
+ * HELLO_STEP_FX = 100%. Primary adjusts it from the AUDIO menu (VOICE
+ * row); the secondary snapshots it once per buffer fill. Once the value
+ * that matches Ares on hardware is found, bake it as the default step
+ * and drop the knob. Cache-through alias so the two CPUs stay coherent. */
+static uint32_t hello_step_storage = HELLO_STEP_FX;
+#define HELLO_STEP (*(volatile uint32_t *)((uintptr_t)&hello_step_storage | 0x20000000))
+#define HELLO_STEP_PCT_STEP ((HELLO_STEP_FX + 50) / 100)   /* ~1% per menu press */
+#define HELLO_STEP_MIN      ((HELLO_STEP_FX * 90)  / 100)  /* 90%  floor */
+#define HELLO_STEP_MAX      ((HELLO_STEP_FX * 150) / 100)  /* 150% ceiling */
+
+/* Menu hooks (called on the PRIMARY). dir = -1/+1 steps the voice speed
+ * by ~1%; the pct query drives the "VOICE 1xx%" readout. */
+void amb_voice_speed_adjust(int dir) {
+    int32_t s = (int32_t)HELLO_STEP + dir * (int32_t)HELLO_STEP_PCT_STEP;
+    if (s < (int32_t)HELLO_STEP_MIN) s = HELLO_STEP_MIN;
+    if (s > (int32_t)HELLO_STEP_MAX) s = HELLO_STEP_MAX;
+    HELLO_STEP = (uint32_t)s;
+}
+int amb_voice_speed_pct(void) {
+    return (int)((HELLO_STEP * 100 + (HELLO_STEP_FX / 2)) / HELLO_STEP_FX);
+}
+
 /* Carpet footstep — 3 s of continuous walking sounds, plays/loops only
  * while SHARED_UC->is_walking is set. Same 8-bit s8 / fractional-rate
  * scheme as the hello. When walking stops, step_pos_fx freezes so the
@@ -248,10 +274,16 @@ void amb_pump(void) {
      * fill's dominant cost. Walking latency doesn't suffer: the buffer
      * plays 64-128 ms after it's mixed regardless, so per-sample
      * re-reads of is_walking bought nothing. */
-    int vol      = (int)SHARED_UC->amb_volume;
-    int walking  = (int)SHARED_UC->is_walking;
-    int step_vol = (int)SHARED_UC->step_volume;
-    int len      = (int)AMB_BUF_LEN;
+    int vol       = (int)SHARED_UC->amb_volume;
+    int walking   = (int)SHARED_UC->is_walking;
+    int step_vol  = (int)SHARED_UC->step_volume;
+    int len       = (int)AMB_BUF_LEN;
+    uint32_t hstep = HELLO_STEP;   /* voice-speed trim, snapshot per fill */
+    /* Footstep cadence: 1.5x the read step when sprinting so the carpet
+     * steps quicken to match the run (STEP_STEP_FX + half). Snapshot once
+     * per fill — the state only needs to be fresh per buffer, not per sample. */
+    uint32_t step_adv = ((int)SHARED_UC->is_running)
+                        ? (STEP_STEP_FX + (STEP_STEP_FX >> 1)) : STEP_STEP_FX;
 
     /* Neon sting trigger — rare, 1/512 ≈ avg 12 s. */
     if (!neon_active && (prng_next() & 0x1FF) == 0) {
@@ -334,7 +366,7 @@ void amb_pump(void) {
             int hello = (int)amb_hello_samples[hello_idx] << 2;
             delta += (hello * hello_amp) >> 8;
         }
-        hello_pos_fx += HELLO_STEP_FX;
+        hello_pos_fx += hstep;
         if ((hello_pos_fx >> 16) >= AMB_HELLO_SAMPLE_COUNT) hello_pos_fx = 0;
 
         /* Carpet footstep — bypasses primary `vol` (amb_volume) below.
@@ -345,7 +377,7 @@ void amb_pump(void) {
             uint32_t step_idx = step_pos_fx >> 16;
             int step = (int)amb_step_samples[step_idx] - SAMPLE_CENTER;
             step_delta = (step * step_vol) >> 9;
-            step_pos_fx += STEP_STEP_FX;
+            step_pos_fx += step_adv;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
         }
 
@@ -393,6 +425,7 @@ void amb_sound_init(void) {
     amb_buf_needs_fill  = 0;
     AMB_BUF_LEN   = AMB_SAMPLES_PER_BUF;
     AMB_UNDERRUNS = 0;
+    HELLO_STEP    = HELLO_STEP_FX;   /* voice speed 100% until tuned */
     for (int b = 0; b < 2; b++)
         for (int i = 0; i < AMB_SAMPLES_PER_BUF; i++)
             amb_pwm_buf[b][i] = SAMPLE_CENTER;

@@ -47,4 +47,13 @@ void     amb_toggle_buf_len(void);
 int      amb_buf_len_is_big(void);
 uint16_t amb_get_underruns(void);
 
+/* Voyager-hello playback-speed trim (AUDIO menu, VOICE row). On hardware
+ * the hellos drag slower than in Ares while the buzz is fine, so this
+ * scales ONLY the voice's read step — buzz/neon/steps untouched.
+ * - amb_voice_speed_adjust(dir): dir -1/+1 steps ~1%.
+ * - amb_voice_speed_pct(): 100 = baseline, for the menu readout.
+ * Bake the tuned value into HELLO_STEP_FX and drop the row when settled. */
+void amb_voice_speed_adjust(int dir);
+int  amb_voice_speed_pct(void);
+
 #endif

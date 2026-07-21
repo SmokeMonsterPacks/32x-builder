@@ -912,9 +912,14 @@ static void asset_viewer_screen(void) {
         swapBuffers();
     }
     /* Restore the palette of the screen we RETURN to: the start menu draws
-     * over the box3d cardboard backdrop, NOT the hero splash — restoring the
-     * hero palette here washed the whole menu to near-white. */
-    box3d_load_palette();
+     * over the LIVE LOBBY render (raycast_render, the "stationary lobby
+     * view"), so it needs the full gameplay palette back — the same one we
+     * loaded on entry. box3d_load_palette() was wrong here: it re-stamps the
+     * cardboard ramp across CRAM 64..79, which survives on the walls/floor/
+     * ceiling (those live at 1..52) but paints the outlet (OUTLET_BASE 72..76)
+     * cardboard-orange. Loading the game palette at full brightness restores
+     * the outlet (and the neanderthal/partition ramps that also sit at 64+). */
+    raycast_set_brightness(FADE_STEPS);
 }
 
 /* Walk-through-the-EXIT-door portal: fade to black, generate a fresh procedural

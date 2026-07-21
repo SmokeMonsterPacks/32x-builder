@@ -38,7 +38,7 @@ extern volatile int g_warp_request;
 #define TAB_MAPS     4
 #define NUM_TABS     5
 
-#define AUDIO_CONTENT_ROWS    3   /* AMBIENCE, FOOTSTEPS, BUFFER */
+#define AUDIO_CONTENT_ROWS    4   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  3   /* WALLS, METRICS, SHADOWS */
 #define CREDITS_CONTENT_ROWS  0   /* BUILD/DATE/SHA are read-only display */
@@ -160,6 +160,12 @@ void menu_update(uint16_t pad) {
              * arm. Either direction flips; pair with the HUD's AU:
              * counter to hear/see the difference. */
             amb_toggle_buf_len();
+            return;
+        }
+        if (menu_row == 4) {
+            /* VOICE: Voyager-hello playback speed (hardware pitch trim).
+             * RIGHT faster/higher, LEFT slower; buzz/steps untouched. */
+            amb_voice_speed_adjust(dir);
             return;
         }
         volatile uint8_t *target =
@@ -302,6 +308,17 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 40, menu_row == 2, "FOOTSTEPS", num);
         draw_row(fb, 48, menu_row == 3, "BUFFER",
                  amb_buf_len_is_big() ? " 64MS" : " 16MS");
+        {
+            /* VOICE: hello playback speed, 100% = baseline. */
+            char pc[6]; int p = amb_voice_speed_pct();
+            if (p > 999) p = 999;
+            pc[0] = (p >= 100) ? ('0' + (p / 100) % 10) : ' ';
+            pc[1] = (p >= 10)  ? ('0' + (p / 10) % 10)  : ' ';
+            pc[2] = '0' + p % 10;
+            pc[3] = '%';
+            pc[4] = 0;
+            draw_row(fb, 56, menu_row == 4, "VOICE", pc);
+        }
     } else if (menu_tab == TAB_LIGHTING) {
         uint8_t f = SHARED_UC->lighting_flags;
         draw_row(fb, 32, menu_row == 1, "FLICKER",
@@ -355,6 +372,11 @@ void menu_render(uint8_t *fb) {
             }
         }
     }
+
+    /* AUDIO's VOICE row (y=56) exists only on that tab; blank it elsewhere
+     * so switching away doesn't leave the "VOICE" tile hanging. */
+    if (menu_tab != TAB_AUDIO)
+        menu_puts_pad(TX(X + 8), 56, "", 20);
 
     /* Hint row at y=64. */
     menu_puts_pad(TX(X + 8), 64,
