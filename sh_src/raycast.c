@@ -1147,7 +1147,9 @@ void raycast_set_brightness(int lvl) {
             MIX(25,FOG_R,i)*lvl/FADE_STEPS, MIX(23,FOG_G,i)*lvl/FADE_STEPS, MIX(16,FOG_B,i)*lvl/FADE_STEPS);
     }
     {
-        static const uint8_t lt[4][3] = {{31,31,28},{23,23,21},{15,15,14},{7,7,7}};
+        /* Soft warm-white troffer, movie-matched: tube (0) vs panel (1) is a
+         * SUBTLE 2-step variance, not the old stark 8; gentle fog steps below. */
+        static const uint8_t lt[4][3] = {{29,29,26},{27,27,24},{23,23,20},{18,18,15}};
         for (int i = 0; i < 4; i++)
             Hw32xSetBGColor(LIGHT_BASE + i, lt[i][0]*lvl/FADE_STEPS, lt[i][1]*lvl/FADE_STEPS, lt[i][2]*lvl/FADE_STEPS);
     }
@@ -1261,10 +1263,10 @@ static void build_palette(void) {
     Hw32xSetBGColor(LOWCEIL_COLOR, 16, 14, 10);
     Hw32xSetBGColor(LOWCEIL_SEAM,  10,  8,  5);
     /* Fluorescent lights: 4 brightness states for flicker (full / 75 / 50 / 25%). */
-    Hw32xSetBGColor(LIGHT_BASE + 0, 31, 31, 28);
-    Hw32xSetBGColor(LIGHT_BASE + 1, 23, 23, 21);
-    Hw32xSetBGColor(LIGHT_BASE + 2, 15, 15, 14);
-    Hw32xSetBGColor(LIGHT_BASE + 3,  7,  7,  7);
+    Hw32xSetBGColor(LIGHT_BASE + 0, 29, 29, 26);   /* tube: soft warm white */
+    Hw32xSetBGColor(LIGHT_BASE + 1, 27, 27, 24);   /* panel: 2 steps below tube (subtle) */
+    Hw32xSetBGColor(LIGHT_BASE + 2, 23, 23, 20);   /* gentle fog steps */
+    Hw32xSetBGColor(LIGHT_BASE + 3, 18, 18, 15);
     /* Neanderthal cardboard standup. Index 0 = cardboard back (warm tan
      * brown). 1-7 = quantized figure shades pulled from the 32x64 PNG
      * texture by 7-bucket brightness quantization. */
@@ -1911,6 +1913,7 @@ static int position_clear(fx_t px, fx_t py) {
  * — the single biggest immersion bump per line of code. */
 static uint8_t bob_phase   = 0;
 static uint8_t is_walking  = 0;
+static uint8_t is_running  = 0;   /* moving AND holding A (sprint) — speeds footstep cadence */
 /* Eased manual pitch (signed pixels). C button drives it toward +40
  * (look down) when held, eases back to 0 on release. Walking pitch bob
  * (±1 from SIN_FX(bob_phase)) is added on top each frame. */
@@ -2063,16 +2066,39 @@ void player_update(uint16_t pad) {
      * input rather than a hold timer, so it's an act of intent and not a
      * function of how long you leaned (and it can't depend on frame rate). */
     {
-        static uint16_t prev_move = 0;
+        static uint16_t prev_move = 0, prev_a = 0;
+        static int a_latch = 0;
         const uint16_t MOVE_MASK = SEGA_CTRL_UP | SEGA_CTRL_DOWN
                                  | SEGA_CTRL_LEFT | SEGA_CTRL_RIGHT;
         uint16_t move = pad & MOVE_MASK;
         int fresh_push = (move & ~prev_move) != 0;   /* a direction newly pressed */
+        int a_fresh = (pad & SEGA_CTRL_A) && !(prev_a & SEGA_CTRL_A);
+        /* Press-latch: the pad is sampled once per rendered frame, so at low fps
+         * a quick A tap can land a hair before you're in range and be gone by the
+         * next sample. Hold the press actionable for ~3 frames; consumed the
+         * instant it topples something, so one tap still fells exactly one. */
+        if (a_fresh) a_latch = 3;
+        int a_trigger = a_latch > 0;
+        /* A also pushes a cutout over: a deliberate press, so it works by
+         * proximity (face him and tap A) as well as while shoving into him —
+         * no "arm on first contact" step the accidental-lean guard needs. If
+         * A is latched with nothing being shoved, grab the nearest topple-able
+         * cutout within reach and treat it as the shove target below. */
+        if (a_trigger && shove < 0) {
+            int64_t bestd2 = (int64_t)FX(1.3) * FX(1.3);
+            for (int si = 0; si < NUM_STANDUPS; si++) {
+                if (standups[si].kind == CHAIR_SPRITE_KIND || standup_down[si]) continue;
+                fx_t ddx = standups[si].x - player.x, ddy = standups[si].y - player.y;
+                int64_t d2 = (int64_t)ddx * ddx + (int64_t)ddy * ddy;
+                if (d2 < bestd2) { bestd2 = d2; shove = si; }
+            }
+        }
         if (shove >= 0 && standups[shove].kind == CHAIR_SPRITE_KIND) {
             /* The true-3D chair is solid furniture — it blocks but doesn't
              * topple (the topple pipeline is billboard/flat-bitmap only). */
         } else if (shove >= 0) {
-            if (standup_armed[shove] && fresh_push) {
+            if (a_trigger || (standup_armed[shove] && fresh_push)) {
+                a_latch = 0;                                   /* consume: one tap, one topple */
                 standup_down[shove] = 1;                       /* timber */
                 standup_fall_prog[shove] = 1;                  /* start the tip-over */
                 uint8_t facing = standups[shove].facing_angle;
@@ -2101,11 +2127,16 @@ void player_update(uint16_t pad) {
         for (int si = 0; si < NUM_STANDUPS; si++)
             if (standup_down[si] && standup_fall_prog[si] < STANDUP_FALL_MAX)
                 standup_fall_prog[si]++;
+        if (a_latch > 0) a_latch--;
         prev_move = move;
+        prev_a = (uint16_t)(pad & SEGA_CTRL_A);
     }
 
     /* Track walking state and advance bob phase. */
     is_walking = (dx != 0 || dy != 0);
+    /* Running = actually moving while sprinting (A held). The pump reads this
+     * to play the carpet footsteps at a faster cadence to match the stride. */
+    is_running = (is_walking && sprinting) ? 1 : 0;
     if (is_walking) bob_phase += 20;         /* ~4.7 Hz — tight micro-bob cadence */
 
     /* INTERACT: the run button (A) doubles as "use" when you're within reach of
@@ -2392,6 +2423,28 @@ static uint8_t chair_face_shade(int axis, fx_t fc, fx_t fs) {
     }
 }
 
+/* Flicker offset (0 steady / 1 dim / 2 off) of the dominant (nearest, within 4
+ * cells) light over (bx,by) — the SAME light + seed + thresholds draw_lights and
+ * the chair shadow use, so a fixture, its shadow, and the chair under it all
+ * pulse in one frame. Returns 0 when flicker is disabled or no light is near. */
+static int light_flicker_at(fx_t bx, fx_t by) {
+    if (!(SHARED_UC->lighting_flags & LIGHTING_FLICKER)) return 0;
+    int best = -1; int32_t best_d2 = 0x7FFFFFFF;
+    for (int L = 0; L < NUM_LIGHTS; L++) {
+        int32_t dxc = (int32_t)((bx - lights[L].x) >> 8);
+        int32_t dyc = (int32_t)((by - lights[L].y) >> 8);
+        int32_t d2 = dxc * dxc + dyc * dyc;
+        if (d2 >= 1048576) continue;                 /* >4 cells: no cast */
+        if (d2 < best_d2) { best_d2 = d2; best = L; }
+    }
+    if (best < 0) return 0;
+    uint32_t r = SHARED_UC->frame_count * 1103515245u + (uint32_t)best * 12347u;
+    int roll = (int)((r >> 24) & 0x1F);
+    if (roll < 2) return 2;
+    if (roll < 5) return 1;
+    return 0;
+}
+
 /* Scanline triangle fill, constant depth (the chair spans ~one cell; WALL_DIST
  * varies slowly across it), per-pixel wall z-test, clipped to this CPU's
  * column half. */
@@ -2534,18 +2587,28 @@ static void draw_chair_3d(int i, int col_start, int col_end,
     int zt = 0;
     for (int x = minx; x <= maxx; x++)
         if (maxdep >= WALL_DIST(x)) { zt = 1; break; }
+    /* Fog off the chair CENTRE depth, uniform across all faces — the billboard
+     * fogs uniformly off transformY, so per-face fog (a gradient across the
+     * chair) left a faint tone difference at the LOD swap. One depth, matched. */
+    fx_t center_depth = FX_MUL(inv_det, -FX_MUL(planeY, cx - px) + FX_MUL(planeX, cy - py));
+    /* Flicker response: close up (inside the 2-cell fog cutoff) the chair is at
+     * full shade, so when its light strobes fully OFF, drop the faces one subtle
+     * step — the seat catches it most. Barely there, but it pulses in sync with
+     * the shadow fade and the panel above. */
+    int chair_dark = (light_flicker_at(cx, cy) >= 2) ? 1 : 0;
     for (int q = 0; q < nf; q++) {
         /* Distance fog: chairs used to stay full-bright to the horizon while
          * everything around them faded. Fade the door shade toward the darkest
          * brown (index 0) past ~2 cells, reaching full fog by FOG_RAMP_DIST,
          * same ramp the walls use. Cheap: one calc per face. */
         int shade = faces[q].shade;
-        fx_t fd = faces[q].depth - FX(2);
+        fx_t fd = center_depth - FX(2);
         if (fd > 0) {
             int fog = (int)(((int64_t)fd * 5) / (FOG_RAMP_DIST - FX(2)));
             shade -= fog;
-            if (shade < 0) shade = 0;
         }
+        shade -= chair_dark;                    /* subtle light-flicker dim */
+        if (shade < 0) shade = 0;
         /* A chair standing in a dark room honors the dark: collapse to the
          * deepest brown so it reads as a shape in the gloom, like the walls. */
         if (cell_is_dark(cx, cy)) shade = 0;
@@ -2636,7 +2699,10 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
                 if (!s) continue;                          /* transparent: no z-read, no write */
                 if (!skip_z && depth >= WALL_DIST(x)) continue;
                 if (shadow) {                              /* silhouette -> dithered shadow */
-                    if ((x ^ y) & 1) row[x] = STANDUP_SHADOW_COLOR;
+                    /* front_base carries the shadow COLOR in shadow mode (it's
+                     * unused for texel decode here) — lets the caller flicker it
+                     * toward the floor in sync with the casting light. */
+                    if ((x ^ y) & 1) row[x] = front_base;
                 } else {
                     row[x] = is_front ? (uint8_t)(front_base + s) : back_c;
                 }
@@ -2784,16 +2850,18 @@ static void nearest_light_dir(fx_t bx, fx_t by, fx_t fallx, fx_t fally,
  * the normalized net vector (fallback dir for the balanced case, where the
  * near-symmetric SHORT stencil makes it cosmetic). */
 static int light_field_dir(fx_t bx, fx_t by, fx_t fallx, fx_t fally,
-                           fx_t *odx, fx_t *ody) {
-    int32_t vx = 0, vy = 0;
+                           fx_t *odx, fx_t *ody, int *dom) {
+    int32_t vx = 0, vy = 0, best_d2 = 0x7FFFFFFF; int best = -1;
     for (int L = 0; L < NUM_LIGHTS; L++) {
         int32_t dxc = (int32_t)((bx - lights[L].x) >> 8);   /* 8.8 cells */
         int32_t dyc = (int32_t)((by - lights[L].y) >> 8);
         int32_t d2 = dxc * dxc + dyc * dyc;
         if (d2 == 0 || d2 >= 1048576) continue;             /* >4 cells: negligible */
+        if (d2 < best_d2) { best_d2 = d2; best = L; }        /* dominant (nearest) caster */
         vx += (dxc << 14) / d2;                             /* ~cos/d falloff */
         vy += (dyc << 14) / d2;
     }
+    if (dom) *dom = best;
     int32_t ax = vx < 0 ? -vx : vx, ay = vy < 0 ? -vy : vy;
     int32_t mx2 = ax > ay ? ax : ay, mn2 = ax > ay ? ay : ax;
     int32_t mag = (mx2 - (mx2 >> 5)) + ((mn2 >> 1) - (mn2 >> 3));
@@ -2820,7 +2888,20 @@ static void draw_chair_shadow(int i, int col_start, int col_end,
     /* Balanced-field fallback casts toward the chair's BACK (deterministic per
      * chair) — the old camera-based fallback would make the yaw pick below
      * swim as the player circles a chair sitting under a light. */
-    int kind = light_field_dir(bx, by, -COS_FX(fa), -SIN_FX(fa), &sdx, &sdy);
+    int dom = -1;
+    int kind = light_field_dir(bx, by, -COS_FX(fa), -SIN_FX(fa), &sdx, &sdy, &dom);
+    /* Shadow FLICKERS with its casting light: roll the dominant (nearest) light's
+     * flicker with the exact seed draw_lights uses, and when that fixture strobes
+     * off/dim, lighten the shadow toward the floor so it flickers away in sync.
+     * Gated on LIGHTING_FLICKER; free (one roll, rides the shadow setup). */
+    uint8_t shadow_c = STANDUP_SHADOW_COLOR;
+    if ((SHARED_UC->lighting_flags & LIGHTING_FLICKER) && dom >= 0) {
+        uint32_t r = SHARED_UC->frame_count * 1103515245u + (uint32_t)dom * 12347u;
+        int roll = (int)((r >> 24) & 0x1F);
+        if      (roll < 2) shadow_c = (uint8_t)(STANDUP_SHADOW_COLOR - 3);  /* off: fade to floor */
+        else if (roll < 5) shadow_c = (uint8_t)(STANDUP_SHADOW_COLOR - 1);  /* dim */
+        if (shadow_c < FLOOR_BASE) shadow_c = FLOOR_BASE;
+    }
     /* Yaw sector: the cast direction expressed against the chair's OWN facing
      * picks WHICH silhouette — light on the back throws the slat tongue, light
      * on the side throws the thin profile. Same argmax-dot picker as the
@@ -2872,9 +2953,9 @@ static void draw_chair_shadow(int i, int col_start, int col_end,
     const fx_t UB = mir ? 0 : ((fx_t)tw << FX_SHIFT);
     const fx_t QU[4] = { UA, UB, UB, UA };
     const fx_t QV[4] = { 0, 0, (fx_t)th << FX_SHIFT, (fx_t)th << FX_SHIFT };
-    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, 0, 0, 0,
+    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, shadow_c, 0, 0,
             csx[0],csy[0],QU[0],QV[0], csx[1],csy[1],QU[1],QV[1], csx[2],csy[2],QU[2],QV[2]);
-    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, 0, 0, 0,
+    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, shadow_c, 0, 0,
             csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
 }
 
@@ -2945,9 +3026,9 @@ static void draw_standup_shadow(int i, int col_start, int col_end,
     fx_t depth = cdep[0];
     const fx_t QU[4] = { 0, (fx_t)tw << FX_SHIFT, (fx_t)tw << FX_SHIFT, 0 };  /* feet v=th, head v=0 */
     const fx_t QV[4] = { (fx_t)th << FX_SHIFT, (fx_t)th << FX_SHIFT, 0, 0 };
-    tex_tri(fb, col_start, col_end, depth, tex, tw, th, 0, 0, 1, 0, 0, 0,
+    tex_tri(fb, col_start, col_end, depth, tex, tw, th, 0, 0, 1, STANDUP_SHADOW_COLOR, 0, 0,
             csx[0],csy[0],QU[0],QV[0], csx[1],csy[1],QU[1],QV[1], csx[2],csy[2],QU[2],QV[2]);
-    tex_tri(fb, col_start, col_end, depth, tex, tw, th, 0, 0, 1, 0, 0, 0,
+    tex_tri(fb, col_start, col_end, depth, tex, tw, th, 0, 0, 1, STANDUP_SHADOW_COLOR, 0, 0,
             csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
 }
 
@@ -3007,6 +3088,23 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         }
     }
 
+    /* Shadow cap: like the 3D render guard, only the nearest few chairs within
+     * shadow range cast — a 16-chair map ran light_field_dir (a loop over every
+     * light) for every chair in 7 cells, most of them off-screen. Measured ~3000
+     * ticks / +2fps on the test backrooms map. order[] is far->near. */
+    #define CHAIR_SHADOW_MAX 4
+    static const int64_t CHAIR_SHADOW_D2 = (int64_t)FX(7) * FX(7);
+    uint8_t chair_shadow_ok[MAX_STANDUPS] = {0};
+    {
+        int seen = 0;
+        for (int oi2 = on - 1; oi2 >= 0 && seen < CHAIR_SHADOW_MAX; oi2--) {
+            int j = order[oi2];
+            if (standups[j].kind != CHAIR_SPRITE_KIND) continue;
+            if (d2[j] >= CHAIR_SHADOW_D2) continue;
+            chair_shadow_ok[j] = 1; seen++;
+        }
+    }
+
     /* Isolate just the chair fill for the MODE+A textured/flat A/B. Only the
      * primary half (col_start==0) commits prof_pass_chair to avoid the two
      * SH-2s racing on the global; the toggle doesn't move geometry, so the
@@ -3028,14 +3126,27 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
              * behind the view plane cannot reach the frame. Kills the
              * quads (and their uncached per-pixel z-reads) for the half
              * of the map at your back. */
-            fx_t cd = FX_MUL(standups[i].x - px, dirX)
-                    + FX_MUL(standups[i].y - py, dirY);
+            fx_t scx = standups[i].x - px, scy = standups[i].y - py;
+            fx_t cd = FX_MUL(scx, dirX) + FX_MUL(scy, dirY);
             if (!SHARED_UC->shadows_off
+                && chair_shadow_ok[i]              /* nearest-few, within 7 cells */
                 && cd > -FX(1)
-                && d2[i] < (int64_t)FX(7) * FX(7)
-                && !cell_is_dark(standups[i].x, standups[i].y))
-                draw_chair_shadow(i, col_start, col_end, px, py, dirX, dirY,
-                                  planeX, planeY, inv_det, horizon_y, fb);
+                && !cell_is_dark(standups[i].x, standups[i].y)) {
+                /* FRUSTUM CULL: skip the whole shadow (setup included — the
+                 * per-light light_field_dir loop) when the chair projects well
+                 * outside the viewport. A half-screen margin covers the shadow's
+                 * lateral floor spread. This is the "off-screen = free" the fill
+                 * already had, now applied to the shadow SETUP too. */
+                fx_t stX = FX_MUL(inv_det, FX_MUL(dirY, scx) - FX_MUL(dirX, scy));
+                fx_t stY = FX_MUL(inv_det, FX_MUL(-planeY, scx) + FX_MUL(planeX, scy));
+                if (stY >= FX(0.2)) {
+                    int sX = (SCREEN_W >> 1)
+                           + (int)(((int32_t)(SCREEN_W >> 1) * FX_DIV(stX, stY)) >> FX_SHIFT);
+                    if (sX > -(SCREEN_W >> 1) && sX < SCREEN_W + (SCREEN_W >> 1))
+                        draw_chair_shadow(i, col_start, col_end, px, py, dirX, dirY,
+                                          planeX, planeY, inv_det, horizon_y, fb);
+                }
+            }
             if (chair_render[i]) {
                 uint16_t _cf0 = prof_frt_read();
                 draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
@@ -3053,9 +3164,21 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             && !SHARED_UC->shadows_off
             && d2[i] < (int64_t)FX(8) * FX(8)              /* was ungated by distance */
             && (FX_MUL(standups[i].x - px, dirX)
-              + FX_MUL(standups[i].y - py, dirY)) > -FX(1))  /* not behind the camera */
-            draw_standup_shadow(i, col_start, col_end, px, py, dirX, dirY,
-                                planeX, planeY, inv_det, horizon_y, fb);
+              + FX_MUL(standups[i].y - py, dirY)) > -FX(1)) { /* not behind the camera */
+            /* Same frustum cull as the chair shadow: an off-screen neanderthal
+             * within 8 cells used to run its shadow setup (nearest_light_dir)
+             * for a shadow you can't see. */
+            fx_t nsx = standups[i].x - px, nsy = standups[i].y - py;
+            fx_t ntX = FX_MUL(inv_det, FX_MUL(dirY, nsx) - FX_MUL(dirX, nsy));
+            fx_t ntY = FX_MUL(inv_det, FX_MUL(-planeY, nsx) + FX_MUL(planeX, nsy));
+            if (ntY >= FX(0.2)) {
+                int nX = (SCREEN_W >> 1)
+                       + (int)(((int32_t)(SCREEN_W >> 1) * FX_DIV(ntX, ntY)) >> FX_SHIFT);
+                if (nX > -(SCREEN_W >> 1) && nX < SCREEN_W + (SCREEN_W >> 1))
+                    draw_standup_shadow(i, col_start, col_end, px, py, dirX, dirY,
+                                        planeX, planeY, inv_det, horizon_y, fb);
+            }
+        }
         /* Shoved over. Clear floor ahead (fall_angle==64): fall FLAT via the
          * billboard-slice + perspective floor-cast — reads as a real body on the
          * ground and dodges the affine-flat "shrink". Wall within reach
@@ -3403,10 +3526,40 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
         tex = door_pv;
         fbase = 0;
     }
+    /* CHAIR sprite: rotating in the viewer sweeps through the baked DIRECTIONAL
+     * frames (the in-game far-chair look), so it reads as the chair spinning by
+     * frame-swap. Pick the view for this yaw with the same argmax-dot picker the
+     * game uses (chair facing = yaw, camera fixed in front -> chair->player is a
+     * constant, so the dot reduces to sin), decode into a scratch buffer, and
+     * render it FLAT (front-facing quad) so only the frame changes. */
+    static uint8_t chair_pv[40 * CHAIR_DIR_H];
+    int chair_flat = 0, chair_mir = 0;
+    if (sel == CHAIR_SPRITE_KIND) {
+        int best = 0; fx_t bestd = 0; int first = 1;
+        for (int k = 0; k < CHAIR_DIR_SECTORS; k++) {
+            uint8_t a = (uint8_t)(yaw + 128 + chair_dir_sect_v[k]);
+            fx_t dd = SIN_FX(a);                     /* chair->player=(0,1): dot=sin(a) */
+            if (first || dd > bestd) { best = k; bestd = dd; first = 0; }
+        }
+        int view = chair_dir_sect_view[best];
+        chair_mir = chair_dir_sect_mirror[best];
+        const uint8_t *vt = chair_dir_views[view].tex;
+        int vw = chair_dir_views[view].w;
+        for (int yy = 0; yy < CHAIR_DIR_H; yy++)
+            for (int xx = 0; xx < vw; xx++) {
+                uint8_t v = vt[yy * vw + xx];
+                int sh = (int)v - 1; if (sh > 3) sh = 3;
+                chair_pv[yy * vw + xx] = v ? (uint8_t)(CHAIR_BASE + sh) : 0;
+            }
+        tex = chair_pv; tw = vw; th = CHAIR_DIR_H; col_major = 0; fbase = 0;
+        chair_flat = 1;
+    }
     if (dist < FX(0.4)) dist = FX(0.4);
     fx_t Hh = sd->world_h;
     fx_t hw = (fx_t)(((int64_t)Hh * sd->w) / (2 * sd->h));   /* half-width, lo-res aspect */
+    if (chair_flat) hw = (fx_t)(((int64_t)Hh * tw) / (2 * th));  /* directional-view aspect */
     fx_t cyw = COS_FX(yaw), syw = SIN_FX(yaw);
+    if (chair_flat) { cyw = FX_ONE; syw = 0; }              /* flat front billboard */
     const int oxc = SCREEN_W / 2, oyc = SCREEN_H / 2 + 12;
     int is_front = (cyw >= 0);
     uint8_t back_c = (uint8_t)(sd->base + 0);
@@ -3436,6 +3589,7 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
          * it horizontally flipped). This viewer path does NOT flip, so match it
          * here or the EXIT sign reads reversed. */
         if (sd->decode == SPRITE_DECODE_DOOR) u = tw - 1 - u;
+        if (chair_flat && chair_mir) u = tw - 1 - u;   /* mirrored directional view */
         const uint8_t *cb = col_major ? tex + u * th : tex + u;
         int cstep = col_major ? 1 : tw;
         int y0c = ytop < 0 ? 0 : ytop;
@@ -3607,9 +3761,58 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
  * endpoints — passing the partition's X for horizontal segments (Y for
  * vertical) gives chevron-continuous tiling around the 4 sides. */
 
-/* Project each ceiling light to screen space, paint a small bright bar
- * with z-test against wall_dist, apply per-light flicker. The math is the
- * sprite-billboard transform; the cost is ~50-100 cycles per light. */
+/* Project a WORLD-space axis-aligned quad lying in the ceiling plane (4 corners
+ * wx[]/wy[]) and scanline-fill it with `color`, z-tested per column against the
+ * walls. Used for the light PANEL and its two tube strips — because the tubes
+ * are world geometry (not a screen-space band pattern), they rotate WITH the
+ * ceiling instead of staying screen-horizontal. eye_h drives the crouch offset. */
+RAMTEXT static void ceil_quad_fill(const fx_t *wx, const fx_t *wy, uint8_t color,
+        fx_t centerY, fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX,
+        fx_t planeY, fx_t inv_det, int horizon_y, int eye_h,
+        int col_start, int col_end, uint8_t *fb) {
+    int sx[4], sy[4], min_y = SCREEN_H, max_y = -1;
+    for (int k = 0; k < 4; k++) {
+        fx_t rx = wx[k] - px, ry = wy[k] - py;
+        fx_t tX = FX_MUL(inv_det, FX_MUL( dirY,  rx) - FX_MUL( dirX,  ry));
+        fx_t tY = FX_MUL(inv_det, FX_MUL(-planeY, rx) + FX_MUL( planeX, ry));
+        if (tY < FX(0.2)) return;                 /* a corner behind the plane */
+        fx_t ratio = FX_DIV(tX, tY);
+        sx[k] = (SCREEN_W >> 1) + (int)(((int32_t)(SCREEN_W >> 1) * ratio) >> FX_SHIFT);
+        int yoff = (int)(((int32_t)((SCREEN_H * (256 - eye_h)) >> 8) << FX_SHIFT) / tY);
+        sy[k] = horizon_y - yoff;
+        if (sy[k] < min_y) min_y = sy[k];
+        if (sy[k] > max_y) max_y = sy[k];
+    }
+    if (min_y < 0) min_y = 0;
+    if (max_y >= SCREEN_H) max_y = SCREEN_H - 1;
+    if (max_y < min_y) return;
+    fx_t edge_dx[4];
+    for (int e = 0; e < 4; e++) {
+        int e1 = (e + 1) & 3, dy = sy[e1] - sy[e];
+        edge_dx[e] = dy ? (((fx_t)(sx[e1] - sx[e]) << FX_SHIFT) / dy) : 0;
+    }
+    for (int y = min_y; y <= max_y; y++) {
+        int xs[2], n = 0;
+        for (int e = 0; e < 4 && n < 2; e++) {
+            int e1 = (e + 1) & 3;
+            int lo = sy[e] < sy[e1] ? sy[e] : sy[e1];
+            int hi = sy[e] < sy[e1] ? sy[e1] : sy[e];
+            if (y < lo || y > hi || sy[e] == sy[e1]) continue;
+            xs[n++] = sx[e] + (int)(((fx_t)(y - sy[e]) * edge_dx[e]) >> FX_SHIFT);
+        }
+        if (n < 2) continue;
+        int l = xs[0] < xs[1] ? xs[0] : xs[1], r = xs[0] > xs[1] ? xs[0] : xs[1];
+        if (l < 0) l = 0; if (r >= SCREEN_W) r = SCREEN_W - 1;
+        if (l < col_start) l = col_start; if (r > col_end - 1) r = col_end - 1;
+        if (l > r) continue;
+        uint8_t *p = fb + y * SCREEN_W + l;
+        for (int x = l; x <= r; x++) { if (centerY < WALL_DIST(x)) *p = color; p++; }
+    }
+}
+
+/* Project each ceiling light as a flat tile in the ceiling plane: a soft-white
+ * PANEL quad plus two bright-white TUBE quads (world geometry, so they rotate
+ * with the ceiling), z-tested against wall_dist, per-light flicker + fog. */
 RAMTEXT static void draw_lights(int col_start, int col_end) {
     /* Self-contained for the dual-CPU split (see draw_standups): snapshot the
      * player + derive the basis locally so the secondary can fill its column
@@ -3641,16 +3844,18 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
      * corners to screen and fill the bounding rectangle, so the lit
      * area tracks the same perspective as the surrounding ceiling
      * grid lines instead of being a separate billboard sprite. */
-    /* One actual ceiling panel. CEIL_GRID_DENSITY = 4 means 4 panels
-     * per 1-unit cell side, so a single panel is 0.25 units wide and
-     * TILE_HALF = 0.125 (half-extent in each axis). Matches the
-     * "single recessed fluorescent in one drop-ceiling tile" look of
-     * the Backrooms reference renders. */
-    const fx_t TILE_HALF = FX(0.125);
+    /* A light fills exactly ONE square grid tile, SNAPPED to the grid so it sits
+     * INSIDE the grid lines (a fluorescent panel replacing a tile), not a
+     * centered rectangle straddling them. CEIL_GRID_DENSITY = 4 -> tile 0.25. */
+    const fx_t TILE = FX_ONE / CEIL_GRID_DENSITY;   /* 0.25 */
 
     for (int i = 0; i < NUM_LIGHTS; i++) {
         fx_t lx = lights[i].x;
         fx_t ly = lights[i].y;
+        /* Floor to the fixture's tile; span TWO tiles in X, one in Y = a 2:1
+         * troffer rectangle (the tubes run the long X axis). */
+        fx_t tx0 = (lx / TILE) * TILE, tx1 = tx0 + 2 * TILE;
+        fx_t ty0 = (ly / TILE) * TILE, ty1 = ty0 + TILE;
 
         /* Center-distance check for view culling. */
         fx_t cx = lx - px;
@@ -3660,57 +3865,10 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
         if (centerY < FX(0.5)) continue;
         if (centerY >= MAX_VIEW_DIST) continue;
 
-        /* Project all 4 corners of the axis-aligned ceiling tile,
-         * saving (sx, sy) for each so we can do proper scanline
-         * trapezoid fill instead of bounding-box. The bbox lit area
-         * was reading as a hovering rectangular sprite; this fill
-         * tracks the same perspective as the surrounding ceiling
-         * grid lines so the lit area looks like a real tile. */
-        fx_t corner_dx[4] = { -TILE_HALF, +TILE_HALF, +TILE_HALF, -TILE_HALF };
-        fx_t corner_dy[4] = { -TILE_HALF, -TILE_HALF, +TILE_HALF, +TILE_HALF };
-        int corner_sx[4], corner_sy[4];
-        int min_y = SCREEN_H, max_y = -1;
-        int valid = 1;
-        for (int k = 0; k < 4; k++) {
-            fx_t rx = (lx + corner_dx[k]) - px;
-            fx_t ry = (ly + corner_dy[k]) - py;
-            fx_t tX = FX_MUL(inv_det, FX_MUL( dirY,  rx) - FX_MUL( dirX,  ry));
-            fx_t tY = FX_MUL(inv_det, FX_MUL(-planeY, rx) + FX_MUL( planeX, ry));
-            if (tY < FX(0.2)) { valid = 0; break; }
-
-            fx_t ratio = FX_DIV(tX, tY);
-            corner_sx[k] = (SCREEN_W >> 1)
-                  + (int)(((int32_t)(SCREEN_W >> 1) * ratio) >> FX_SHIFT);
-            /* Ceiling offset uses focal·(1-eyeH): as the eye drops the
-             * ceiling rises away, so the light tile climbs in lockstep with
-             * the wall ceiling-edge. */
-            int yoff = (int)(((int32_t)((SCREEN_H * (256 - (int)SHARED_UC->eye_h)) >> 8) << FX_SHIFT) / tY);
-            corner_sy[k] = horizon_y - yoff;
-
-            if (corner_sy[k] < min_y) min_y = corner_sy[k];
-            if (corner_sy[k] > max_y) max_y = corner_sy[k];
-        }
-        if (!valid) continue;
-        if (min_y < 0)         min_y = 0;
-        if (max_y >= SCREEN_H) max_y = SCREEN_H - 1;
-        if (max_y < min_y) continue;
-
-        /* Precompute per-edge slope (dx per dy, fixed-point). Each
-         * scanline reads two edges and reconstructs x via slope * (y -
-         * y_start) — no division in the scanline loop. */
-        fx_t edge_dx[4];
-        for (int e = 0; e < 4; e++) {
-            int e1 = (e + 1) & 3;
-            int dy = corner_sy[e1] - corner_sy[e];
-            edge_dx[e] = (dy != 0)
-                ? ((fx_t)(corner_sx[e1] - corner_sx[e]) << FX_SHIFT) / dy
-                : 0;
-        }
-
-        /* Per-light flicker — converts a random roll into a brightness
-         * offset added to the per-row pattern below. 0 = full bright,
-         * +1 = 75%, +2 = 50% (dim glitch). Gated by LIGHTING_FLICKER:
-         * with the bit clear, every panel stays at full brightness. */
+        /* Per-light flicker + distance fog folded into one brightness offset
+         * (0 full .. up) added to the panel/tube ramp index. The tile lives IN
+         * the ceiling, so it must dim on the ceiling's fog curve or it reads as
+         * pixels floating on the fog; gone by 5 cells. */
         int flicker_off = 0;
         if (SHARED_UC->lighting_flags & LIGHTING_FLICKER) {
             uint32_t r = light_frame * 1103515245u + i * 12347u;
@@ -3718,67 +3876,38 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
             if      (roll < 2)  flicker_off = 2;
             else if (roll < 5)  flicker_off = 1;
         }
-        /* The tile lives IN the ceiling plane, so its brightness must track
-         * the CEILING's fog at its own distance — the ceiling around a tile
-         * at 4-5 cells is already near-black, and any brighter quad reads as
-         * blinking pixels floating on the fog (the seam: confirmed by its
-         * flicker). Dim on the ceiling's curve; gone by 5. */
-        if      (centerY >= FX(5.0)) continue;
-        else if (centerY >= FX(4.25)) flicker_off += 3;
-        else if (centerY >= FX(3.5))  flicker_off += 2;
-        else if (centerY >= FX(2.75)) flicker_off += 1;
-        if (flicker_off > 3) flicker_off = 3;
+        /* A fluorescent fixture is an EMITTER — it punches through the fog, so
+         * only a gentle far dimming (not the ceiling's hard fog curve). Bright
+         * to ~5 cells, one notch to 7, gone by 9. */
+        if      (centerY >= FX(9.0)) continue;
+        else if (centerY >= FX(7.0)) flicker_off += 2;
+        else if (centerY >= FX(5.0)) flicker_off += 1;
 
-        /* Two-bulb fluorescent troffer pattern: divide the panel
-         * vertically into 16 bands. Outer 2 bands top + bottom = dim
-         * frame, bands 2-5 and 10-13 = bright bulbs, middle 4 bands =
-         * dimmer gap between the bulbs. Suggests a real fixture with
-         * two parallel tubes behind a diffuser. */
-        int panel_h = max_y - min_y + 1;
+        int eye_h = (int)SHARED_UC->eye_h;
+        /* Soft-white PANEL (ramp index 1) then two bright-white TUBE strips
+         * (index 0), no dark frame. Tubes run along world X, world geometry so
+         * they ROTATE WITH THE CEILING (the old screen-Y bands never did). */
+        int panel_idx = 1 + flicker_off; if (panel_idx > 3) panel_idx = 3;
+        int tube_idx  = 0 + flicker_off; if (tube_idx  > 3) tube_idx  = 3;
+        uint8_t panel_c = (uint8_t)(LIGHT_BASE + panel_idx);
+        uint8_t tube_c  = (uint8_t)(LIGHT_BASE + tube_idx);
 
-        /* Scanline fill: at each row, find the two edges that span
-         * this y and reconstruct left/right x from precomputed slopes.
-         * Z-test per column against walls so foreground walls occlude
-         * the lit area cleanly. */
-        for (int y = min_y; y <= max_y; y++) {
-            int xs[2];
-            int n = 0;
-            for (int e = 0; e < 4 && n < 2; e++) {
-                int e1 = (e + 1) & 3;
-                int lo = corner_sy[e] < corner_sy[e1] ? corner_sy[e] : corner_sy[e1];
-                int hi = corner_sy[e] < corner_sy[e1] ? corner_sy[e1] : corner_sy[e];
-                if (y < lo || y > hi) continue;
-                if (corner_sy[e] == corner_sy[e1]) continue;
-                xs[n++] = corner_sx[e]
-                       + (int)(((fx_t)(y - corner_sy[e]) * edge_dx[e]) >> FX_SHIFT);
-            }
-            if (n < 2) continue;
-            int lx_s = xs[0] < xs[1] ? xs[0] : xs[1];
-            int rx_s = xs[0] > xs[1] ? xs[0] : xs[1];
-            if (lx_s < 0)         lx_s = 0;
-            if (rx_s >= SCREEN_W) rx_s = SCREEN_W - 1;
-            /* Clip to this CPU's column half. */
-            if (lx_s < col_start) lx_s = col_start;
-            if (rx_s > col_end - 1) rx_s = col_end - 1;
-            if (lx_s > rx_s) continue;
+        fx_t pwx[4] = { tx0, tx1, tx1, tx0 };
+        fx_t pwy[4] = { ty0, ty0, ty1, ty1 };
+        ceil_quad_fill(pwx, pwy, panel_c, centerY, px, py, dirX, dirY,
+                       planeX, planeY, inv_det, horizon_y, eye_h, col_start, col_end, fb);
 
-            /* Pick row brightness from the bulb pattern, then add
-             * flicker offset and clamp to the 4-entry light ramp. */
-            int frac = ((y - min_y) << 4) / panel_h;
-            int base_off;
-            if      (frac < 2 || frac >= 14) base_off = 2;
-            else if (frac < 6 || frac >= 10) base_off = 0;
-            else                             base_off = 1;
-            int idx = base_off + flicker_off;
-            if (idx > 3) idx = 3;
-            uint8_t color = (uint8_t)(LIGHT_BASE + idx);
-
-            uint8_t *p = fb + y * SCREEN_W + lx_s;
-            for (int x = lx_s; x <= rx_s; x++) {
-                if (centerY < WALL_DIST(x)) *p = color;
-                p++;
-            }
-        }
+        /* Two tube strips: inset from the X ends, thin in Y, at ~1/3 and 2/3. */
+        fx_t ex   = TILE >> 3;                     /* x inset from the frame */
+        fx_t x0 = tx0 + ex, x1 = tx1 - ex;
+        fx_t t1a = ty0 + (TILE * 9) / 32, t1b = ty0 + (TILE * 13) / 32;
+        fx_t t2a = ty0 + (TILE * 19) / 32, t2b = ty0 + (TILE * 23) / 32;
+        fx_t a1x[4] = { x0, x1, x1, x0 }, a1y[4] = { t1a, t1a, t1b, t1b };
+        fx_t a2x[4] = { x0, x1, x1, x0 }, a2y[4] = { t2a, t2a, t2b, t2b };
+        ceil_quad_fill(a1x, a1y, tube_c, centerY, px, py, dirX, dirY,
+                       planeX, planeY, inv_det, horizon_y, eye_h, col_start, col_end, fb);
+        ceil_quad_fill(a2x, a2y, tube_c, centerY, px, py, dirX, dirY,
+                       planeX, planeY, inv_det, horizon_y, eye_h, col_start, col_end, fb);
     }
 }
 
@@ -3923,10 +4052,15 @@ RAMTEXT void raycast_draw_ceiling_grid(int col_start, int col_end) {
 
         uint8_t *row_p = fb + y * SCREEN_W;
 
-        /* World-X grid lines: per-pixel crossings when there's spread,
-         * full-width band when facing exactly E/W (dX == 0). */
+        /* World-X grid lines. Per-pixel crossings when the line is near-VERTICAL
+         * (large screen span, converging to the vanishing point); full-width
+         * BAND when near-HORIZONTAL (small span — the "rungs"). The band used to
+         * fire only at EXACTLY dX==0, so a hair off cardinal dropped the rungs to
+         * one lonely pixel per row (the lost-X-lines bug). Threshold on |dX|
+         * routes it: a screen spanning <1 scaled unit of world-X is a rung. */
         fx_t dX = wxR_s - wxL_s;
-        if (dX != 0) {
+        fx_t adX = dX < 0 ? -dX : dX;
+        if (adX >= FX_ONE) {
             int lo = FX_INT(wxL_s), hi = FX_INT(wxR_s);
             if (lo > hi) { int t = lo; lo = hi; hi = t; }
             if (lo + 1 <= hi) {
@@ -3941,10 +4075,11 @@ RAMTEXT void raycast_draw_ceiling_grid(int col_start, int col_end) {
             for (int col = col_start; col < col_end; col++) row_p[col] = grid_c;
         }
 
-        /* World-Y grid lines: per-pixel crossings when there's spread,
-         * full-width band when facing exactly N/S (dY == 0). */
+        /* World-Y grid lines: same near-cardinal fix as X — band on small |dY|
+         * (near-horizontal rungs) instead of only exactly dY==0. */
         fx_t dY = wyR_s - wyL_s;
-        if (dY != 0) {
+        fx_t adY = dY < 0 ? -dY : dY;
+        if (adY >= FX_ONE) {
             int lo = FX_INT(wyL_s), hi = FX_INT(wyR_s);
             if (lo > hi) { int t = lo; lo = hi; hi = t; }
             if (lo + 1 <= hi) {
@@ -6328,6 +6463,7 @@ void raycast_render(void) {
     SHARED_UC->player.y     = player.y;
     SHARED_UC->player.angle = player.angle;
     SHARED_UC->is_walking   = is_walking;   /* gates carpet footsteps in pump */
+    SHARED_UC->is_running   = is_running;   /* pump plays them faster when sprinting */
 
     /* Camera pitch — eased manual hold-C tilt (pitch_smooth_y) plus
      * the ±1 walking pitch bob from bob_phase. The bob couples to the
@@ -6478,15 +6614,9 @@ void raycast_render(void) {
         /* sin in -FX_ONE..+FX_ONE, scaled to ±2 pixels for a tight micro-bob. */
         bob_y = (int)((SIN_FX(bob_phase) * 2) >> FX_SHIFT);
     }
-    /* Vertical half-res: collapse each display-row pair onto one even framebuffer
-     * row (i & ~1) so the screen shows only even rows, doubled. Suspended while the
-     * pause menu is open — the line table would halve the menu text too and make it
-     * unreadable; full-res rows behind the overlay are fine since play is paused. */
-    int vres = SHARED_UC->vres_half && !menu_is_active() && !g_lobby_ceiling;
     volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
     for (int i = 0; i < SCREEN_H; i++) {
-        int base = vres ? (i & ~1) : i;
-        int src = base + bob_y;
+        int src = i + bob_y;
         if (src < 0)         src = 0;
         if (src >= SCREEN_H) src = SCREEN_H - 1;
         line_table[i] = (uint16_t)(src * 160 + 0x100);

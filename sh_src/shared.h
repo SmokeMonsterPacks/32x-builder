@@ -65,6 +65,11 @@ typedef struct {
      * footstep audio — advances and mixes the step sample when set,
      * silent otherwise. */
     volatile uint8_t is_walking;
+    /* Set by the primary to 1 when the player is moving AND sprinting (A
+     * held). The pump advances the footstep sample ~1.5x faster while set,
+     * so the carpet cadence quickens to match the run. Ignored unless
+     * is_walking is also set. */
+    volatile uint8_t is_running;
     /* Carpet footstep volume — separate knob from amb_volume so the
      * player can mix the footsteps independently in the settings
      * menu. 0..255, 128 = current half-amp baseline, 256 would be
@@ -119,14 +124,6 @@ typedef struct {
      * both CPUs' wall-embedded door fill read it to foreshorten the leaf and
      * reveal the dark void behind. */
     volatile uint8_t door_open;
-    /* Vertical half-res (VISUALS menu). 1 = the line table maps each display-row
-     * pair onto one even framebuffer row, so the screen shows only even rows
-     * doubled. Defaults OFF and stays a VISUAL option only — judged too chunky to
-     * be worth converting the render passes to skip odd rows, so it currently buys
-     * no FPS (the passes still draw every row; the display just discards the odd
-     * ones). Suspended while the pause menu is open so the overlay text stays
-     * readable. Kept as a toggle in case the pass surgery is revisited. */
-    volatile uint8_t vres_half;
     /* Bumped by the primary each time init_lights rebuilds cell_light (map load).
      * The secondary watches it to purge its stale cached cell_light lines once
      * per change, so cell_light can be read cached instead of uncached. */
