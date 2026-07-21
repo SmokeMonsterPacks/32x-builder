@@ -137,6 +137,10 @@ typedef struct {
      * prices the whole edge-partition machinery for the same pose. Read by
      * both CPUs' wall pass (hoisted to a local at pass start). */
     volatile uint8_t part_diag;
+    /* Floor shadows master switch (VISUALS menu row): 1 = skip every standup/
+     * chair floor shadow. Lives here so BOTH CPUs' sprite halves agree, and
+     * so shadow cost can be A/B'd same-binary per the perf discipline. */
+    volatile uint8_t shadows_off;
     /* DEBUG A/B (MODE+A cycles): 0 = chair faces flat-filled (shipping),
      * 1 = chair faces routed through the textured tex_tri path (sampling
      * wall_tex as a throwaway) to measure textured-quad cost against the

@@ -195,7 +195,8 @@ uint8_t world_map[MAP_H][MAP_W];
 #include "sprite_defs.h"
 #include "chair3d.h"
 #include "chair_model.h"    /* baked GLB tri-mesh for the live 3D asset viewer */
-#include "chair_dir_tex.h"  /* 7 directional billboard views baked from the box model */
+#include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
+#include "chair_shadow_tex.h"  /* plan-silhouette floor-shadow stencils, feet-anchored */
 
 
 /* Wall texture comes from wall_tex.h (generated from images/walltile.jpg). */
@@ -235,6 +236,12 @@ uint8_t world_map[MAP_H][MAP_W];
  * values written by the other. */
 static fx_t wall_dist[SCREEN_W];
 #define WALL_DIST(i) (((volatile fx_t *)((uintptr_t)wall_dist | 0x20000000))[i])
+/* Top screen row of the column's occluder when it is a PARTIAL (see-over)
+ * partition, 0 = full-height/empty. Lets the sprite pass draw a standup's
+ * rows ABOVE a half-height divider instead of vanishing column-wide (the
+ * neanderthal-behind-a-partition bug). Same cache-through discipline. */
+static int16_t part_topv[SCREEN_W];
+#define PART_TOP(i) (((volatile int16_t *)((uintptr_t)part_topv | 0x20000000))[i])
 
 /* NUM_PARTITIONS_MAX declared in raycast.h so procgen sees the same cap. */
 
@@ -1757,6 +1764,17 @@ static int cell_passable(int x, int y) {
 static int standup_blocker(fx_t px, fx_t py) {
     for (int i = 0; i < NUM_STANDUPS; i++) {
         if (standups[i].silhouette || standup_down[i]) continue;  /* toppled = walk over it */
+        if (standups[i].kind == CHAIR_SPRITE_KIND) {
+            /* Furniture, not a wall: a slim square with a pad SMALLER than
+             * PLAYER_RADIUS, so a chair centered in a 1-cell hallway leaves
+             * a passable edge — you squeeze past a chair closer than you'd
+             * hug a wall. (footprint 0.10 + 0.10 pad = 0.20 half-extent vs
+             * the hall's 0.25 of centre clearance.) */
+            const fx_t m = FX(0.20);
+            fx_t cdx = px - standups[i].x, cdy = py - standups[i].y;
+            if (cdx > -m && cdx < m && cdy > -m && cdy < m) return i;
+            continue;
+        }
         /* facing: E0 S64 W128 N192 — N/S facers present their face along Y. */
         int ns = (standups[i].facing_angle == 64 || standups[i].facing_angle == 192);
         fx_t mx = (ns ? STANDUP_HALF_WIDTH : STANDUP_HALF_THICK) + PLAYER_RADIUS;
@@ -2167,7 +2185,11 @@ static void draw_fallen_standup(int i, int col_start, int col_end,
         for (int x = xa; x <= xb; x++) {
             if (rowDist < WALL_DIST(x)) {               /* not behind a wall */
                 int texY = tex_h - 1 - (int)(texY_fx >> FX_SHIFT);
-                int texX = tex_w - 1 - (int)(texX_fx >> FX_SHIFT);
+                /* Face-down shows the card's BACK: the silhouette seen
+                 * THROUGH the panel, i.e. the MIRROR of the front mask.
+                 * One fixed mapping had the cardboard-up outline reversed. */
+                int texX = face_up ? tex_w - 1 - (int)(texX_fx >> FX_SHIFT)
+                                   : (int)(texX_fx >> FX_SHIFT);
                 if (texX < 0) texX = 0; else if (texX >= tex_w) texX = tex_w - 1;
                 if (texY < 0) texY = 0; else if (texY >= tex_h) texY = tex_h - 1;
                 /* texX flipped to un-mirror vs the upright quad (staff on the
@@ -2205,6 +2227,15 @@ static void draw_falling_standup(int i, int col_start, int col_end,
     uint8_t fa = standup_fall_dir[i];
     fx_t fdx = COS_FX(fa), fdy = SIN_FX(fa);
     fx_t Bx = standups[i].x, By = standups[i].y;
+    /* Polarity must MATCH the standing billboard at the handoff frame. The
+     * old fixed 'un-mirror' constant agreed with the upright view from the
+     * FRONT side only — pushed from behind, the figure X-flipped mid-shove.
+     * Same width-axis projection test as the standing path: reversed when
+     * the axis points screen-right, forward when screen-left. */
+    fx_t wpx = COS_FX((uint8_t)(standups[i].facing_angle + 64));
+    fx_t wpy = SIN_FX((uint8_t)(standups[i].facing_angle + 64));
+    int fall_rev = (FX_MUL(inv_det,
+                       FX_MUL(dirY, wpx) - FX_MUL(dirX, wpy)) < 0);
     const fx_t H = FX(0.9);
     const fx_t HALFW = FX(0.225);
     fx_t cs = COS_FX(theta), sn = SIN_FX(theta);
@@ -2265,7 +2296,9 @@ static void draw_falling_standup(int i, int col_start, int col_end,
             uint8_t *prow = fb + (uintptr_t)y * SCREEN_W;
             for (int x = x0; x <= x1; x++) {
                 if (tY < WALL_DIST(x)) {
-                    int texX = tex_w - 1 - (int)(texX_fx >> FX_SHIFT);   /* un-mirror vs upright quad */
+                    int texX = fall_rev
+                             ? tex_w - 1 - (int)(texX_fx >> FX_SHIFT)
+                             : (int)(texX_fx >> FX_SHIFT);   /* viewer-side polarity */
                     if (texX < 0) texX = 0; else if (texX >= tex_w) texX = tex_w - 1;
                     uint8_t v = col_major ? tex[texX * tex_h + texY]
                                           : tex[texY * tex_w + texX];
@@ -2372,7 +2405,12 @@ static void draw_chair_3d(int i, int col_start, int col_end,
      * invisible.) */
     fx_t fc = COS_FX((uint8_t)(facing + 64)), fs = -SIN_FX((uint8_t)(facing + 64));
     int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
-    const fx_t NEARC = FX(0.25);
+    /* Near clip tied to the chair's collision box: the 0.20 half-extent
+     * square stops the camera >=~0.10 from any vertex, so 0.08 never
+     * fires in legal positions — faces render all the way to contact.
+     * The old 0.25 dropped the FRONT faces while the player was still
+     * legally outside the hitbox: 'visually clips through the chair'. */
+    const fx_t NEARC = FX(0.08);
 
     typedef struct { int sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
     cface_t faces[CHAIR_NBOXES * 6];
@@ -2653,6 +2691,106 @@ static void draw_standup_quad(int i, int col_start, int col_end,
  * texels become the dithered shadow colour — a caveman-SHAPED shadow, not a
  * blob, all in software off his existing bitmap. Drawn before the figure so he
  * overpaints its near edge. Skipped once he's settled flat (body covers it). */
+/* Unit direction pointing AWAY from the ceiling light nearest to (bx,by);
+ * falls back to (fallx,fally) when no lights exist or the caster stands
+ * directly under one. Shared by every floor-shadow caster. */
+static void nearest_light_dir(fx_t bx, fx_t by, fx_t fallx, fx_t fally,
+                              fx_t *odx, fx_t *ody) {
+    *odx = fallx; *ody = fally;
+    int32_t best_d2 = 0x7FFFFFFF; int best = -1;
+    for (int L = 0; L < NUM_LIGHTS; L++) {
+        int32_t dxc = (int32_t)((bx - lights[L].x) >> 8);
+        int32_t dyc = (int32_t)((by - lights[L].y) >> 8);
+        int32_t d2  = dxc * dxc + dyc * dyc;
+        if (d2 < best_d2) { best_d2 = d2; best = L; }
+    }
+    if (best >= 0) {
+        fx_t dx = bx - lights[best].x, dy = by - lights[best].y;
+        fx_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+        fx_t mx = adx > ady ? adx : ady, mn = adx > ady ? ady : adx;
+        fx_t mag = (mx - (mx >> 5)) + ((mn >> 1) - (mn >> 3));   /* ~sqrt */
+        if (mag > FX(0.06)) {
+            fx_t inv = fx_div_hw(FX_ONE, mag);
+            *odx = FX_MUL(dx, inv); *ody = FX_MUL(dy, inv);
+        }
+    }
+}
+
+/* Light-FIELD sample at (bx,by): sum the away-vectors of every ceiling light
+ * within 4 cells, weighted by distance. Winner-take-all nearest-light was
+ * draconian physics: between two fixtures the real contributions CANCEL
+ * (leaving only a contact pool under the object), while nearest-light
+ * flipped direction at every midpoint and pointed neighbouring chairs'
+ * casts AT each other. The net vector's magnitude classifies the shadow
+ * KIND: 0 balanced/under-a-light (contact only), 1 moderate imbalance,
+ * 2 one-sided — indexes the SHORT/MED/LONG stencil variants. Direction is
+ * the normalized net vector (fallback dir for the balanced case, where the
+ * near-symmetric SHORT stencil makes it cosmetic). */
+static int light_field_dir(fx_t bx, fx_t by, fx_t fallx, fx_t fally,
+                           fx_t *odx, fx_t *ody) {
+    int32_t vx = 0, vy = 0;
+    for (int L = 0; L < NUM_LIGHTS; L++) {
+        int32_t dxc = (int32_t)((bx - lights[L].x) >> 8);   /* 8.8 cells */
+        int32_t dyc = (int32_t)((by - lights[L].y) >> 8);
+        int32_t d2 = dxc * dxc + dyc * dyc;
+        if (d2 == 0 || d2 >= 1048576) continue;             /* >4 cells: negligible */
+        vx += (dxc << 14) / d2;                             /* ~cos/d falloff */
+        vy += (dyc << 14) / d2;
+    }
+    int32_t ax = vx < 0 ? -vx : vx, ay = vy < 0 ? -vy : vy;
+    int32_t mx2 = ax > ay ? ax : ay, mn2 = ax > ay ? ay : ax;
+    int32_t mag = (mx2 - (mx2 >> 5)) + ((mn2 >> 1) - (mn2 >> 3));
+    if (mag < 24) { *odx = fallx; *ody = fally; return 0; } /* balanced: contact */
+    *odx = (fx_t)(((int64_t)vx << FX_SHIFT) / mag);
+    *ody = (fx_t)(((int64_t)vy << FX_SHIFT) / mag);
+    return (mag < 80) ? 1 : 2;
+}
+
+/* Chair floor shadow: the baked plan-silhouette stencil (chair_shadow_tex.h —
+ * the box model sheared along the cast axis, v=0 row IS the near feet line)
+ * placed as a floor quad CONSTRUCTED FROM THE FEET: near edge anchor_fx
+ * toward the light from the chair centre (= the light-side feet line),
+ * extending len_fx away, width_fx laterally. Leg contact is geometric —
+ * there are no tuned constants here; all three numbers come from the bake. */
+static void draw_chair_shadow(int i, int col_start, int col_end,
+        fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
+        fx_t inv_det, int horizon_y, uint8_t *fb) {
+    fx_t bx = standups[i].x, by = standups[i].y;
+    int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    fx_t sdx, sdy;
+    int kind = light_field_dir(bx, by, -dirX, -dirY, &sdx, &sdy);
+    const chair_shadow_t *cs = &chair_shadows[kind];   /* SHORT/MED/LONG by field imbalance */
+    fx_t lpx = -sdy, lpy = sdx;                        /* lateral axis */
+    fx_t hw = cs->width_fx >> 1;
+    fx_t nx = bx - FX_MUL(sdx, cs->anchor_fx);         /* near feet line centre */
+    fx_t ny = by - FX_MUL(sdy, cs->anchor_fx);
+    fx_t fxp = nx + FX_MUL(sdx, cs->len_fx);
+    fx_t fyp = ny + FX_MUL(sdy, cs->len_fx);
+    fx_t cwx[4] = { nx - FX_MUL(lpx, hw), nx + FX_MUL(lpx, hw),
+                    fxp + FX_MUL(lpx, hw), fxp - FX_MUL(lpx, hw) };
+    fx_t cwy[4] = { ny - FX_MUL(lpy, hw), ny + FX_MUL(lpy, hw),
+                    fyp + FX_MUL(lpy, hw), fyp - FX_MUL(lpy, hw) };
+    int csx[4], csy[4]; fx_t cdep[4];
+    for (int c = 0; c < 4; c++) {
+        fx_t ddx = cwx[c] - px, ddy = cwy[c] - py;
+        fx_t depth = FX_MUL(inv_det, -FX_MUL(planeY, ddx) + FX_MUL(planeX, ddy));
+        if (depth < FX(0.25)) depth = FX(0.25);
+        cdep[c] = depth;
+        fx_t inv = fx_div_hw(FX_ONE, depth);
+        fx_t lat = FX_MUL(inv_det, FX_MUL(dirY, ddx) - FX_MUL(dirX, ddy));
+        csx[c] = (SCREEN_W >> 1) + (int)(((int32_t)(SCREEN_W >> 1) * FX_MUL(lat, inv)) >> FX_SHIFT);
+        csy[c] = horizon_y + (int)(((int64_t)focal * inv) >> FX_SHIFT);   /* floor */
+    }
+    fx_t depth = cdep[0];
+    int tw = cs->w, th = cs->h;
+    const fx_t QU[4] = { 0, (fx_t)tw << FX_SHIFT, (fx_t)tw << FX_SHIFT, 0 };
+    const fx_t QV[4] = { 0, 0, (fx_t)th << FX_SHIFT, (fx_t)th << FX_SHIFT };
+    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, 0, 0, 0,
+            csx[0],csy[0],QU[0],QV[0], csx[1],csy[1],QU[1],QV[1], csx[2],csy[2],QU[2],QV[2]);
+    tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, 0, 0, 0,
+            csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
+}
+
 static void draw_standup_shadow(int i, int col_start, int col_end,
         fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
         fx_t inv_det, int horizon_y, uint8_t *fb) {
@@ -2689,26 +2827,8 @@ static void draw_standup_shadow(int i, int col_start, int col_end,
      * Degenerate cases (no lights, or standing right under one) keep the old
      * camera-relative cast. Cheap: a few hundred int32 checks in the serial
      * sprite tail. KNOWN SIMPLIFICATION: nearest by raw distance, ignores walls. */
-    fx_t sdx = -dirX, sdy = -dirY;
-    {
-        int32_t best_d2 = 0x7FFFFFFF; int best = -1;
-        for (int L = 0; L < NUM_LIGHTS; L++) {
-            int32_t dxc = (int32_t)((bx - lights[L].x) >> 8);
-            int32_t dyc = (int32_t)((by - lights[L].y) >> 8);
-            int32_t d2  = dxc * dxc + dyc * dyc;
-            if (d2 < best_d2) { best_d2 = d2; best = L; }
-        }
-        if (best >= 0) {
-            fx_t dx = bx - lights[best].x, dy = by - lights[best].y;
-            fx_t adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
-            fx_t mx = adx > ady ? adx : ady, mn = adx > ady ? ady : adx;
-            fx_t mag = (mx - (mx >> 5)) + ((mn >> 1) - (mn >> 3));   /* ~sqrt(dx^2+dy^2) */
-            if (mag > FX(0.06)) {                    /* not standing directly under it */
-                fx_t inv = fx_div_hw(FX_ONE, mag);
-                sdx = FX_MUL(dx, inv); sdy = FX_MUL(dy, inv);
-            }
-        }
-    }
+    fx_t sdx, sdy;
+    nearest_light_dir(bx, by, -dirX, -dirY, &sdx, &sdy);
     /* Feet-edge tucked slightly UNDER him, back toward the light (-sd) — a
      * contact shadow sits a hair beneath the object, pulling both spread feet
      * into the top of the shadow to close the foot gap. Light-anchored like the
@@ -2809,6 +2929,26 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
     for (int oi = 0; oi < on; oi++) {
         int i = order[oi];
         if (standups[i].kind == CHAIR_SPRITE_KIND) {   /* near = true 3D, far = billboard */
+            /* Floor shadow FIRST so the chair overpaints its near edge — cast
+             * in BOTH tiers from the same fixed 3/4 silhouette, so the shadow
+             * is identical across the 4-cell LOD swap (no shadow pop). Gated:
+             * no light reaches a dark-room chair (no shadow, physically and
+             * because the dither would LIGHTEN the darkened floor), and past
+             * ~7 cells the cast is sub-pixel fog-food not worth the quad. */
+            /* Shadow only when it could possibly be seen: not toggled off,
+             * within 7 cells, lit cell, and not well BEHIND the camera —
+             * a cast is <=~0.6 cells long, so a chair more than a cell
+             * behind the view plane cannot reach the frame. Kills the
+             * quads (and their uncached per-pixel z-reads) for the half
+             * of the map at your back. */
+            fx_t cd = FX_MUL(standups[i].x - px, dirX)
+                    + FX_MUL(standups[i].y - py, dirY);
+            if (!SHARED_UC->shadows_off
+                && cd > -FX(1)
+                && d2[i] < (int64_t)FX(7) * FX(7)
+                && !cell_is_dark(standups[i].x, standups[i].y))
+                draw_chair_shadow(i, col_start, col_end, px, py, dirX, dirY,
+                                  planeX, planeY, inv_det, horizon_y, fb);
             if (chair_render[i]) {
                 uint16_t _cf0 = prof_frt_read();
                 draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
@@ -2822,7 +2962,11 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         }
         /* Floor shadow first (kind-2 cutouts), so the figure overpaints its near
          * edge — standing, leaning, or flat. Silhouette watchers cast none. */
-        if (standups[i].kind == 2 && !standups[i].silhouette)
+        if (standups[i].kind == 2 && !standups[i].silhouette
+            && !SHARED_UC->shadows_off
+            && d2[i] < (int64_t)FX(8) * FX(8)              /* was ungated by distance */
+            && (FX_MUL(standups[i].x - px, dirX)
+              + FX_MUL(standups[i].y - py, dirY)) > -FX(1))  /* not behind the camera */
             draw_standup_shadow(i, col_start, col_end, px, py, dirX, dirY,
                                 planeX, planeY, inv_det, horizon_y, fb);
         /* Shoved over. Clear floor ahead (fall_angle==64): fall FLAT via the
@@ -2846,13 +2990,15 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             }
             continue;
         }
-        /* Standing neanderthal: world-anchored textured quad (holds orientation
-         * as you circle it). The silhouette "watcher" keeps the old billboard. */
-        if (standups[i].kind == 2 && !standups[i].silhouette) {
-            draw_standup_quad(i, col_start, col_end, px, py, dirX, dirY,
-                              planeX, planeY, inv_det, horizon_y, fb);
-            continue;
-        }
+        /* Standing neanderthal: CHEAPENED. He is a FLAT standee, so the
+         * tex_tri world-quad (per-span divides + a per-pixel UV pair — the
+         * 7fps screen-filling incident) reduces exactly to the billboard
+         * column loop with the width foreshortened by the bearing cosine
+         * (sliver edge-on) and the cardboard back past 90 degrees, which
+         * the generic path's is_front logic already paints. He now falls
+         * through; only the width scale below is neanderthal-specific.
+         * The topple/lean paths keep the quad renderer (tilted geometry
+         * genuinely needs it). */
         fx_t sx = standups[i].x - px;
         fx_t sy = standups[i].y - py;
 
@@ -2903,6 +3049,36 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         } else {
             spriteHeight = (int)((((int32_t)SCREEN_H * 2) << FX_SHIFT) / (transformY * 3));
             spriteWidth  = spriteHeight >> 1;
+            if (standups[i].kind == 2 && !standups[i].silhouette) {
+                /* Flat-standee foreshortening: width scales by |cos| of the
+                 * bearing vs the standee's facing — full face-on, a sliver
+                 * edge-on. With the front/back swap this reproduces the
+                 * world-quad's look at billboard cost. (The watcher stays a
+                 * pure camera-facing billboard: it is MEANT to face you.) */
+                fx_t fwX = COS_FX(standups[i].facing_angle);
+                fx_t fwY = SIN_FX(standups[i].facing_angle);
+                fx_t dp = FX_MUL(sx, fwX) + FX_MUL(sy, fwY);
+                if (dp < 0) dp = -dp;
+                fx_t ax2 = sx < 0 ? -sx : sx, ay2 = sy < 0 ? -sy : sy;
+                fx_t mx3 = ax2 > ay2 ? ax2 : ay2, mn3 = ax2 > ay2 ? ay2 : ax2;
+                fx_t mag = (mx3 - (mx3 >> 5)) + ((mn3 >> 1) - (mn3 >> 3));
+                if (mag > 0) {
+                    fx_t cosrel = (fx_t)(((int64_t)dp << FX_SHIFT) / mag);
+                    if (cosrel > FX_ONE) cosrel = FX_ONE;
+                    spriteWidth = (int)(((int64_t)spriteWidth * cosrel) >> FX_SHIFT);
+                    if (spriteWidth < 2) spriteWidth = 2;   /* edge-on sliver */
+                }
+                /* Match the WORLD-anchored U direction of the quad/fall
+                 * renderers: their texture runs along the standee's width
+                 * axis (facing+64). If that axis projects to screen-LEFT
+                 * from where the viewer stands, mirror the blit — or the
+                 * push-to-topple handoff X-flips the figure mid-shove. */
+                fx_t wpx = COS_FX((uint8_t)(standups[i].facing_angle + 64));
+                fx_t wpy = SIN_FX((uint8_t)(standups[i].facing_angle + 64));
+                if (FX_MUL(inv_det,
+                        FX_MUL(dirY, wpx) - FX_MUL(dirX, wpy)) < 0)
+                    mirror = 1;
+            }
         }
         if (spriteWidth < 1) spriteWidth = 1;
         if (spriteHeight < 1) continue;
@@ -3012,7 +3188,16 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         }
 
         for (int stripe = drawStartX; stripe <= drawEndX; stripe++) {
-            if (transformY >= WALL_DIST(stripe)) continue;
+            int clip_bot = drawEndY;
+            if (transformY >= WALL_DIST(stripe)) {
+                /* Occluded — but by WHAT? A partial (see-over) divider only
+                 * hides the rows from its band top down; the standup's head
+                 * and shoulders above it stay visible (the neanderthal-
+                 * behind-a-partition bug: he vanished column-wide). */
+                int pt = PART_TOP(stripe);
+                if (!pt || pt <= drawStartY) continue;   /* full occluder */
+                if (pt - 1 < clip_bot) clip_bot = pt - 1;
+            }
 
             int texX = ((stripe - drawStartX_u) * tex_w) / spriteWidth;
             if (texX < 0 || texX >= tex_w) continue;
@@ -3029,8 +3214,10 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             uint8_t *p = fb + drawStartY * SCREEN_W + stripe;
             fx_t tex_pos = texY_start_v;
             /* texY can only overshoot the bottom of the texture (not go
-             * negative — tex_pos starts >= 0 and step is positive). */
-            for (int y = drawStartY; y <= drawEndY; y++) {
+             * negative — tex_pos starts >= 0 and step is positive).
+             * clip_bot < drawEndY when a see-over divider hides the lower
+             * rows: only the part above its band draws. */
+            for (int y = drawStartY; y <= clip_bot; y++) {
                 int texY = tex_pos >> FX_SHIFT;
                 if (texY >= tex_h) texY = tex_h - 1;
                 uint8_t v = col_base[texY * col_step];
@@ -3942,6 +4129,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
             p += SCREEN_W; bpos += bstep;
         }
         WALL_DIST(col) = best;   /* occlude lights/sprites behind the header */
+        PART_TOP(col) = 0;       /* header is full occlusion: no see-over */
     }
 }
 
@@ -4418,6 +4606,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     for (int col = col_start; col < col_end; col += cstep) {
         WALL_DIST(col) = 0x7FFFFFFF;
         if (hr) WALL_DIST(col + 1) = 0x7FFFFFFF;
+        PART_TOP(col) = 0;
+        if (hr) PART_TOP(col + 1) = 0;
         fx_t cameraX = cameraX_table[col];
         fx_t rayDirX = dirX + FX_MUL(planeX, cameraX);
         fx_t rayDirY = dirY + FX_MUL(planeY, cameraX);
@@ -5175,6 +5365,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                             ? ((lineHeight * part_height) >> 8)
                             : lineHeight;
         int wall_top  = wall_bot - draw_lineHeight;
+        /* Partial divider owns this column's z: record its band top so the
+         * sprite pass can draw a standup's rows ABOVE it (see-over). */
+        if (part_height) {
+            int16_t pt = (int16_t)(wall_top < 1 ? 1 : wall_top);
+            PART_TOP(col) = pt;
+            if (hr) PART_TOP(col + 1) = pt;
+        }
         int drawStart = wall_top < 0 ? 0 : wall_top;
         int drawEnd   = wall_bot >= SCREEN_H ? SCREEN_H - 1 : wall_bot;
         if (drawEnd >= fg_clip) drawEnd = fg_clip - 1;   /* band-covered rows */

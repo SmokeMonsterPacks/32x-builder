@@ -39,7 +39,7 @@ extern volatile int g_warp_request;
 
 #define AUDIO_CONTENT_ROWS    2   /* AMBIENCE, FOOTSTEPS */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
-#define VISUALS_CONTENT_ROWS  3   /* WALLS (h-res), VERT (v-res), METRICS */
+#define VISUALS_CONTENT_ROWS  4   /* WALLS, VERT, METRICS, SHADOWS */
 #define CREDITS_CONTENT_ROWS  0   /* BUILD/DATE/SHA are read-only display */
 
 static int      menu_active = 0;
@@ -182,6 +182,7 @@ void menu_update(uint16_t pad) {
             g_metrics_on ^= 1;
             if (!g_metrics_on) hud_genesis_blank();   /* wipe, don't just stop drawing */
         }
+        else if (menu_row == 4) SHARED_UC->shadows_off ^= 1;  /* A/B the shadow cost */
     }
 }
 
@@ -309,6 +310,8 @@ void menu_render(uint8_t *fb) {
                  SHARED_UC->vres_half ? "HALF" : "FULL");
         draw_row(fb, 48, menu_row == 3, "METRICS",
                  g_metrics_on ? " ON" : "OFF");
+        draw_row(fb, 56, menu_row == 4, "SHADOWS",
+                 SHARED_UC->shadows_off ? "OFF" : " ON");
     } else if (menu_tab == TAB_CREDITS) {
         /* CREDITS — read-only build stamp (no selection cursor). */
         menu_puts_pad(TX(X + 8), 32, "BUILD " VERSION_BUILD_STR, 20);

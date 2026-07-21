@@ -62,9 +62,26 @@ if [ "$DEPLOY" = "1" ]; then
     # duplicating it, by pointing it at the fetched ROM.
     # deploy-rom, NOT deploy: the latter depends on `release` and would rebuild
     # with this machine's toolchain, which is the whole thing we're avoiding.
+    #
+    # Fast reachability gate first: a powered-off MiSTer used to hang the
+    # script on ssh's slow TCP timeout (~30-75s per dark host). nc answers
+    # "is anyone listening on 22?" in ~2s, so sleeping MiSTers are skipped
+    # cleanly and an awake one deploys immediately.
+    OFFICE="${MISTER:-root@mister.office.local}"
+    TV="${MISTER_TV:-root@mister.tv.local}"
+    mister_up() { nc -z -G 2 -w 2 "${1#*@}" 22 >/dev/null 2>&1; }
+
     echo "==> Deploying $TAG to the MiSTers (exact release bytes, no rebuild)"
-    make deploy-rom    ROM="$ROM" || echo "    (office MiSTer unreachable)"
-    make deploy-rom-tv ROM="$ROM" || echo "    (tv MiSTer unreachable)"
+    if mister_up "$OFFICE"; then
+        make deploy-rom ROM="$ROM" MISTER="$OFFICE" || echo "    (office deploy failed)"
+    else
+        echo "    office MiSTer (${OFFICE#*@}): not on the network — skipped"
+    fi
+    if mister_up "$TV"; then
+        make deploy-rom-tv ROM="$ROM" MISTER_TV="$TV" || echo "    (tv deploy failed)"
+    else
+        echo "    tv MiSTer (${TV#*@}): not on the network — skipped"
+    fi
 fi
 
 echo
