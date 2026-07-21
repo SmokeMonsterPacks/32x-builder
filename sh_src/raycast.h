@@ -93,6 +93,7 @@ void raycast_init(void);
  * the lobby->map fade. Call inside vblank. */
 #define FADE_STEPS 16
 void raycast_set_brightness(int lvl);
+void raycast_paint_chair_ramp(void);   /* chair CRAM entries, full bright */
 /* Fill world_map/partitions and park the player. Call before raycast_init
  * (or before re-calling init_lights) so the lighting grid matches. */
 void raycast_load_fixed(void);
@@ -140,6 +141,7 @@ void raycast_draw_sprites(int col_start, int col_end);
 void raycast_purge_sprite_cache(void);
 void standups_clear(void);   /* reset free-standing objects (neanderthals/chairs) */
 void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind);
+int  raycast_standup_in_cell(int cx, int cy);  /* procgen spawn-overlap guard */
 void raycast_add_dark_room(int x0, int y0, int x1, int y1);
 
 #endif

@@ -149,6 +149,11 @@ uint8_t world_map[MAP_H][MAP_W];
 #define FLOOR_BASE   17
 #define CEIL_BASE    33
 #define LIGHT_BASE   49     /* 4 entries: full / 75% / 50% / 25% for flicker */
+#define CHAIR_BASE   53     /* 4 entries: chair wood, its own ramp — DOOR_DARK
+                             * (shared with the door recess) bottoms at near-black,
+                             * which fog turned every in-game chair into. This ramp
+                             * is a touch lighter at both ends so a fogged chair
+                             * still reads as dark wood, not silhouette. */
 #define NEANDER_BASE 64     /* 8 entries: 0=cardboard back, 1-7=figure shades */
 #define SHADE_LEVELS 16
 /* Projected-silhouette shadow: the figure's own texture laid flat on the floor,
@@ -376,6 +381,18 @@ static uint8_t standup_lean_angle(fx_t reach, fx_t L) {
 /* Append a free-standing object (neanderthal kind 2 / chair kind 3) at a world
  * position, UPRIGHT (down/fall state already cleared by standups_clear). Used
  * by procgen, which authors its own instead of inheriting the previous map's. */
+/* Does any standup already occupy grid cell (cx,cy)? Procgen's spawn guard:
+ * two assets in one cell interpenetrate. Deliberately NOT enforced inside
+ * raycast_add_standup — hand-authored maps keep the right to overlap (the
+ * banked merged-furniture set-dressing feature). */
+int raycast_standup_in_cell(int cx, int cy) {
+    for (int i = 0; i < num_standups; i++)
+        if ((int)(standups[i].x >> FX_SHIFT) == cx
+         && (int)(standups[i].y >> FX_SHIFT) == cy)
+            return 1;
+    return 0;
+}
+
 void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind) {
     if (num_standups >= MAX_STANDUPS) return;
     standups[num_standups].x            = x;
@@ -1104,6 +1121,18 @@ static void build_shading_tables(void) {
 /* Set the gameplay palette scaled to brightness lvl/FADE_STEPS (FADE_STEPS
  * = full bright, 0 = black) — drives the lobby->map fade-through-black.
  * Must be called inside vblank (CRAM write). FADE_STEPS is in raycast.h. */
+/* The chair's 4 CRAM entries at full brightness — single source of truth.
+ * Also called by the asset viewer, whose host screen (the start-menu hero
+ * image) paints ALL 256 CRAM entries with its own palette: without this
+ * repaint the viewer chair renders in whatever the hero image left at
+ * 53-56 (it read TAN long after the game itself was fixed). */
+void raycast_paint_chair_ramp(void) {
+    Hw32xSetBGColor(CHAIR_BASE + 0, 12, 10,  7);
+    Hw32xSetBGColor(CHAIR_BASE + 1, 15, 12,  9);
+    Hw32xSetBGColor(CHAIR_BASE + 2, 17, 14, 11);
+    Hw32xSetBGColor(CHAIR_BASE + 3, 18, 15, 12);
+}
+
 void raycast_set_brightness(int lvl) {
     if (lvl < 0) lvl = 0; else if (lvl > FADE_STEPS) lvl = FADE_STEPS;
     Hw32xSetBGColor(0, 0, 0, 0);
@@ -1119,6 +1148,11 @@ void raycast_set_brightness(int lvl) {
         static const uint8_t lt[4][3] = {{31,31,28},{23,23,21},{15,15,14},{7,7,7}};
         for (int i = 0; i < 4; i++)
             Hw32xSetBGColor(LIGHT_BASE + i, lt[i][0]*lvl/FADE_STEPS, lt[i][1]*lvl/FADE_STEPS, lt[i][2]*lvl/FADE_STEPS);
+    }
+    {
+        static const uint8_t ch[4][3] = { {12,10,7}, {15,12,9}, {17,14,11}, {18,15,12} };
+        for (int i = 0; i < 4; i++)
+            Hw32xSetBGColor(CHAIR_BASE + i, ch[i][0]*lvl/FADE_STEPS, ch[i][1]*lvl/FADE_STEPS, ch[i][2]*lvl/FADE_STEPS);
     }
     {
         static const uint8_t nb[8][3] = {{16,11,5},{2,2,1},{7,5,3},{11,8,6},{16,12,9},{19,16,13},{23,20,17},{26,22,19}};
@@ -1254,6 +1288,8 @@ static void build_palette(void) {
     Hw32xSetBGColor(DOOR_DARK_BASE + 1,  7,  5,  3);
     Hw32xSetBGColor(DOOR_DARK_BASE + 2,  9,  7,  5);
     Hw32xSetBGColor(DOOR_DARK_BASE + 3, 12, 10,  7);
+    /* Chair wood — its own ramp, a touch lighter than the door recess. */
+    raycast_paint_chair_ramp();
     /* Soft stipple dapple — the door ramp nudged ~1-2 darker (barely there). */
     Hw32xSetBGColor(STIPPLE_BASE + 0, 13, 11,  8);
     Hw32xSetBGColor(STIPPLE_BASE + 1, 16, 14, 10);
@@ -2320,10 +2356,13 @@ static void draw_falling_standup(int i, int col_start, int col_end,
  * per-column z-test against WALL_DIST so walls occlude it. Rides the
  * neanderthal brown ramp (NEANDER_BASE + 1..7). */
 static uint8_t chair_face_shade(int axis, fx_t fc, fx_t fs) {
-    /* Door brown (DOOR_BASE 0..4, all warm browns) — the chair is wood, not
-     * the neanderthal's tan. Indices returned here are DOOR_BASE offsets. */
-    if (axis == 2) return 2;                 /* top: mid-dark door brown (was 4, washed out) */
-    if (axis == 3) return 0;                 /* bottom: darkest brown (was 1) */
+    /* DARK wood — the DOOR ramp turned out to be a light taupe (the chair
+     * read TAN in a lit hallway), so the chair rides DOOR_DARK_BASE 0..3,
+     * the door-in-shadow chocolate browns. Offsets returned are DOOR_DARK
+     * offsets: top 3 (brightest dark, catches the ceiling light), bottom 0,
+     * sides 0..2 by facing. */
+    if (axis == 2) return 3;                 /* top */
+    if (axis == 3) return 0;                 /* bottom: deepest brown */
     int32_t nx, nz;
     switch (axis) {
     case 0: nx =  FX_ONE; nz = 0; break;     /* +x */
@@ -2449,7 +2488,14 @@ static void draw_chair_3d(int i, int col_start, int col_end,
             if (cclip[vi[0]] || cclip[vi[1]] || cclip[vi[2]] || cclip[vi[3]]) continue;
             int32_t ax = csx[vi[1]]-csx[vi[0]], ay = csy[vi[1]]-csy[vi[0]];
             int32_t bx2 = csx[vi[2]]-csx[vi[0]], by = csy[vi[2]]-csy[vi[0]];
-            if (ax * by - ay * bx2 <= 0) continue;            /* backface */
+            /* Backface cull. Sign proven against the engine's own projection
+             * (plane = (-dirY,dirX)*0.66, det = -0.66, screen y down): visible
+             * front faces project NEGATIVE cross. The old <= kept the far
+             * faces — every box rendered inside-out. The silhouette was
+             * identical (closed box), but each shade came from the OPPOSITE
+             * face: seat top wore the bottom's darkest shade in-game while
+             * the (cull-free) viewer showed it lit. */
+            if (ax * by - ay * bx2 >= 0) continue;
             faces[nf].depth = (cdep[vi[0]]+cdep[vi[1]]+cdep[vi[2]]+cdep[vi[3]]) >> 2;
             faces[nf].shade = chair_face_shade(f, fc, fs);
             for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
@@ -2492,7 +2538,7 @@ static void draw_chair_3d(int i, int col_start, int col_end,
         /* A chair standing in a dark room honors the dark: collapse to the
          * deepest brown so it reads as a shape in the gloom, like the walls. */
         if (cell_is_dark(cx, cy)) shade = 0;
-        uint8_t c = (uint8_t)(DOOR_BASE + shade);
+        uint8_t c = (uint8_t)(CHAIR_BASE + shade);
         if (SHARED_UC->chair_tex) {
             /* MODE+A A/B: route the two face triangles through the shipping
              * textured rasterizer (tex_tri), sampling wall_tex (16x16,
@@ -2757,10 +2803,36 @@ static void draw_chair_shadow(int i, int col_start, int col_end,
         fx_t inv_det, int horizon_y, uint8_t *fb) {
     fx_t bx = standups[i].x, by = standups[i].y;
     int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    uint8_t fa = standups[i].facing_angle;
+    fx_t fc = COS_FX((uint8_t)(fa + 64)), fs = -SIN_FX((uint8_t)(fa + 64));
     fx_t sdx, sdy;
-    int kind = light_field_dir(bx, by, -dirX, -dirY, &sdx, &sdy);
-    const chair_shadow_t *cs = &chair_shadows[kind];   /* SHORT/MED/LONG by field imbalance */
-    fx_t lpx = -sdy, lpy = sdx;                        /* lateral axis */
+    /* Balanced-field fallback casts toward the chair's BACK (deterministic per
+     * chair) — the old camera-based fallback would make the yaw pick below
+     * swim as the player circles a chair sitting under a light. */
+    int kind = light_field_dir(bx, by, -COS_FX(fa), -SIN_FX(fa), &sdx, &sdy);
+    /* Yaw sector: the cast direction expressed against the chair's OWN facing
+     * picks WHICH silhouette — light on the back throws the slat tongue, light
+     * on the side throws the thin profile. Same argmax-dot picker as the
+     * directional billboards; sector tables (angle/yaw/mirror) come from the
+     * bake. Each candidate angle a is the cast in MODEL frame (-sin a, cos a),
+     * pushed through the same fc/fs rotation draw_chair_3d uses. */
+    int best = 0; fx_t bestd = 0; int first = 1;
+    for (int k = 0; k < CHAIR_SHADOW_SECTORS; k++) {
+        uint8_t a = chair_shadow_sect_a[k];
+        fx_t ms = SIN_FX(a), mc = COS_FX(a);
+        fx_t wdx = FX_MUL(-ms, fc) + FX_MUL(mc, fs);
+        fx_t wdy = FX_MUL(ms, fs) + FX_MUL(mc, fc);
+        fx_t d = FX_MUL(sdx, wdx) + FX_MUL(sdy, wdy);
+        if (first || d > bestd) { best = k; bestd = d; first = 0; }
+    }
+    const chair_shadow_t *cs =
+        &chair_shadows[chair_shadow_sect_yaw[best]][kind]; /* [yaw][SHORT/MED/LONG] */
+    int mir = chair_shadow_sect_mir[best];
+    /* Lateral axis is CW-90 of the cast — the bake's u axis. (CCW here mirrored
+     * every stencil; invisible on the symmetric y0 shape, sim-caught on the
+     * y45/y135 diagonals: IoU 0.58 CCW vs 0.97 CW against the ground-truth
+     * sheared footprint.) */
+    fx_t lpx = sdy, lpy = -sdx;
     fx_t hw = cs->width_fx >> 1;
     fx_t nx = bx - FX_MUL(sdx, cs->anchor_fx);         /* near feet line centre */
     fx_t ny = by - FX_MUL(sdy, cs->anchor_fx);
@@ -2783,7 +2855,11 @@ static void draw_chair_shadow(int i, int col_start, int col_end,
     }
     fx_t depth = cdep[0];
     int tw = cs->w, th = cs->h;
-    const fx_t QU[4] = { 0, (fx_t)tw << FX_SHIFT, (fx_t)tw << FX_SHIFT, 0 };
+    /* Mirror sectors reuse the direct yaw's stencil u-flipped (the chair is
+     * left-right symmetric, same trick as the billboard set). */
+    const fx_t UA = mir ? ((fx_t)tw << FX_SHIFT) : 0;
+    const fx_t UB = mir ? 0 : ((fx_t)tw << FX_SHIFT);
+    const fx_t QU[4] = { UA, UB, UB, UA };
     const fx_t QV[4] = { 0, 0, (fx_t)th << FX_SHIFT, (fx_t)th << FX_SHIFT };
     tex_tri(fb, col_start, col_end, depth, cs->tex, tw, th, 0, 0, 1, 0, 0, 0,
             csx[0],csy[0],QU[0],QV[0], csx[1],csy[1],QU[1],QV[1], csx[2],csy[2],QU[2],QV[2]);
@@ -3175,8 +3251,11 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             }
             for (int k = 1; k < 8; k++) {
                 if (is_chair) {
-                    int sh = (k - 1) - fog; if (sh < 0) sh = 0;
-                    vmap[k] = (uint8_t)(DOOR_BASE + sh);
+                    /* Dark ramp is 4 deep; sprite texels run 1..5, so the
+                     * brightest collapses into the ramp top. */
+                    int sh = (k - 1) - fog;
+                    if (sh < 0) sh = 0; else if (sh > 3) sh = 3;
+                    vmap[k] = (uint8_t)(CHAIR_BASE + sh);
                 } else if (is_silhouette) {
                     vmap[k] = silhouette_color;
                 } else if (is_front) {
@@ -3258,43 +3337,107 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
      * around to the flat cardboard back, hi-res LOD inside 3 cells. The 32X
      * has no sprite hardware; this rasterizer IS the scaling. skip_z: the
      * viewer owns the screen, the stale wall z-buffer must not clip it. */
-    /* Storage varies by asset family: WALL-mount decals (door/outlet) are
-     * baked COLUMN-major [W][H] for the wall-column path's cache pattern;
-     * free-standing lo-res (neanderthal/chair) is row-major. Hi-res variants
-     * are always column-major. Get it wrong and the texture transposes. */
+    /* Texture layout is a PER-ASSET property (SPRITE_F_COLMAJOR): the door
+     * is [W][H] for the wall-column cache pattern, the outlet is wall-mounted
+     * yet row-major — inferring layout from mount type transposed it into
+     * speckle noise. Hi-res variants are always column-major. */
     const uint8_t *tex = sd->tex;
     int tw = sd->w, th = sd->h;
-    int col_major = (sd->mount == SPRITE_MOUNT_WALL);
+    int col_major = (sd->flags & SPRITE_F_COLMAJOR) != 0;
     if (dist < FX(3) && sd->tex_hi) {
         tex = sd->tex_hi; tw = sd->w_hi; th = sd->h_hi;
         col_major = 1;
+    }
+    uint8_t fbase = sd->base;
+    if (sd->decode == SPRITE_DECODE_DOOR) {
+        /* The door doesn't decode base+v like other sprites — its texels
+         * (0..18) index the wall pass's multi-ramp dlut (leaf greys, EXIT
+         * green, handle bronze, jamb). The generic path painted them as
+         * DOOR_BASE offsets: a pale speckled slab with a scrambled sign.
+         * Pre-decode ONCE into a scratch copy holding final CRAM indices
+         * (door_shade 1 = the viewer's one-fog-step convention; texel 0 =
+         * wall surround in game -> transparent here) and draw with base 0. */
+        static uint8_t door_pv[DOOR_TEX_WIDTH * DOOR_TEX_HEIGHT];
+        static int door_pv_built = 0;
+        if (!door_pv_built) {
+            static const uint8_t finegrey[14] = {
+                DOOR_DARK_BASE + 0, DOOR_DARK_BASE + 1, DOOR_DARK_BASE + 2, DOOR_DARK_BASE + 3,
+                STIPPLE_BASE + 0, DOOR_BASE + 0, STIPPLE_BASE + 1, DOOR_BASE + 1,
+                STIPPLE_BASE + 2, DOOR_BASE + 2, STIPPLE_BASE + 3, DOOR_BASE + 3,
+                STIPPLE_BASE + 4, DOOR_BASE + 4 };
+            const int door_shade = 1, sh2 = 2;
+            uint8_t dlut[19];
+            dlut[0] = 0;
+            for (int g = 0; g < 5; g++) {
+                int bi = 5 + 2 * g - sh2; if (bi < 0) bi = 0;
+                int si = 4 + 2 * g - sh2; if (si < 0) si = 0;
+                dlut[1 + g] = finegrey[bi];
+                dlut[9 + g] = finegrey[si];
+            }
+            dlut[6] = (uint8_t)(DOOR_BASE + 5);
+            dlut[7] = (uint8_t)(DOOR_BASE + 6);
+            dlut[8] = (uint8_t)(DOOR_BASE + 7);
+            for (int i2 = 0; i2 < 4; i2++) {
+                int hp = i2 - door_shade; if (hp < 0) hp = 0;
+                dlut[14 + i2] = (uint8_t)(HANDLE_BASE + hp);
+            }
+            { int fp = 4 - door_shade; if (fp < 0) fp = 0;
+              dlut[18] = (uint8_t)(FRAME_BASE + fp); }
+            for (int i2 = 0; i2 < DOOR_TEX_WIDTH * DOOR_TEX_HEIGHT; i2++) {
+                uint8_t t = ((const uint8_t *)door_tex)[i2];
+                door_pv[i2] = (t > 18) ? 0 : dlut[t];
+            }
+            door_pv_built = 1;
+        }
+        tex = door_pv;
+        fbase = 0;
     }
     if (dist < FX(0.4)) dist = FX(0.4);
     fx_t Hh = sd->world_h;
     fx_t hw = (fx_t)(((int64_t)Hh * sd->w) / (2 * sd->h));   /* half-width, lo-res aspect */
     fx_t cyw = COS_FX(yaw), syw = SIN_FX(yaw);
-    fx_t latR = FX_MUL(hw, cyw), depR = FX_MUL(hw, syw);
     const int oxc = SCREEN_W / 2, oyc = SCREEN_H / 2 + 12;
-    int csx[4], csy[4];
-    for (int c = 0; c < 4; c++) {          /* 0=BL 1=BR 2=TR 3=TL */
-        int right = (c == 1 || c == 2);
-        fx_t lat = right ? latR : -latR;
-        fx_t d   = dist + (right ? depR : -depR);
-        if (d < FX(0.2)) d = FX(0.2);
-        fx_t inv = fx_div_hw(FX_ONE, d);
-        csx[c] = oxc + (int)(((int64_t)(SCREEN_W / 2) * FX_MUL(lat, inv)) >> FX_SHIFT);
-        int dy = (int)((FX_MUL(Hh >> 1, inv) * (int64_t)SCREEN_H) >> FX_SHIFT);
-        csy[c] = (c >= 2) ? oyc - dy : oyc + dy;
-    }
     int is_front = (cyw >= 0);
-    const fx_t QU[4] = { 0, (fx_t)tw << FX_SHIFT, (fx_t)tw << FX_SHIFT, 0 };
-    const fx_t QV[4] = { (fx_t)th << FX_SHIFT, (fx_t)th << FX_SHIFT, 0, 0 };
-    tex_tri(fb, 0, SCREEN_W, dist, tex, tw, th, col_major, 1, 0,
-            sd->base, (uint8_t)(sd->base + 0), is_front,
-            csx[0],csy[0],QU[0],QV[0], csx[1],csy[1],QU[1],QV[1], csx[2],csy[2],QU[2],QV[2]);
-    tex_tri(fb, 0, SCREEN_W, dist, tex, tw, th, col_major, 1, 0,
-            sd->base, (uint8_t)(sd->base + 0), is_front,
-            csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
+    uint8_t back_c = (uint8_t)(sd->base + 0);
+    /* EXACT per-column render. The preview quad is VERTICAL and screen
+     * columns are vertical, so each screen column meets the quad at ONE
+     * depth: invert the projection per column (solve the quad's lateral
+     * coordinate l from screen x) and both U and V map perspective-exactly —
+     * the same reason the wall raycaster never warps. This replaced the
+     * strip-subdivided tex_tri pair, whose residual affine error still
+     * showed as serrated silhouette edges and a sheared handle: there is
+     * no interpolation left to be wrong, and two divides per column beat
+     * the strips' per-scanline setup anyway. */
+    for (int x = 0; x < SCREEN_W; x++) {
+        fx_t xp = ((fx_t)(x - oxc) << FX_SHIFT) / (SCREEN_W / 2);
+        fx_t den = cyw - FX_MUL(xp, syw);
+        if (den > -FX(0.02) && den < FX(0.02)) continue;   /* column parallel to quad */
+        fx_t l = (fx_t)(((int64_t)FX_MUL(xp, dist) << FX_SHIFT) / den);
+        if (l < -hw || l > hw) continue;                   /* misses the quad */
+        fx_t d = dist + FX_MUL(l, syw);
+        if (d < FX(0.2)) continue;                         /* behind/at the near plane */
+        fx_t inv = fx_div_hw(FX_ONE, d);
+        int dy = (int)((FX_MUL(Hh >> 1, inv) * (int64_t)SCREEN_H) >> FX_SHIFT);
+        int ytop = oyc - dy, ybot = oyc + dy;
+        int u = (int)(((int64_t)(l + hw) * tw) / ((int64_t)hw << 1));
+        if (u < 0) u = 0; else if (u >= tw) u = tw - 1;
+        const uint8_t *cb = col_major ? tex + u * th : tex + u;
+        int cstep = col_major ? 1 : tw;
+        int y0c = ytop < 0 ? 0 : ytop;
+        int y1c = ybot >= SCREEN_H ? SCREEN_H - 1 : ybot;
+        int span = ybot - ytop; if (span < 1) span = 1;
+        fx_t vstep = ((fx_t)th << FX_SHIFT) / span;
+        fx_t vpos = (fx_t)(y0c - ytop) * vstep;
+        uint8_t *p = fb + y0c * SCREEN_W + x;
+        for (int y = y0c; y <= y1c; y++) {
+            int tv = vpos >> FX_SHIFT;
+            if (tv >= th) tv = th - 1;
+            uint8_t t = cb[tv * cstep];
+            if (t) *p = is_front ? (uint8_t)(fbase + t) : back_c;
+            p += SCREEN_W;
+            vpos += vstep;
+        }
+    }
 }
 
 /* ---- Live 3D mesh viewer (asset viewer) ------------------------------
@@ -3319,7 +3462,10 @@ static uint16_t bx_tri[BXT][3];
 static uint8_t  bx_shade[BXT];
 static int      bx_built = 0;
 static void build_box_mesh(void) {
-    static const uint8_t axsh[6] = { 4, 4, 6, 2, 3, 3 };  /* +x -x top bottom +z -z */
+    /* bx_shade stores the FACE AXIS (0..5), not a shade: the GAME variant is
+     * shaded live through chair_face_shade at render time, fed the viewer's
+     * own yaw — so spinning the chair sweeps exactly the in-game shades
+     * (fixed world light), instead of a static per-axis approximation. */
     int nt = 0;
     for (int b = 0; b < CHAIR_NBOXES; b++) {
         const cbox_t *bx = &chair_boxes[b];
@@ -3331,9 +3477,9 @@ static void build_box_mesh(void) {
         for (int f = 0; f < 6; f++) {
             const uint8_t *vi = chair_face_v[f];
             bx_tri[nt][0]=(uint16_t)(b*8+vi[0]); bx_tri[nt][1]=(uint16_t)(b*8+vi[1]);
-            bx_tri[nt][2]=(uint16_t)(b*8+vi[2]); bx_shade[nt++] = axsh[f];
+            bx_tri[nt][2]=(uint16_t)(b*8+vi[2]); bx_shade[nt++] = (uint8_t)f;
             bx_tri[nt][0]=(uint16_t)(b*8+vi[0]); bx_tri[nt][1]=(uint16_t)(b*8+vi[2]);
-            bx_tri[nt][2]=(uint16_t)(b*8+vi[3]); bx_shade[nt++] = axsh[f];
+            bx_tri[nt][2]=(uint16_t)(b*8+vi[3]); bx_shade[nt++] = (uint8_t)f;
         }
     }
     bx_built = 1;
@@ -3389,8 +3535,16 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
         for (int t = 0; t < ntr; t++) {
             const uint16_t *ti = mtris[t];
             int sh = msh[t];
-            int r = (sh - 1) * 5 / 7; if (r < 0) r = 0; else if (r > 4) r = 4;
-            uint8_t c = (uint8_t)(DOOR_BASE + r);
+            /* GAME variant: bx_shade holds the face AXIS — shade through the
+             * in-game path itself, with the viewer yaw standing in for the
+             * chair's facing (the two rotations share one formula). Hero mesh
+             * keeps its baked 1..7 lum, remapped onto the same 0..3 ramp. */
+            int r = (variant == 1) ? chair_face_shade(sh, cyy, syy)
+                                   : (sh - 1) * 4 / 7;
+            r -= 1;                     /* one fog step: the game's typical viewing
+                                         * distance (>2 cells) — raw ramp read tan */
+            if (r < 0) r = 0; else if (r > 3) r = 3;
+            uint8_t c = (uint8_t)(CHAIR_BASE + r);
             mv_line(fb, mv_px[ti[0]], mv_py[ti[0]], mv_px[ti[1]], mv_py[ti[1]], c);
             mv_line(fb, mv_px[ti[1]], mv_py[ti[1]], mv_px[ti[2]], mv_py[ti[2]], c);
             mv_line(fb, mv_px[ti[2]], mv_py[ti[2]], mv_px[ti[0]], mv_py[ti[0]], c);
@@ -3410,9 +3564,12 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
     for (int oi = 0; oi < ntr; oi++) {
         const uint16_t *ti = mtris[mv_order[oi]];
         int x0=mv_px[ti[0]],y0=mv_py[ti[0]], x1=mv_px[ti[1]],y1=mv_py[ti[1]], x2=mv_px[ti[2]],y2=mv_py[ti[2]];
-        int sh = msh[mv_order[oi]];                          /* 1..7 -> door ramp 0..4 */
-        int r = (sh - 1) * 5 / 7; if (r < 0) r = 0; else if (r > 4) r = 4;
-        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(DOOR_BASE + r),
+        int sh = msh[mv_order[oi]];
+        int r = (variant == 1) ? chair_face_shade(sh, cyy, syy)   /* live in-game shading */
+                               : (sh - 1) * 4 / 7;                /* hero: baked lum 1..7 */
+        r -= 1;                                   /* one fog step, as seen in game */
+        if (r < 0) r = 0; else if (r > 3) r = 3;
+        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(CHAIR_BASE + r),
                        0, 0, 0, 0, SCREEN_W, fb);
     }
 }

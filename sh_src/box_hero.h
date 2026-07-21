@@ -8,5 +8,6 @@
  * caller hands off to the live low-res 3D box for the open + dive. A
  * static frame is nearly free, so it can be full-res and photoreal. */
 void box_hero_show(void);
+void box_hero_palette(void);   /* repaint the hero palette only */
 
 #endif

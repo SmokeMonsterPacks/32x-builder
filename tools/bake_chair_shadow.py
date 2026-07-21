@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Bake the chair's floor-shadow stencils from the in-game box model.
 
-A chair shadow from a ceiling light is the PLAN silhouette sheared along the
-cast direction: every model point (x, y, z) lands on the floor at
-(x, z + y*k) — taller parts throw farther. Three shear factors give a
-short/medium/long series. The stencil's v=0 row IS the near feet line
-(model z = -0.26), so the engine anchors it on the light-side feet and
-contact is guaranteed by construction, not by tuned constants.
+A chair shadow is the PLAN silhouette sheared along the cast direction, and
+the silhouette DEPENDS ON ORIENTATION: light on the chair's back throws the
+tall tongue, light on its side throws the thin back-bar edge plus the seat
+slab. So the bake is a MATRIX: model yaw (light direction in the chair's
+frame) x shear length. Yaws cover the half circle; the chair is left-right
+symmetric so the engine mirrors for the other half, exactly like the
+directional billboards. Sector tables (chair-frame angle, stencil index,
+mirror flag) are emitted alongside so the runtime picker is data-driven.
 
-Emits sh_src/chair_shadow_tex.h: per-variant stencils (1 = shadow texel,
-0 = empty, ROW-MAJOR tex[v][u]) plus world-space placement metadata in
-16.16 fx derived from CHAIR_WORLD_H_FX scaling. Run with --strip to eyeball
-the shapes before any ROM build.
+Every stencil's v=0 row IS its near feet line and all placement numbers
+(anchor/length/width, in world fx) are emitted from geometry at bake time.
+
+    tools/bake_chair_shadow.py --yaws 0,45,90,135,180 --shears 0.5,0.9,1.4
 """
 import argparse, math, os, re, sys
 from PIL import Image, ImageDraw
@@ -36,94 +38,129 @@ def load_boxes():
 
 FACES = [(0,1,3,2),(4,5,7,6),(0,1,5,4),(2,3,7,6),(0,2,6,4),(1,3,7,5)]
 
-def bake(k, W=40, hires=280):
-    """Silhouette for shear factor k. Model x lateral, w = z + y*k cast axis."""
+
+def bake(yaw_deg, k, W=40, hires=280):
+    """Silhouette for model yaw (deg) then shear k along +w (the cast axis)."""
     boxes = load_boxes()
-    x_lo, x_hi = -0.26, 0.26
-    w_lo = -0.26                      # near feet line (legs at z=-0.26, y=0)
-    w_hi = 0.26 + k                   # back posts (z=0.26, y=1.0) thrown k
+    th = math.radians(yaw_deg)
+    c, s = math.cos(th), math.sin(th)
+    pts_all = []
+    for (x0, y0, z0, x1, y1, z1) in boxes:
+        pts = []
+        for cc in range(8):
+            x = x1 if cc & 1 else x0
+            y = y1 if cc & 2 else y0
+            z = z1 if cc & 4 else z0
+            xr = x * c + z * s          # yaw the model about vertical
+            zr = -x * s + z * c
+            pts.append((xr, zr + y * k))  # plan + shear
+        pts_all.append(pts)
+    xs = [p[0] for ps in pts_all for p in ps]
+    ws = [p[1] for ps in pts_all for p in ps]
+    x_lo, x_hi = min(xs), max(xs)
+    w_hi = max(ws)
+    # near feet line: min plan-w of the FEET (y=0 corners) after yaw
+    w_feet = min(p[1] for ps, box in zip(pts_all, boxes)
+                 for i, p in enumerate(ps) if not (i & 2) and box[1] == 0.0)              if any(b[1] == 0.0 for b in boxes) else min(ws)
+    w_lo = min(ws)
     sx = hires / (x_hi - x_lo)
-    sw = 1                            # keep aspect: same scale both axes
     H = max(1, round(hires * (w_hi - w_lo) / (x_hi - x_lo)))
     swl = H / (w_hi - w_lo)
     img = Image.new('1', (hires, H), 0)
     d = ImageDraw.Draw(img)
-    for (x0, y0, z0, x1, y1, z1) in boxes:
-        pts = []
-        for c in range(8):
-            x = x1 if c & 1 else x0
-            y = y1 if c & 2 else y0
-            z = z1 if c & 4 else z0
-            u = (x - x_lo) * sx
-            v = ((z + y * k) - w_lo) * swl
-            pts.append((u, v))
-        for f in FACES:                       # union of projected faces = silhouette
-            d.polygon([pts[i] for i in f], fill=1)
+    for ps in pts_all:
+        pp = [((p[0] - x_lo) * sx, (p[1] - w_lo) * swl) for p in ps]
+        for f in FACES:
+            d.polygon([pp[i] for i in f], fill=1)
     Hs = max(1, round(W * H / hires))
-    small = img.resize((W, Hs), Image.BOX)    # BOX downsample: any coverage -> gray
+    small = img.resize((W, Hs), Image.BOX)
     grid = [[1 if small.getpixel((u, v)) else 0 for u in range(W)] for v in range(Hs)]
     meta = {
-        "anchor_fx": FX(0.26 * WORLD_SCALE),          # center -> near feet line, along -light
-        "len_fx":    FX((w_hi - w_lo) * WORLD_SCALE), # stencil world length along +cast
-        "width_fx":  FX((x_hi - x_lo) * WORLD_SCALE), # stencil world width (lateral)
+        # anchor: chair centre -> the stencil's w_lo edge, along -cast
+        "anchor_fx": FX(-w_lo * WORLD_SCALE),
+        "len_fx":    FX((w_hi - w_lo) * WORLD_SCALE),
+        "width_fx":  FX((x_hi - x_lo) * WORLD_SCALE),
     }
     return grid, W, Hs, meta
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--yaws", default="0,45,90,135,180")
     ap.add_argument("--shears", default="0.5,0.9,1.4", help="short,medium,long")
     ap.add_argument("--width", type=int, default=40)
     ap.add_argument("--strip", default="")
     args = ap.parse_args()
+    yaws = [float(y) for y in args.yaws.split(",")]
     ks = [float(s) for s in args.shears.split(",")]
-    names = ["SHORT", "MED", "LONG"][:len(ks)]
-    variants = [bake(k, args.width) for k in ks]
+
+    variants = [[bake(yw, k, args.width) for k in ks] for yw in yaws]
 
     out = os.path.join(REPO, "sh_src/chair_shadow_tex.h")
     with open(out, "w") as f:
         f.write("/* Auto-generated by tools/bake_chair_shadow.py from the box model\n")
-        f.write(" * (sh_src/chair3d.h). Plan silhouette sheared along the cast axis;\n")
-        f.write(" * v=0 row IS the near feet line — anchor it on the light-side feet\n")
-        f.write(" * and leg contact is constructional. shears=%s. Do not edit. */\n" % ks)
+        f.write(" * (sh_src/chair3d.h). MATRIX of plan silhouettes: model yaw (light\n")
+        f.write(" * direction in the chair's frame) x shear length. v=0 row = near\n")
+        f.write(" * feet line; placement metadata from geometry. yaws=%s shears=%s */\n"
+                % (yaws, ks))
         f.write("#ifndef CHAIR_SHADOW_TEX_H\n#define CHAIR_SHADOW_TEX_H\n#include <stdint.h>\n\n")
-        f.write("#define CHAIR_SHADOW_VARIANTS %d\n" % len(ks))
-        for i, ((grid, W, Hs, meta), nm) in enumerate(zip(variants, names)):
-            f.write("/* %s: shear %.2f, %dx%d */\n" % (nm, ks[i], W, Hs))
-            f.write("#define CHAIR_SHADOW_W%d %d\n#define CHAIR_SHADOW_H%d %d\n" % (i, W, i, Hs))
-            f.write("static const uint8_t chair_shadow%d[%d][%d] = {\n" % (i, Hs, W))
-            for row in grid:
-                f.write("    {" + ",".join(str(v) for v in row) + "},\n")
-            f.write("};\n")
+        f.write("#define CHAIR_SHADOW_YAWS %d\n#define CHAIR_SHADOW_LENS %d\n" % (len(yaws), len(ks)))
+        for yi, row in enumerate(variants):
+            for li, (grid, W, Hs, meta) in enumerate(row):
+                f.write("static const uint8_t chair_shadow_%d_%d[%d][%d] = {\n" % (yi, li, Hs, W))
+                for r in grid:
+                    f.write("    {" + ",".join(str(v) for v in r) + "},\n")
+                f.write("};\n")
         f.write("\ntypedef struct { const uint8_t *tex; uint8_t w, h;\n")
         f.write("                 int32_t anchor_fx, len_fx, width_fx; } chair_shadow_t;\n")
-        f.write("static const chair_shadow_t chair_shadows[CHAIR_SHADOW_VARIANTS] = {\n")
-        for i, ((grid, W, Hs, meta), nm) in enumerate(zip(variants, names)):
-            f.write("    { (const uint8_t*)chair_shadow%d, %d, %d, %d, %d, %d },\n"
-                    % (i, W, Hs, meta["anchor_fx"], meta["len_fx"], meta["width_fx"]))
-        f.write("};\n\n#endif\n")
-    print("wrote sh_src/chair_shadow_tex.h:",
-          ", ".join("%s %dx%d" % (nm, v[1], v[2]) for v, nm in zip(variants, names)))
+        f.write("static const chair_shadow_t chair_shadows[CHAIR_SHADOW_YAWS][CHAIR_SHADOW_LENS] = {\n")
+        for yi, row in enumerate(variants):
+            f.write("  {")
+            for li, (grid, W, Hs, meta) in enumerate(row):
+                f.write(" { (const uint8_t*)chair_shadow_%d_%d, %d, %d, %d, %d, %d },"
+                        % (yi, li, W, Hs, meta["anchor_fx"], meta["len_fx"], meta["width_fx"]))
+            f.write(" },\n")
+        f.write("};\n\n")
+        # Sector tables: chair-frame cast angles (engine 0..255). Direct yaws
+        # cover 0..180deg; mirrored sectors cover the other half (the chair is
+        # left-right symmetric). Engine picks by argmax dot in chair frame.
+        sect = []
+        for yi, yw in enumerate(yaws):
+            sect.append((round(yw * 256 / 360) % 256, yi, 0))
+        for yi, yw in enumerate(yaws):
+            m = round((360 - yw) * 256 / 360) % 256
+            if m != round(yw * 256 / 360) % 256:
+                sect.append((m, yi, 1))
+        sect.sort()
+        f.write("#define CHAIR_SHADOW_SECTORS %d\n" % len(sect))
+        f.write("static const uint8_t chair_shadow_sect_a[CHAIR_SHADOW_SECTORS] = {\n    %s };\n"
+                % ",".join(str(a) for a, i, m in sect))
+        f.write("static const uint8_t chair_shadow_sect_yaw[CHAIR_SHADOW_SECTORS] = {\n    %s };\n"
+                % ",".join(str(i) for a, i, m in sect))
+        f.write("static const uint8_t chair_shadow_sect_mir[CHAIR_SHADOW_SECTORS] = {\n    %s };\n"
+                % ",".join(str(m) for a, i, m in sect))
+        f.write("\n#endif\n")
+    n = len(yaws) * len(ks)
+    print("wrote sh_src/chair_shadow_tex.h: %d stencils (%d yaws x %d lengths), %d sectors"
+          % (n, len(yaws), len(ks), len(sect)))
 
     if args.strip:
-        pad = 8
-        cells = [(v[1], v[2]) for v in variants]
-        sc = 5
-        tot_w = sum(w for w, h in cells) * sc + pad * (len(cells) + 1)
-        max_h = max(h for w, h in cells) * sc + 30
-        sheet = Image.new('RGB', (tot_w, max_h), (40, 40, 44))
+        sc = 3
+        cw = args.width * sc + 6
+        rh = max(v[2] for row in variants for v in row) * sc + 18
+        sheet = Image.new('RGB', (cw * len(ks) * len(yaws) + 8, rh + 10), (40, 40, 44))
         dd = ImageDraw.Draw(sheet)
-        x0 = pad
-        for (grid, W, Hs, meta), nm in zip(variants, names):
-            for v in range(Hs):
-                for u in range(W):
-                    if grid[v][u] and (u ^ v) & 1:      # preview the 50% dither
-                        for dy in range(sc):
-                            for dx in range(sc):
-                                sheet.putpixel((x0 + u*sc + dx, 12 + v*sc + dy), (60, 48, 36))
-            dd.line([(x0, 12), (x0 + W*sc, 12)], fill=(255, 230, 0))  # feet/anchor line
-            dd.text((x0, max_h - 14), "%s (feet line in yellow)" % nm, fill=(200, 200, 200))
-            x0 += W * sc + pad
+        x0 = 4
+        for yi, yw in enumerate(yaws):
+            for li, (grid, W, Hs, meta) in enumerate(variants[yi]):
+                for v in range(Hs):
+                    for u in range(W):
+                        if grid[v][u] and (u ^ v) & 1:
+                            for dy in range(sc):
+                                for dx in range(sc):
+                                    sheet.putpixel((x0 + u*sc + dx, 12 + v*sc + dy), (60, 48, 36))
+                dd.text((x0, 0), "y%d L%d" % (int(yw), li), fill=(255, 230, 0))
+                x0 += cw
         sheet.save(args.strip)
         print("wrote strip:", args.strip)
 

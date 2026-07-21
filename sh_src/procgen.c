@@ -148,6 +148,7 @@ static void place_neanderthals(int count) {
         int x = xs32_range(2, MAP_W - 3);
         int y = xs32_range(2, MAP_H - 3);
         if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
         uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);   /* cardinal */
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 2);
@@ -164,6 +165,7 @@ static void place_chairs(int count) {
         int x = xs32_range(2, MAP_W - 3);
         int y = xs32_range(2, MAP_H - 3);
         if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
         uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 3);

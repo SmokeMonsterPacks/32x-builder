@@ -800,6 +800,13 @@ static void show_controls_screen(void) {
  * loop like the controls screen — no raycast_render behind it, index 0 is
  * true black in the gameplay palette. MODE+START exits back to the menu. */
 static void asset_viewer_screen(void) {
+    /* The hero backdrop painted ALL 256 CRAM entries with its own palette,
+     * so every asset previewed here was decoding through the WRONG colors
+     * (chair read tan, outlet read blank cream, door looked broken). Load
+     * the full gameplay palette at full brightness — the viewer's whole
+     * job is showing assets as the game shows them. Handed back to the
+     * hero palette on exit below. Index 0 stays black (backdrop). */
+    raycast_set_brightness(FADE_STEPS);
     HwMdReadPad(0);
     uint16_t prev = MARS_SYS_COMM8;          /* seed: ignore the held commit button */
     int sel = 3;                             /* start on CHAIR — the one with a 3D mesh */
@@ -892,6 +899,10 @@ static void asset_viewer_screen(void) {
         font_draw_string(fb, 8, SCREEN_H - 12, "X VARIANT  Z WIRE  MODE+START BACK", 49);
         swapBuffers();
     }
+    /* Restore the palette of the screen we RETURN to: the start menu draws
+     * over the box3d cardboard backdrop, NOT the hero splash — restoring the
+     * hero palette here washed the whole menu to near-white. */
+    box3d_load_palette();
 }
 
 /* Walk-through-the-EXIT-door portal: fade to black, generate a fresh procedural

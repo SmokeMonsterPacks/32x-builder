@@ -4,29 +4,37 @@
  * it is real world-anchored geometry, NOT a billboard. Walk around it and it
  * is correctly oriented from every side, no view-lock hat-trick.
  *
- * Seven axis-aligned boxes (seat, two front legs, two tall back posts, two
- * back slats) in 8.8 fixed model units: feet at y=0, height 1.0 (=256),
- * centred in x/z. Scaled to CHAIR_WORLD_H_FX world units at render. */
+ * Nine axis-aligned boxes (seat, two front legs, back posts split at the
+ * seat plane, two back slats) in 8.8 fixed model units: feet at y=0, height
+ * 1.0 (=256), centred in x/z. Scaled to CHAIR_WORLD_H_FX world units at
+ * render. */
 #ifndef CHAIR3D_H
 #define CHAIR3D_H
 #include <stdint.h>
 
 #define CHAIR_SPRITE_KIND 3
 #define CHAIR_WORLD_H_FX  24576          /* FX(0.375): world height of model 1.0 */
-#define CHAIR_NBOXES 7
+#define CHAIR_NBOXES 9
 
 typedef struct { int16_t x0, y0, z0, x1, y1, z1; } cbox_t;
 #define CM(v) ((int16_t)((v) * 256))
+/* NO box interpenetrates or spans past another's occlusion plane: the painter
+ * sort keys on per-triangle centroid depth, and any triangle whose depth span
+ * straddles a neighbour's can win the sort while losing the geometry (post
+ * slivers painted through the seat top, rail notches through the posts).
+ * Hence: posts split at the seat-top plane (0.48), rails butted against the
+ * posts' inner faces (|x| <= 0.20), seat flush behind at z=0.20. With disjoint
+ * boxes a strict painting order exists and painter is exact. */
 static const cbox_t chair_boxes[CHAIR_NBOXES] = {
-    { CM(-0.26), CM(0.42), CM(-0.26), CM( 0.26), CM(0.48), CM( 0.20) },  /* seat: back
-        edge flush at z=0.20 so the posts sit BEHIND it, not through it (the
-        interpenetration was z-fighting on the seat top) */
+    { CM(-0.26), CM(0.42), CM(-0.26), CM( 0.26), CM(0.48), CM( 0.20) },  /* seat */
     { CM(-0.26), CM(0.00), CM(-0.26), CM(-0.20), CM(0.42), CM(-0.20) },  /* front-L */
     { CM( 0.20), CM(0.00), CM(-0.26), CM( 0.26), CM(0.42), CM(-0.20) },  /* front-R */
-    { CM(-0.26), CM(0.00), CM( 0.20), CM(-0.20), CM(1.00), CM( 0.26) },  /* post BL */
-    { CM( 0.20), CM(0.00), CM( 0.20), CM( 0.26), CM(1.00), CM( 0.26) },  /* post BR */
-    { CM(-0.26), CM(0.90), CM( 0.21), CM( 0.26), CM(1.00), CM( 0.25) },  /* top rail*/
-    { CM(-0.26), CM(0.68), CM( 0.215),CM( 0.26), CM(0.76), CM( 0.245) }, /* mid slat*/
+    { CM(-0.26), CM(0.00), CM( 0.20), CM(-0.20), CM(0.48), CM( 0.26) },  /* post BL low */
+    { CM( 0.20), CM(0.00), CM( 0.20), CM( 0.26), CM(0.48), CM( 0.26) },  /* post BR low */
+    { CM(-0.26), CM(0.48), CM( 0.20), CM(-0.20), CM(1.00), CM( 0.26) },  /* post BL up */
+    { CM( 0.20), CM(0.48), CM( 0.20), CM( 0.26), CM(1.00), CM( 0.26) },  /* post BR up */
+    { CM(-0.20), CM(0.90), CM( 0.21), CM( 0.20), CM(1.00), CM( 0.25) },  /* top rail */
+    { CM(-0.20), CM(0.68), CM( 0.215),CM( 0.20), CM(0.76), CM( 0.245) }, /* mid slat */
 };
 #undef CM
 
