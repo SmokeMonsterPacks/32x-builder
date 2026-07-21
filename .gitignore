@@ -54,3 +54,5 @@ __pycache__/
 *.pyc
 .env
 rom/release/
+# Devlog drafts — authored here, published to itch/Reddit, not tracked
+posts/
