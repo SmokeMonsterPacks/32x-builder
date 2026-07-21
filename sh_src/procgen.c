@@ -173,18 +173,105 @@ static void place_chairs(int count) {
     }
 }
 
-/* Carve an unlit dark room on a clear-floor rect away from spawn — an area that
- * "feels dark", lit only by what leaks in. One per level reads as a beat, not a
- * frustration. */
-static void place_dark_rooms(int count) {
-    int placed = 0, attempts = count * 16;
-    while (attempts-- > 0 && placed < count) {
-        int w = xs32_range(4, 7), h = xs32_range(4, 7);
-        int x = xs32_range(2, MAP_W - 3 - w);
-        int y = xs32_range(2, MAP_H - 3 - h);
-        if (!footprint_clear(x, y, w, h)) continue;
-        raycast_add_dark_room(x, y, x + w - 1, y + h - 1);
-        placed++;
+/* Build a wall-enclosed room and mark its interior DARK. Stamps its own
+ * perimeter + one doorway (rather than needing a pre-clear rect that a dense
+ * map rarely has), so it's a guaranteed "dark room surrounded by walls".
+ * Shrinks the target size until a clear footprint is found. Returns the interior
+ * rect via *ix0.. (for the crawl variant to reuse) and 1 on success. */
+static int build_dark_room(int *ix0, int *iy0, int *ix1, int *iy1, int *side_out) {
+    for (int w = 6; w >= 4; w--) {
+        int h = w;
+        for (int a = 0; a < 120; a++) {
+            int rx = xs32_range(3, MAP_W - 4 - w);
+            int ry = xs32_range(3, MAP_H - 4 - h);
+            if (!footprint_clear(rx, ry, w, h)) continue;
+            for (int i = 0; i < w; i++) {
+                world_map[ry][rx + i] = 1; world_map[ry + h - 1][rx + i] = 1;
+            }
+            for (int j = 0; j < h; j++) {
+                world_map[ry + j][rx] = 1; world_map[ry + j][rx + w - 1] = 1;
+            }
+            for (int j = 1; j < h - 1; j++)
+                for (int i = 1; i < w - 1; i++) world_map[ry + j][rx + i] = 0;
+            int side = xs32() & 3;                       /* 0 N 1 S 2 W 3 E */
+            int dx, dy;                                  /* doorway cell */
+            switch (side) {
+                case 0:  dx = rx + 1 + xs32_range(0, w - 3); dy = ry;         break;
+                case 1:  dx = rx + 1 + xs32_range(0, w - 3); dy = ry + h - 1; break;
+                case 2:  dx = rx;         dy = ry + 1 + xs32_range(0, h - 3); break;
+                default: dx = rx + w - 1; dy = ry + 1 + xs32_range(0, h - 3); break;
+            }
+            open_cell(dx, dy);
+            raycast_add_dark_room(rx + 1, ry + 1, rx + w - 2, ry + h - 2);
+            *ix0 = rx; *iy0 = ry; *ix1 = rx + w - 1; *iy1 = ry + h - 1;
+            *side_out = side;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Guaranteed dark room surrounded by walls, entered through a normal doorway. */
+static void place_dark_enclosed(void) {
+    int x0, y0, x1, y1, side;
+    build_dark_room(&x0, &y0, &x1, &y1, &side);
+}
+
+/* Guaranteed dark room whose ONLY entrance is a forced-crouch crawlspace: build
+ * the walled dark room, then tunnel a low-ceiling passage through one wall so
+ * you crawl into the dark instead of walking. */
+static void place_dark_crawlspace(void) {
+    int x0, y0, x1, y1, side;
+    if (!build_dark_room(&x0, &y0, &x1, &y1, &side)) return;
+    /* Tunnel a low-ceiling crawl through whichever wall opens onto reachable
+     * floor (scan all four mid-wall cells). The room already has a doorway; the
+     * crawl is the crouch-in moment. */
+    int w = x1 - x0, h = y1 - y0;
+    const int wc[4][4] = {                        /* {cellx, celly, dx_out, dy_out} */
+        { x0 + 1 + (w >> 1), y1, 0,  1 },         /* S wall */
+        { x0 + 1 + (w >> 1), y0, 0, -1 },         /* N wall */
+        { x1, y0 + 1 + (h >> 1), 1,  0 },         /* E wall */
+        { x0, y0 + 1 + (h >> 1), -1, 0 },         /* W wall */
+    };
+    for (int s = 0; s < 4; s++) {
+        int cx = wc[s][0], cy = wc[s][1], dx = wc[s][2], dy = wc[s][3];
+        int ox = cx + dx, oy = cy + dy;           /* cell just outside the wall */
+        if ((unsigned)ox >= MAP_W || (unsigned)oy >= MAP_H) continue;
+        if (world_map[oy][ox] != 0) continue;     /* need open floor outside */
+        open_cell(cx, cy);                        /* carve the wall cell */
+        ceil_h_add_run(cx - dx, cy - dy, dx, dy, 2); /* low: interior + wall cell */
+        return;
+    }
+}
+
+/* Guaranteed hallway stretch of a few DARK unlit cells: find a straight run of
+ * open floor flanked by walls (a passage), mark 3-5 consecutive cells dark so
+ * the lights that would sit there are suppressed — a corridor where the lights
+ * are out. Falls back to any straight open run if no walled corridor is found. */
+static void place_dark_hallway(void) {
+    for (int pass = 0; pass < 2; pass++) {       /* pass 0: walled corridor; 1: any run */
+        for (int a = 0; a < 300; a++) {
+            int horiz = xs32() & 1;
+            int run = xs32_range(3, 5);
+            int x = xs32_range(2, MAP_W - 3 - (horiz ? run : 0));
+            int y = xs32_range(2, MAP_H - 3 - (horiz ? 0 : run));
+            int ok = 1;
+            for (int k = 0; k < run && ok; k++) {
+                int cx = x + (horiz ? k : 0), cy = y + (horiz ? 0 : k);
+                if (world_map[cy][cx] != 0) { ok = 0; break; }
+                int ddx = cx - SPAWN_CX, ddy = cy - SPAWN_CY;
+                if (ddx > -3 && ddx < 3 && ddy > -3 && ddy < 3) { ok = 0; break; }
+                if (pass == 0) {                 /* require flanking walls (a corridor) */
+                    int wa = horiz ? (world_map[cy - 1][cx] == 1) : (world_map[cy][cx - 1] == 1);
+                    int wb = horiz ? (world_map[cy + 1][cx] == 1) : (world_map[cy][cx + 1] == 1);
+                    if (!(wa && wb)) { ok = 0; break; }
+                }
+            }
+            if (!ok) continue;
+            int ex = x + (horiz ? run - 1 : 0), ey = y + (horiz ? 0 : run - 1);
+            raycast_add_dark_room(x, y, ex, ey);
+            return;
+        }
     }
 }
 
@@ -394,6 +481,11 @@ void procgen_run(uint32_t seed) {
     fill_walls();
     carve_open_field();
     place_enclosed_rooms(xs32_range(5, 8 + dens));
+    /* Guaranteed dark features, placed while the floor is still open so their
+     * footprints land: a walled dark room, a dark room entered by a crawlspace,
+     * and (after structure exists, below) a hallway of unlit cells. */
+    place_dark_enclosed();
+    place_dark_crawlspace();
     place_pillars(xs32_range(10, 14 + dens * 2));
     place_stub_walls(xs32_range(6, 9 + dens));
     enforce_boundary();
@@ -416,12 +508,20 @@ void procgen_run(uint32_t seed) {
     scatter_partitions(4 + g_procgen_params.partitions * 3);
     assign_partition_decor();
     raycast_stamp_partition_edges();   /* procgen dividers go first-class */
-    place_crawlspaces(g_procgen_params.crawlspaces + 1);
+    /* -1 vs before: place_dark_crawlspace now carves one guaranteed crawl (into
+     * the dark room), so the general count drops by one to keep the overall
+     * crawlspace occurrence where it was. */
+    place_crawlspaces(g_procgen_params.crawlspaces);
     raycast_place_outlets(g_procgen_params.outlets * 5);
-    place_neanderthals(1 + xs32_range(0, 1));   /* always >= 1, sometimes 2 */
+    place_neanderthals(2 + xs32_range(0, 2));   /* 2-4: 1-2 was too sparse to find
+                                                 * on the 32x32 field. Billboard-cheap
+                                                 * now; spread out so rarely >1 large
+                                                 * on screen at once. */
     /* 6-9 chairs: the directional-billboard LOD made count nearly free (far
      * chairs are small sprites; only the nearest 3 render true-3D), stress-
      * verified at 21 chairs with no frame drops. Furnished, not spammed. */
     place_chairs(6 + xs32_range(0, 3));
-    place_dark_rooms(2);                        /* minimum two unlit rooms per level */
+    /* Structure exists now, so a walled corridor can be found: a stretch of
+     * unlit hallway cells. */
+    place_dark_hallway();
 }

@@ -185,6 +185,8 @@ uint8_t world_map[MAP_H][MAP_W];
                              * baked stipple dots, a soft almost-imperceptible dapple */
 #define HANDLE_BASE   113   /* 4 entries: warm gold/brass for the door handle hardware
                              * (dark, mid, light, highlight) so it reads as metal not tan */
+#define SIGN_GREEN_BASE 132 /* 4 entries: EXIT-sign green letters, near->fog */
+#define SIGN_WHITE_BASE 136  /* 4 entries: EXIT-sign white plate, near->fog */
 #define WOODTOP_BASE  124   /* 8 entries: countertop wood, jamb-brown fading into
                              * the FOG color — the half-height top plane's own
                              * distance ramp (the 4-step jamb ramp never reached
@@ -406,7 +408,7 @@ void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind) {
 /* Procgen dark rooms: it can't see the full cm_dark_t (custom_maps.h isn't in
  * its include set), so it appends through here. The array is engine-owned and
  * g_map_dark is pointed at it. */
-#define PROCGEN_DARK_MAX 4
+#define PROCGEN_DARK_MAX 6   /* enclosed + crawl + hallway guaranteed, plus headroom */
 static cm_dark_t procgen_dark[PROCGEN_DARK_MAX];
 void raycast_add_dark_room(int x0, int y0, int x1, int y1) {
     if (g_map_dark != procgen_dark) { g_map_dark = procgen_dark; g_map_n_dark = 0; }
@@ -1187,6 +1189,15 @@ void raycast_set_brightness(int lvl) {
         static const uint8_t fr[5][3] = { {9,8,7},{12,11,9},{15,13,11},{18,16,13},{21,18,15} };
         for (int i = 0; i < 5; i++)
             Hw32xSetBGColor(FRAME_BASE + i, fr[i][0]*lvl/FADE_STEPS, fr[i][1]*lvl/FADE_STEPS, fr[i][2]*lvl/FADE_STEPS);
+        /* EXIT-sign fog ramps: the sign USED to stay lit at any distance (it
+         * glowed unnaturally on a fogged door). Now the green letters and white
+         * plate darken toward fog with door_shade, indexed in the dlut. */
+        static const uint8_t sg[4][3] = { {8,19,10},{7,15,9},{7,11,8},{8,9,8} };
+        static const uint8_t sw[4][3] = { {28,26,20},{21,20,15},{15,14,11},{9,9,8} };  /* ivory/tooth, not stark white */
+        for (int i = 0; i < 4; i++) {
+            Hw32xSetBGColor(SIGN_GREEN_BASE + i, sg[i][0]*lvl/FADE_STEPS, sg[i][1]*lvl/FADE_STEPS, sg[i][2]*lvl/FADE_STEPS);
+            Hw32xSetBGColor(SIGN_WHITE_BASE + i, sw[i][0]*lvl/FADE_STEPS, sw[i][1]*lvl/FADE_STEPS, sw[i][2]*lvl/FADE_STEPS);
+        }
         /* Countertop wood -> fog, fade-scaled like everything else. */
         for (int i = 0; i < 8; i++)
             Hw32xSetBGColor(WOODTOP_BASE + i,
@@ -1288,6 +1299,15 @@ static void build_palette(void) {
     Hw32xSetBGColor(DOOR_DARK_BASE + 1,  7,  5,  3);
     Hw32xSetBGColor(DOOR_DARK_BASE + 2,  9,  7,  5);
     Hw32xSetBGColor(DOOR_DARK_BASE + 3, 12, 10,  7);
+    /* EXIT-sign fog ramps (green letters + white plate, near->fog). */
+    Hw32xSetBGColor(SIGN_GREEN_BASE + 0,  8, 19, 10);
+    Hw32xSetBGColor(SIGN_GREEN_BASE + 1,  7, 15,  9);
+    Hw32xSetBGColor(SIGN_GREEN_BASE + 2,  7, 11,  8);
+    Hw32xSetBGColor(SIGN_GREEN_BASE + 3,  8,  9,  8);
+    Hw32xSetBGColor(SIGN_WHITE_BASE + 0, 28, 26, 20);   /* ivory/tooth plate, not stark white */
+    Hw32xSetBGColor(SIGN_WHITE_BASE + 1, 21, 20, 15);
+    Hw32xSetBGColor(SIGN_WHITE_BASE + 2, 15, 14, 11);
+    Hw32xSetBGColor(SIGN_WHITE_BASE + 3,  9,  9,  8);
     /* Chair wood — its own ramp, a touch lighter than the door recess. */
     raycast_paint_chair_ramp();
     /* Soft stipple dapple — the door ramp nudged ~1-2 darker (barely there). */
@@ -2356,29 +2376,20 @@ static void draw_falling_standup(int i, int col_start, int col_end,
  * per-column z-test against WALL_DIST so walls occlude it. Rides the
  * neanderthal brown ramp (NEANDER_BASE + 1..7). */
 static uint8_t chair_face_shade(int axis, fx_t fc, fx_t fs) {
-    /* DARK wood — the DOOR ramp turned out to be a light taupe (the chair
-     * read TAN in a lit hallway), so the chair rides DOOR_DARK_BASE 0..3,
-     * the door-in-shadow chocolate browns. Offsets returned are DOOR_DARK
-     * offsets: top 3 (brightest dark, catches the ceiling light), bottom 0,
-     * sides 0..2 by facing. */
-    if (axis == 2) return 3;                 /* top */
-    if (axis == 3) return 0;                 /* bottom: deepest brown */
-    int32_t nx, nz;
+    /* FIXED per-model-axis cel shade — must match the billboard bake
+     * (tools/bake_dir_sprites.py FACES axsh {top6, +x/-x 4, +z/-z 3, bottom2}
+     * through (s-1)*5/7): top 3, +x/-x 2, +z/-z 1, bottom 0. The bake is a
+     * still per facing and CAN'T relight, so its face shades are constant per
+     * model axis; the 3D chair used a world-fixed light that rotated with the
+     * facing, so the SIDES drifted vs the sprite and popped colour at the LOD
+     * swap. Matching removes the drift (fc/fs no longer needed). */
+    (void)fc; (void)fs;
     switch (axis) {
-    case 0: nx =  FX_ONE; nz = 0; break;     /* +x */
-    case 1: nx = -FX_ONE; nz = 0; break;
-    case 4: nx = 0; nz =  FX_ONE; break;     /* +z */
-    default: nx = 0; nz = -FX_ONE; break;    /* -z */
+    case 2:  return 3;   /* top    */
+    case 3:  return 0;   /* bottom */
+    case 0:  case 1: return 2;   /* +x / -x sides */
+    default: return 1;   /* +z / -z front/back */
     }
-    fx_t wnx = FX_MUL(nx, fc) + FX_MUL(nz, fs);   /* normal rotated by facing */
-    fx_t wnz = -FX_MUL(nx, fs) + FX_MUL(nz, fc);
-    int32_t lum = (int32_t)((-55 * (int64_t)wnx - 83 * (int64_t)wnz) / 100);
-    /* Sides in the dark end of the door ramp (0..2): a tight, uniform brown
-     * with just enough spread to read the faces (was 1..3, too light). */
-    int s = 1 + (int)((lum * 3) >> FX_SHIFT);
-    if (s < 0) s = 0;
-    if (s > 2) s = 2;
-    return (uint8_t)s;
 }
 
 /* Scanline triangle fill, constant depth (the chair spans ~one cell; WALL_DIST
@@ -2984,7 +2995,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
      * generous because the ENGINE never draws more than a few at once. (order[]
      * is far->near, so walking it in reverse hits the nearest first.) */
     #define CHAIR_RENDER_MAX 3
-    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(4) * FX(4);  /* 4 cells: 3D only within reach, billboard beyond */
+    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(3) * FX(3);  /* 3 cells: 3D only within reach, billboard beyond (swap is colour-continuous now) */
     uint8_t chair_render[MAX_STANDUPS] = {0};
     {
         int seen = 0;
@@ -3374,9 +3385,9 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
                 dlut[1 + g] = finegrey[bi];
                 dlut[9 + g] = finegrey[si];
             }
-            dlut[6] = (uint8_t)(DOOR_BASE + 5);
-            dlut[7] = (uint8_t)(DOOR_BASE + 6);
-            dlut[8] = (uint8_t)(DOOR_BASE + 7);
+            dlut[6] = (uint8_t)(SIGN_GREEN_BASE + 1);   /* viewer: near-bright sign */
+            dlut[7] = (uint8_t)(SIGN_GREEN_BASE + 0);
+            dlut[8] = (uint8_t)(SIGN_WHITE_BASE + 0);
             for (int i2 = 0; i2 < 4; i2++) {
                 int hp = i2 - door_shade; if (hp < 0) hp = 0;
                 dlut[14 + i2] = (uint8_t)(HANDLE_BASE + hp);
@@ -3421,6 +3432,10 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
         int ytop = oyc - dy, ybot = oyc + dy;
         int u = (int)(((int64_t)(l + hw) * tw) / ((int64_t)hw << 1));
         if (u < 0) u = 0; else if (u >= tw) u = tw - 1;
+        /* The door texture is authored pre-mirrored (the game's wall pass draws
+         * it horizontally flipped). This viewer path does NOT flip, so match it
+         * here or the EXIT sign reads reversed. */
+        if (sd->decode == SPRITE_DECODE_DOOR) u = tw - 1 - u;
         const uint8_t *cb = col_major ? tex + u * th : tex + u;
         int cstep = col_major ? 1 : tw;
         int y0c = ytop < 0 ? 0 : ytop;
@@ -4567,9 +4582,14 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
         dlut[1 + g] = finegrey[bi];
         dlut[9 + g] = finegrey[si];
     }
-    dlut[6] = (uint8_t)(DOOR_BASE + 5);                          /* EXIT sign (kept lit) */
-    dlut[7] = (uint8_t)(DOOR_BASE + 6);
-    dlut[8] = (uint8_t)(DOOR_BASE + 7);
+    /* EXIT sign FOGS with distance now (was kept lit — it glowed on a fogged
+     * door). sg = door_shade halved into the 4-step sign ramps; dark-green
+     * texel sits one step deeper than light-green. */
+    int sg = door_shade >> 1; if (sg > 3) sg = 3;
+    int sgd = sg + 1; if (sgd > 3) sgd = 3;
+    dlut[6] = (uint8_t)(SIGN_GREEN_BASE + sgd);                  /* dark-green letter */
+    dlut[7] = (uint8_t)(SIGN_GREEN_BASE + sg);                   /* light-green letter */
+    dlut[8] = (uint8_t)(SIGN_WHITE_BASE + sg);                  /* white plate */
     for (int i = 0; i < 4; i++) {
         int hp = i - door_shade; if (hp < 0) hp = 0;
         dlut[14 + i] = (uint8_t)(HANDLE_BASE + hp);              /* bronze handle, faded */
