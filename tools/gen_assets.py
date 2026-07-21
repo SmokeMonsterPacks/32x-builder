@@ -16,7 +16,7 @@ ROOT = os.path.dirname(HERE)
 MOUNT  = {"wall": "SPRITE_MOUNT_WALL", "billboard": "SPRITE_MOUNT_BILLBOARD"}
 DECODE = {"offset": "SPRITE_DECODE_OFFSET", "door": "SPRITE_DECODE_DOOR"}
 FLAG   = {"animated": "SPRITE_F_ANIMATED", "lod": "SPRITE_F_LOD",
-          "standalone": "SPRITE_F_STANDALONE"}
+          "standalone": "SPRITE_F_STANDALONE", "colmajor": "SPRITE_F_COLMAJOR"}
 
 
 def die(m):
@@ -55,6 +55,7 @@ def emit(sprites):
           '#define SPRITE_F_ANIMATED   0x01',
           '#define SPRITE_F_LOD        0x02   /* has a hi-res variant (tex_hi) */',
           '#define SPRITE_F_STANDALONE 0x04   /* free-standing (not wall-anchored) */',
+          '#define SPRITE_F_COLMAJOR   0x08   /* lo-res texture stored [W][H] (door) */',
           '',
           'typedef struct {',
           '    const uint8_t *tex, *tex_hi;       /* lo-res + optional hi-res (LOD) */',
