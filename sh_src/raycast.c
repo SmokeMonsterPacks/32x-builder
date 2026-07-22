@@ -216,10 +216,18 @@ uint8_t world_map[MAP_H][MAP_W];
  * the DDA finds between FOG_RAMP_DIST and MAX_VIEW_DIST renders at
  * shade 15 (indistinguishable from the floor/ceiling fog), giving the
  * Backrooms "emerges from the greenish darkness" effect rather than a
- * hard pop-in at the cutoff. */
+ * hard pop-in at the cutoff.
+ *
+ * PERF: MAX_VIEW_DIST pulled 10 -> 7. Walls are already full-fog shade by
+ * FOG_RAMP_DIST (6), so the 7..10 band was rendering wall pixels that are
+ * indistinguishable from the fog fill — pure waste on open sightlines. The
+ * DDA now bails a few cells sooner (fewer steps) and those far fog-walls
+ * become fog fill instead. The 1-cell buffer (6 full-fog -> 7 cut) keeps the
+ * cut inside the fog so there's no pop. row_color (floor/ceiling fog) is a
+ * screen-row ramp, independent of this, so those passes are unchanged. */
 #define FOG_RAMP_DIST     FX(6)
-#define MAX_VIEW_DIST     FX(10)
-#define MAX_VIEW_DIST_INT 10
+#define MAX_VIEW_DIST     FX(7)
+#define MAX_VIEW_DIST_INT 7
 
 /* Drop-ceiling grid density — number of panel boundaries per 1-unit map
  * cell. Higher = denser grid. The cost is identical at any density; we
@@ -3865,6 +3873,20 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
         if (centerY < FX(0.5)) continue;
         if (centerY >= MAX_VIEW_DIST) continue;
 
+        /* LATERAL frustum cull (before the 3 troffer quads). The forward
+         * distance cull alone still processed EVERY light in the 9-cell band
+         * across the whole map WIDTH — on an open map most are off to the sides
+         * and off-screen. Skip a light whose projected screen column sits well
+         * outside this CPU's span [col_start,col_end). The 80px margin clears
+         * the widest a tile ever projects at the near cull edge, so nothing
+         * pops. Same lever as the chair-shadow frustum cull. */
+        fx_t stX = FX_MUL(inv_det, FX_MUL(dirY, cx) - FX_MUL(dirX, cy));
+        /* int64 mul: a light far to the SIDE isn't laterally pre-culled, so
+         * stX/centerY can be huge and overflow a 32-bit intermediate. */
+        int sX = (SCREEN_W >> 1)
+               + (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(stX, centerY)) >> FX_SHIFT);
+        if (sX < col_start - 80 || sX >= col_end + 80) continue;
+
         /* Per-light flicker + distance fog folded into one brightness offset
          * (0 full .. up) added to the panel/tube ramp index. The tile lives IN
          * the ceiling, so it must dim on the ceiling's fog curve or it reads as
@@ -4915,6 +4937,41 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * both CPUs draw the same resolution. */
     const int hr = SHARED_UC->wall_halfres;
     const int cstep = hr ? 2 : 1;
+
+    /* Decal broad-phase: filter the wall-embedded decals down to the ones
+     * actually in front of the camera and within this CPU's screen span,
+     * ONCE, so the per-column footprint test below walks a short list instead
+     * of every decal on the map. The hit-point test still validates each hit,
+     * so nothing is mis-drawn — we just stop testing decals that can't be
+     * reached this frame (behind you, or off to the side). Turns the per-frame
+     * decal cost from O(cols x total_decals) toward O(cols x visible_decals),
+     * so a dense-decal map stops taxing every column for outlets off-screen. */
+    int8_t active_decal[16];
+    int    n_active = 0;
+    if (num_decals > 0) {
+        fx_t det = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
+        if (det != 0) {
+            fx_t inv_det = fx_div_hw(FX_ONE, det);
+            for (int d = 0; d < num_decals && n_active < 16; d++) {
+                /* Both kinds go in the list (outlet=0, door=1); the two scans
+                 * below each filter by kind. */
+                fx_t cx = decals[d].x - px, cy = decals[d].y - py;
+                fx_t depth = FX_MUL(inv_det, FX_MUL(-planeY, cx) + FX_MUL(planeX, cy));
+                if (depth < FX(0.2)) continue;        /* behind the camera */
+                fx_t tX = FX_MUL(inv_det, FX_MUL(dirY, cx) - FX_MUL(dirX, cy));
+                int sX = (SCREEN_W >> 1)
+                       + (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(tX, depth)) >> FX_SHIFT);
+                /* Widen by the decal's projected half-width (worst case, face-on)
+                 * so a big/near decal like the full-width door isn't dropped when
+                 * its centre is off the edge but its face still spans into view. */
+                fx_t dhw = decals[d].kind ? DECAL_DOOR_HW : DECAL_OUTLET_HW;
+                int sHW = (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(dhw, depth)) >> FX_SHIFT);
+                if (sX + sHW < col_start || sX - sHW >= col_end) continue;  /* span off this half */
+                active_decal[n_active++] = (int8_t)d;
+            }
+        }
+    }
+
     for (int col = col_start; col < col_end; col += cstep) {
         WALL_DIST(col) = 0x7FFFFFFF;
         if (hr) WALL_DIST(col + 1) = 0x7FFFFFFF;
@@ -5705,11 +5762,12 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * texture full-height AS THE WALL — replacing the chevron, not overlaying
          * it — so there is no overdraw. Opaque + column-major (sequential reads
          * down the column). Falls through to the normal chevron everywhere else. */
-        if (!partition_hit && num_decals > 0) {
+        if (!partition_hit && n_active > 0) {
             fx_t hx = px + FX_MUL(perpDist, rayDirX);
             fx_t hy = py + FX_MUL(perpDist, rayDirY);
             int door_drawn = 0;
-            for (int d = 0; d < num_decals; d++) {
+            for (int ai = 0; ai < n_active; ai++) {
+                int d = active_decal[ai];
                 if (decals[d].kind != 1) continue;
                 fx_t along; int flip;
                 if (decals[d].axis) {
@@ -5955,7 +6013,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * so it's genuinely part of the surface (correct perspective + occlusion)
          * instead of a billboard. Cheap: only runs when the map placed a decal,
          * and the footprint test rejects almost every column with one compare. */
-        if (num_decals > 0) {
+        if (n_active > 0) {
             fx_t hx = px + FX_MUL(perpDist, rayDirX);
             fx_t hy = py + FX_MUL(perpDist, rayDirY);
             /* Plane tolerance must exceed the partition HALF_THICK (0.15) so a
@@ -5963,7 +6021,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * face (the visible face sits +/-0.15 off centre). Solid walls hit
              * exact integer planes, so this wide band never false-matches them
              * (the nearest other plane is a whole cell away). */
-            for (int d = 0; d < num_decals; d++) {
+            for (int ai = 0; ai < n_active; ai++) {
+                int d = active_decal[ai];
                 /* 0 = small outlet plate (opaque fill, shaded with the wall),
                  * 1 = the full-height fire DOOR (own texture; index 0 is
                  * transparent so the wall shows around the EXIT sign). */
