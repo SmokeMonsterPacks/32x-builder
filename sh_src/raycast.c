@@ -3414,9 +3414,13 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 /* Occluded — but by WHAT? A partial (see-over) divider only
                  * hides the rows from its band top down; the standup's head
                  * and shoulders above it stay visible (the neanderthal-
-                 * behind-a-partition bug: he vanished column-wide). */
+                 * behind-a-partition bug: he vanished column-wide). CHAIRS get
+                 * no such peek — furniture behind a wall-like promoted divider
+                 * must stay hidden, else the chair paints its top OVER the
+                 * divider (the chairs-through-walls bug). Only tall standups peek. */
                 int pt = PART_TOP(stripe);
-                if (!pt || pt <= drawStartY) continue;   /* full occluder */
+                if (!pt || pt <= drawStartY
+                    || standups[i].kind == CHAIR_SPRITE_KIND) continue;  /* full occluder */
                 if (pt - 1 < clip_bot) clip_bot = pt - 1;
             }
 
