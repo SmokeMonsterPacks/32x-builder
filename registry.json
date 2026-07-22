@@ -229,6 +229,14 @@
    "folder": "core"
   }
  },
+ "author_aliases": {
+  "_doc": "Canonical author display names. gen_maps folds each map's raw `author:` field through this table (case-insensitive) so varied handles collapse to one credit on the automap + CREDITS tab. Raw .map files are left untouched; add a lowercased key here to alias a new spelling. Unlisted authors display as written; a blank author credits -BACKROOMS-.",
+  "smokemonsterpacks": "smokemonster",
+  "smokemonstermaps": "smokemonster",
+  "smokemonster": "smokemonster",
+  "mike": "maintainer",
+  "mike holzinger": "maintainer"
+ },
  "limits": {
   "_doc": "must match the engine caps; the codegen rejects maps that exceed these. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
   "max_dim": 32,

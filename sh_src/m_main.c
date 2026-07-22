@@ -433,29 +433,51 @@ static void am_emit(uint8_t *fb, fx_t wx0, fx_t wy0, fx_t wx1, fx_t wy1, uint8_t
     am_line(fb, x0, y0, x1, y1, c);
 }
 
-/* Automap footer: the current map's name, static, bottom-center, in red.
- * Authored maps use their real name; a procgen level derives a pronounceable
- * 8-char name from its SEED (consonant-vowel syllables) — deterministic, so
- * a level keeps its name for as long as you wander it. */
-static void am_footer(uint8_t *fb) {
-    char name[18];
+/* Current level's display name into out[] (needs 18 bytes): the authored map's
+ * real name, or a pronounceable 8-char name derived from the procgen SEED
+ * (consonant-vowel syllables) — deterministic, so a level keeps its name for as
+ * long as you wander it. Shared by the automap and the pause CREDITS tab. */
+void cur_map_name(char *out) {
     int n = 0;
     if (g_custom_current >= 0) {
         for (const char *p = custom_maps[g_custom_current].name; *p && n < 16; p++)
-            name[n++] = *p;
+            out[n++] = *p;
     } else {
         static const char CONS[] = "BDKLMNPRSTVZ";   /* 12 */
         static const char VOWS[] = "AEIOU";          /*  5 */
         uint32_t h = g_procgen_seed * 2654435761u;   /* Knuth mix */
         for (int i = 0; i < 4; i++) {
-            name[n++] = CONS[h % 12]; h /= 12;
-            name[n++] = VOWS[h % 5];  h /= 5;
+            out[n++] = CONS[h % 12]; h /= 12;
+            out[n++] = VOWS[h % 5];  h /= 5;
             h ^= h >> 7;
         }
     }
-    name[n] = 0;
+    out[n] = 0;
+}
+
+/* Current level's author credit. Authored maps carry their own; a blank field
+ * and every procgen level credit the project. */
+const char *cur_map_author(void) {
+    if (g_custom_current >= 0) {
+        const char *a = custom_maps[g_custom_current].author;
+        if (a && *a) return a;
+    }
+    return "-BACKROOMS-";
+}
+
+/* Automap credits: the map NAME bottom-center in bright red, the AUTHOR
+ * top-center in dim red. Both slide clear of the metrics HUD when it's up. */
+static void am_footer(uint8_t *fb) {
+    char name[18];
+    cur_map_name(name);
+    int n = 0; while (name[n]) n++;
     int y = g_metrics_on ? (SCREEN_H - 36) : (SCREEN_H - 12);
     font_draw_string(fb, (SCREEN_W - n * 8) / 2, y, name, AMAP_RED_BRIGHT);
+
+    const char *author = cur_map_author();
+    int an = 0; while (author[an]) an++;
+    int ay = g_metrics_on ? 40 : 8;
+    font_draw_string(fb, (SCREEN_W - an * 8) / 2, ay, author, AMAP_RED);
 }
 
 static void automap_draw(uint8_t *fb) {

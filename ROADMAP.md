@@ -324,6 +324,25 @@ Still open — currently every-4th-column stamp covers the full bottom
 half. Could compress further with a sparser near-row pattern and skip
 the horizon-band entirely (already half-done — we skip max-dark rows).
 
+## Polish
+
+### Higher-res chair billboard via `hero_scratch` reuse
+The directional chair sprite is baked at 56px (`tools/bake_dir_sprites.py
+--height`). An 84px bake is crisper and the sprite data is free (it's
+`const`/ROM), but the viewer's `chair_pv` decode scratch scales with
+sprite size and, as a static `.bss` buffer, steals from the primary
+stack. At 84px it left only ~1100 bytes of stack headroom (the same
+class of silent-overflow trap as the audio 2×2048 buffer), so we kept
+56px. It's academic at the current 3.5-cell LOD swap (chair is ~24px on
+screen there, already 2.3× oversampled), but if the perf pass ever
+pushes the swap *closer* the billboard gets big enough to want the
+detail. Safe path when we do: host `chair_pv` in the idle `hero_scratch`
+buffer (71 KB, dark during the asset viewer) instead of its own static —
+zero new `.bss`, full-res sprites. Cost: couples box_hero into the
+renderer with a "hero_scratch is free during the viewer" lifetime
+assumption. The bake tool already emits `CHAIR_DIR_WMAX` so the scratch
+auto-sizes to any `--height`.
+
 ## Tools / infra
 
 ### `make deploy` to MiSTer

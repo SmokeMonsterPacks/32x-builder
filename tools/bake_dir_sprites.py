@@ -104,7 +104,11 @@ def main():
         f.write(" * (distance fog applies). ROW-MAJOR tex[y][x]; X-mirror covers the\n")
         f.write(" * other half circle in the engine's 12-sector picker. */\n")
         f.write("#ifndef CHAIR_DIR_TEX_H_INCLUDED\n#define CHAIR_DIR_TEX_H_INCLUDED\n#include <stdint.h>\n\n")
-        f.write("#define CHAIR_DIR_VIEWS  %d\n#define CHAIR_DIR_H      %d\n\n" % (len(views), H))
+        wmax = max(w for _, w, _ in views)
+        f.write("#define CHAIR_DIR_VIEWS  %d\n#define CHAIR_DIR_H      %d\n" % (len(views), H))
+        f.write("/* Widest view — the engine sizes its decode scratch from this so a\n")
+        f.write(" * re-bake at any --height stays in bounds (no fixed-40 overflow). */\n")
+        f.write("#define CHAIR_DIR_WMAX   %d\n\n" % wmax)
         for i, (yw, w, im) in enumerate(views):
             f.write("/* view %d: model yaw %d */\n" % (i, yw))
             f.write("#define CHAIR_DIR_W%d %d\n" % (i, w))

@@ -196,7 +196,12 @@ def resolve(path, reg):
              if not (fl & 0x30) else fl)
             for (ex, ey, fl) in pedges
         ]
-    return {"name": m["name"], "w": w, "h": h, "cells": cells, "parts": parts,
+    raw_author = (m.get("author") or "").strip()
+    author = reg.get("author_aliases", {}).get(raw_author.lower(), raw_author)
+    if author.startswith("_"):        # skip the _doc key if it ever collides
+        author = raw_author
+    return {"name": m["name"], "author": author,
+            "w": w, "h": h, "cells": cells, "parts": parts,
             "pedges": pedges,
             "next": (m.get("next") or "").strip(),
             "decals": decals, "crawls": crawls, "lights": lights, "dark": dark, "spawn": spawn,
@@ -256,8 +261,8 @@ def emit(maps, out_path):
             crawls = ("%s_crawls,%d" % (p, len(m["crawls"]))) if m["crawls"] else "0,0"
             lights = ("%s_lights,%d" % (p, len(m["lights"]))) if m["lights"] else "0,0"
             dark   = ("%s_dark,%d"   % (p, len(m["dark"])))   if m["dark"]   else "0,0"
-            L.append('    { "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
-                     (m["name"][:16], m["w"], m["h"], p, pedges, decals, crawls, lights, dark,
+            L.append('    { "%s", "%s", %d,%d, %s_grid, %s, %s, %s, %s, %s, %s,%s,%d, %d,%d,%d, %d },' %
+                     (m["name"][:16], m["author"][:20], m["w"], m["h"], p, pedges, decals, crawls, lights, dark,
                       fxlit(sx), fxlit(sy), sa,
                       m["lobby_ceiling"], m["place_outlets"], m["place_exit_door"],
                       m["next_idx"]))

@@ -120,13 +120,68 @@ static void fill_walls(void) {
     }
 }
 
-/* Open the whole interior — the big connected floor everything else sits in.
- * This is the inversion of the old spine generator: start OPEN, then drop
- * structure into it (rooms, pillars, stubs) rather than carving corridors out
- * of solid wall. Every structure keeps a clear margin, so the floor always
- * stays one connected open space — open by construction, never spaghetti. */
+/* Count the open-floor cells a candidate rect would overlap — the connectivity
+ * probe for the organic carve: a new blob is only kept if it TOUCHES the
+ * already-open region (so the floor stays one connected space) AND still adds
+ * fresh floor (so it isn't a no-op inside an existing blob). */
+static int overlaps_open(int x, int y, int w, int h) {
+    int n = 0;
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            int cx = x + i, cy = y + j;
+            if (cx >= 0 && cx < MAP_W && cy >= 0 && cy < MAP_H
+                && world_map[cy][cx] == 0) n++;
+        }
+    return n;
+}
+
+/* Open the walkable floor everything else sits in — but as an ORGANIC footprint,
+ * not a rectangle. The old version carved one big rect (2,2 .. MAP_W-4,MAP_H-4),
+ * which is exactly why every map read as a square. Instead we grow the floor as
+ * a UNION of overlapping blobs: a chunky seed over spawn, then accreted blobs
+ * that each must touch the already-open region (kept connected by construction)
+ * and add fresh floor. A quarter of the blobs are thin+long — jogged halls and
+ * necks between the rooms — so the space has both open sprawl and tight runs,
+ * and the outer boundary comes out irregular (the un-carved cells stay wall).
+ * Structure still drops in afterward with clear margins, so the 1-cell margin on
+ * every placer keeps it from sealing a narrow neck (a 2-wide hall can't fit a
+ * pillar's 3x3 clearance). */
 static void carve_open_field(void) {
-    carve_room(2, 2, MAP_W - 4, MAP_H - 4);
+    /* Seed blob over spawn, opening north (spawn sits near the bottom edge). */
+    int sw = xs32_range(8, 12), sh = xs32_range(8, 11);
+    int sx = SPAWN_CX - sw / 2;
+    int sy = SPAWN_CY - sh + 1;
+    if (sx < 2) sx = 2;
+    if (sx + sw > MAP_W - 2) sx = MAP_W - 2 - sw;
+    if (sy < 2) sy = 2;
+    carve_room(sx, sy, sw, sh);
+
+    /* Accrete blobs onto the open region — a dramatic mix of scales so the
+     * sprawl has rhythm: long thin runs that reach for the corners and throw
+     * off jogged necks, small alcoves that pocket the edges, and chunky rooms
+     * for the open beats. Each still must touch existing floor (connected) and
+     * add fresh floor. More blobs than the first pass = the footprint stretches
+     * further and gets wilder. */
+    int target = xs32_range(8, 13);
+    int placed = 0, attempts = target * 28;
+    while (attempts-- > 0 && placed < target) {
+        int roll = (int)(xs32() % 100);
+        int bw, bh;
+        if (roll < 35) {                          /* long thin hall — reach + necks */
+            if (xs32() & 1) { bw = xs32_range(9, 16); bh = xs32_range(2, 3); }
+            else            { bw = xs32_range(2, 3);  bh = xs32_range(9, 16); }
+        } else if (roll < 55) {                   /* small alcove — side pockets */
+            bw = xs32_range(3, 5); bh = xs32_range(3, 5);
+        } else {                                  /* chunky room — the open beats */
+            bw = xs32_range(5, 12); bh = xs32_range(5, 12);
+        }
+        int bx = xs32_range(2, MAP_W - 3 - bw);
+        int by = xs32_range(2, MAP_H - 3 - bh);
+        int ov = overlaps_open(bx, by, bw, bh);
+        if (ov < 2 || ov > bw * bh - 2) continue; /* must connect AND add new floor */
+        carve_room(bx, by, bw, bh);
+        placed++;
+    }
 }
 
 /* True if the structure footprint (x..x+w-1, y..y+h-1) plus a 1-cell margin is

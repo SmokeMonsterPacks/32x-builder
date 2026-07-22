@@ -15,6 +15,10 @@ extern uint8_t g_metrics_on;
  * Called on menu OPEN so a player stuck with phantom-toggled overlays can
  * always clear them with START, the one button every pad has. */
 extern void debug_overlays_clear(void);
+/* Owned by m_main.c — the current level's name + author, for the CREDITS tab
+ * "now playing" lines (shared with the automap credits). */
+extern void        cur_map_name(char *out);
+extern const char *cur_map_author(void);
 /* Owned by m_main.c — wipes the metrics overlay's Genesis tile rows. The
  * VISUALS toggle must blank on OFF or the last-drawn tiles hover forever
  * (they only redraw while the flag is on). */
@@ -336,10 +340,21 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 48, menu_row == 3, "SHADOWS",
                  SHARED_UC->shadows_off ? "OFF" : " ON");
     } else if (menu_tab == TAB_CREDITS) {
-        /* CREDITS — read-only build stamp (no selection cursor). */
-        menu_puts_pad(TX(X + 8), 32, "BUILD " VERSION_BUILD_STR, 20);
-        menu_puts_pad(TX(X + 8), 40, "DATE  " VERSION_DATE_STR,  20);
-        menu_puts_pad(TX(X + 8), 48, "SHA   " VERSION_SHA_STR,   20);
+        /* CREDITS — "now playing": current level + its author, then the build
+         * stamp (read-only, no selection cursor). */
+        char mn[18]; cur_map_name(mn);
+        char line[22]; int q;
+        q = 0; line[q++]='M'; line[q++]='A'; line[q++]='P'; line[q++]=':'; line[q++]=' ';
+        for (int i = 0; mn[i] && q < 20; i++) line[q++] = mn[i];
+        line[q] = 0;
+        menu_puts_pad(TX(X + 8), 32, line, 20);
+        q = 0; line[q++]='B'; line[q++]='Y'; line[q++]=' ';
+        const char *au = cur_map_author();
+        for (int i = 0; au[i] && q < 20; i++) line[q++] = au[i];
+        line[q] = 0;
+        menu_puts_pad(TX(X + 8), 40, line, 20);
+        menu_puts_pad(TX(X + 8), 48, "BUILD " VERSION_BUILD_STR " " VERSION_SHA_STR, 20);
+        menu_puts_pad(TX(X + 8), 56, "DATE  " VERSION_DATE_STR, 20);
     } else { /* TAB_MAPS — scrolling list of the compiled-in custom maps */
         if (custom_pick_count == 0) {
             menu_puts_pad(TX(X + 8), 32, "  (NO MAPS)", 20);
@@ -373,9 +388,9 @@ void menu_render(uint8_t *fb) {
         }
     }
 
-    /* AUDIO's VOICE row (y=56) exists only on that tab; blank it elsewhere
-     * so switching away doesn't leave the "VOICE" tile hanging. */
-    if (menu_tab != TAB_AUDIO)
+    /* Row y=56 is used by AUDIO (VOICE) and CREDITS (DATE); blank it on the
+     * tabs that don't draw it so switching away leaves no ghost. */
+    if (menu_tab != TAB_AUDIO && menu_tab != TAB_CREDITS)
         menu_puts_pad(TX(X + 8), 56, "", 20);
 
     /* Hint row at y=64. */

@@ -3076,7 +3076,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
      * generous because the ENGINE never draws more than a few at once. (order[]
      * is far->near, so walking it in reverse hits the nearest first.) */
     #define CHAIR_RENDER_MAX 3
-    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(3) * FX(3);  /* 3 cells: 3D only within reach, billboard beyond (swap is colour-continuous now) */
+    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(3.5) * FX(3.5);  /* 3.5 cells: 3D within reach, billboard beyond (swap is colour-continuous). Bounded by CHAIR_RENDER_MAX, so at most 3 chairs ever pay the 3D cost. */
     uint8_t chair_render[MAX_STANDUPS] = {0};
     {
         int seen = 0;
@@ -3532,7 +3532,7 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
      * game uses (chair facing = yaw, camera fixed in front -> chair->player is a
      * constant, so the dot reduces to sin), decode into a scratch buffer, and
      * render it FLAT (front-facing quad) so only the frame changes. */
-    static uint8_t chair_pv[40 * CHAIR_DIR_H];
+    static uint8_t chair_pv[CHAIR_DIR_WMAX * CHAIR_DIR_H];
     int chair_flat = 0, chair_mir = 0;
     if (sel == CHAIR_SPRITE_KIND) {
         int best = 0; fx_t bestd = 0; int first = 1;

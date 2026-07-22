@@ -50,6 +50,8 @@ typedef struct cm_dark_s { uint8_t x0, y0, x1, y1; }                 cm_dark_t; 
 
 typedef struct {
     const char           *name;        /* shown in the menus; keep <= 16 chars  */
+    const char           *author;      /* map credit: automap top + pause CREDITS.
+                                        * "" => the project (shown as -BACKROOMS-). */
     uint8_t               w, h;        /* authored grid size (8/16/32/64, <=64)  */
     const uint8_t        *grid;        /* w*h row-major cells: 0 open,1 wall,2 void */
     const cm_pedge_t     *pedges; uint8_t n_pedges;   /* rasterized partitions */
