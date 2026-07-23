@@ -803,6 +803,12 @@ int   g_lowceil_active = 0;
  * wall word-stores. The toggle itself lives in SHARED_UC->wall_halfres (both
  * CPUs run draw_walls, so it must be cache-through coherent). */
 #define WDUP(c) ((uint16_t)(((uint16_t)(uint8_t)(c) << 8) | (uint8_t)(c)))
+/* Replicate a palette byte across all 4 lanes of a 32-bit word for the QUARTER-res
+ * wall path (4px per computed column). Only the main wall fill uses it; the store
+ * is always 4-aligned there (col is a multiple of 4 in quarter mode and SCREEN_W
+ * is a multiple of 4). Kept lean — NOT applied at the overlay/embed sites, which
+ * stay half-res in quarter mode (a motion-only mode, so the mismatch is masked). */
+#define LDUP(c) ((uint32_t)((uint8_t)(c)) * 0x01010101u)
 static fx_t g_lowceil_x0, g_lowceil_y0, g_lowceil_x1, g_lowceil_y1;
 #define MAX_LOWCEIL_RECTS 8
 static fx_t lowceil_rect[MAX_LOWCEIL_RECTS][4];   /* {x0,y0,x1,y1} world coords */
@@ -2523,7 +2529,11 @@ static void draw_chair_3d(int i, int col_start, int col_end,
      * legally outside the hitbox: 'visually clips through the chair'. */
     const fx_t NEARC = FX(0.08);
 
-    typedef struct { int sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
+    /* Screen coords are 16-bit: the near-clip (depth >= FX(0.2)) bounds every
+     * projected corner to well under +/-1000, so int16 is lossless and takes
+     * ~864 B off the deep render stack (the high-water probe found the Master
+     * OVER budget in crawlspace scenes). */
+    typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
     cface_t faces[CHAIR_NBOXES * 6];
     int nf = 0;
 
@@ -3084,7 +3094,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
      * generous because the ENGINE never draws more than a few at once. (order[]
      * is far->near, so walking it in reverse hits the nearest first.) */
     #define CHAIR_RENDER_MAX 3
-    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(3.5) * FX(3.5);  /* 3.5 cells: 3D within reach, billboard beyond (swap is colour-continuous). Bounded by CHAIR_RENDER_MAX, so at most 3 chairs ever pay the 3D cost. */
+    static const int64_t CHAIR_CULL_D2 = (int64_t)FX(4) * FX(4);  /* 4 cells: 3D within reach, billboard beyond (swap is colour-continuous). Bounded by CHAIR_RENDER_MAX, so at most 3 chairs ever pay the 3D cost. */
     uint8_t chair_render[MAX_STANDUPS] = {0};
     {
         int seen = 0;
@@ -4939,8 +4949,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     /* Effective half-res, resolved by the primary each frame (menu mode + lobby
      * override + AUTO frame-time decision) and published via cache-through so
      * both CPUs draw the same resolution. */
-    const int hr = SHARED_UC->wall_halfres;
-    const int cstep = hr ? 2 : 1;
+    const int hr = SHARED_UC->wall_halfres;   /* 0 full, 1 half, 2 quarter */
+    const int cstep = (hr >= 2) ? 4 : (hr ? 2 : 1);
 
     /* Decal broad-phase: filter the wall-embedded decals down to the ones
      * actually in front of the camera and within this CPU's screen span,
@@ -4978,9 +4988,9 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
 
     for (int col = col_start; col < col_end; col += cstep) {
         WALL_DIST(col) = 0x7FFFFFFF;
-        if (hr) WALL_DIST(col + 1) = 0x7FFFFFFF;
+        for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = 0x7FFFFFFF;
         PART_TOP(col) = 0;
-        if (hr) PART_TOP(col + 1) = 0;
+        for (int j = 1; j < cstep; j++) PART_TOP(col + j) = 0;
         fx_t cameraX = cameraX_table[col];
         fx_t rayDirX = dirX + FX_MUL(planeX, cameraX);
         fx_t rayDirY = dirY + FX_MUL(planeY, cameraX);
@@ -5509,7 +5519,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         }
 
         WALL_DIST(col) = perpDist;
-        if (hr) WALL_DIST(col + 1) = perpDist;
+        for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = perpDist;
         /* See-over occlusion clip: the nearest partial band is opaque from its
          * top edge to the floor, so every background pixel at or below that
          * edge gets repainted by the overlay. Counter-filling views measured
@@ -5743,7 +5753,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         if (part_height) {
             int16_t pt = (int16_t)(wall_top < 1 ? 1 : wall_top);
             PART_TOP(col) = pt;
-            if (hr) PART_TOP(col + 1) = pt;
+            for (int j = 1; j < cstep; j++) PART_TOP(col + j) = pt;
         }
         int drawStart = wall_top < 0 ? 0 : wall_top;
         int drawEnd   = wall_bot >= SCREEN_H ? SCREEN_H - 1 : wall_bot;
@@ -5758,7 +5768,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * stepping up to it portals out (raycast_door_portal_check). */
         if (hit_cell == 2 && !partition_hit) {
             WALL_DIST(col) = 0x7FFFFFFF;             /* no wall: nothing to occlude */
-            if (hr) WALL_DIST(col + 1) = 0x7FFFFFFF;
+            for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = 0x7FFFFFFF;
             goto overlay_pass;
         }
 
@@ -5907,10 +5917,25 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * loop covers both flat and textured (no asm) — we already pay only
              * half the columns, and the word-store halves the byte-traffic, so
              * the per-pixel C overhead is dwarfed by what we skipped. */
+            /* hr is loop-invariant, so each hr>=2 test hoists out — one 4px
+             * longword store per row in quarter, one 2px word in half. Only this
+             * main fill goes quarter; overlay/embed below stay half (lean). */
             if (total > 0) {
                 if (detail_factor == 0) {
-                    uint16_t fw = WDUP(lut5[0]);
-                    for (int k = 0; k < total; k++) { *(uint16_t *)p = fw; p += SCREEN_W; }
+                    if (hr >= 2) {
+                        uint32_t fl = LDUP(lut5[0]);
+                        for (int k = 0; k < total; k++) { *(uint32_t *)p = fl; p += SCREEN_W; }
+                    } else {
+                        uint16_t fw = WDUP(lut5[0]);
+                        for (int k = 0; k < total; k++) { *(uint16_t *)p = fw; p += SCREEN_W; }
+                    }
+                } else if (hr >= 2) {
+                    for (int k = 0; k < total; k++) {
+                        uint8_t pix = shade_lut[(tex_pos >> FX_SHIFT) & tex_h_mask];
+                        *(uint32_t *)p = LDUP(pix);
+                        p += SCREEN_W;
+                        tex_pos += tex_step;
+                    }
                 } else {
                     for (int k = 0; k < total; k++) {
                         uint8_t pix = shade_lut[(tex_pos >> FX_SHIFT) & tex_h_mask];
@@ -5921,8 +5946,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 }
             }
             int by = wall_end + 1;
-            if (by <= drawEnd) { *(uint16_t *)p = WDUP(shadow_color); p += SCREEN_W; by++; }
-            for (; by <= drawEnd; by++) { *(uint16_t *)p = WDUP(base_color); p += SCREEN_W; }
+            if (hr >= 2) {
+                if (by <= drawEnd) { *(uint32_t *)p = LDUP(shadow_color); p += SCREEN_W; by++; }
+                for (; by <= drawEnd; by++) { *(uint32_t *)p = LDUP(base_color); p += SCREEN_W; }
+            } else {
+                if (by <= drawEnd) { *(uint16_t *)p = WDUP(shadow_color); p += SCREEN_W; by++; }
+                for (; by <= drawEnd; by++) { *(uint16_t *)p = WDUP(base_color); p += SCREEN_W; }
+            }
         } else {
         if (total > 0 && detail_factor == 0) {
             /* Faded distance: the pattern adds nothing, so the whole wall
@@ -6081,12 +6111,12 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                         if (dk) {
                             if (tv) {           /* 0 = transparent: keep the wall */
                                 uint8_t oc8 = (uint8_t)(DOOR_BASE + tv - 1);
-                                if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
+                                if (hr >= 2) *(uint32_t *)po = LDUP(oc8); else if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
                             }
                         } else {
                             int ob = tv - oshade; if (ob < 0) ob = 0;
                             uint8_t oc8 = (uint8_t)(OUTLET_BASE + ob);
-                            if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
+                            if (hr >= 2) *(uint32_t *)po = LDUP(oc8); else if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
                         }
                     }
                     oty_fx += oty_step;   /* advance the texture row per screen pixel */
@@ -6112,7 +6142,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * the sprite z-buffer must read its depth — otherwise the ceiling
              * lights (drawn later, z-tested per column) bleed through it. */
             WALL_DIST(col) = fg_t[0];
-            if (hr) WALL_DIST(col + 1) = fg_t[0];
+            for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = fg_t[0];
         }
         /* Draw the kept partials FAR to NEAR (painter's order): the divider
          * behind a counter renders first, the counter over it. */
@@ -6212,7 +6242,10 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                      * so texel loads buy nothing — flat-fill, the main path's
                      * detail_factor==0 shortcut brought to the overlay. fpos
                      * is dead after this band (shadow/molding are flat). */
-                    if (hr) {
+                    if (hr >= 2) {
+                        uint32_t fl = LDUP(flut[0]);
+                        for (; y <= ftex_end; y++) { *(uint32_t *)fp = fl; fp += SCREEN_W; }
+                    } else if (hr) {
                         uint16_t fw = WDUP(flut[0]);
                         for (; y <= ftex_end; y++) { *(uint16_t *)fp = fw; fp += SCREEN_W; }
                     } else {
@@ -6293,19 +6326,19 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     /* hr textured band, or J:1 legacy pricing. */
                     for (; y <= ftex_end; y++) {
                         uint8_t fc8 = flut[fcol[(fpos >> FX_SHIFT) & fmask]];
-                        if (hr) *(uint16_t *)fp = WDUP(fc8); else *fp = fc8;
+                        if (hr >= 2) *(uint32_t *)fp = LDUP(fc8); else if (hr) *(uint16_t *)fp = WDUP(fc8); else *fp = fc8;
                         fp += SCREEN_W; fpos += fstep;
                     }
                 }
                 int fshadow = fsh + 2; if (fshadow > SHADE_LEVELS - 1) fshadow = SHADE_LEVELS - 1;
                 if (y <= fde) {
                     uint8_t fs8 = (uint8_t)(WALL_BASE + fshadow);
-                    if (hr) *(uint16_t *)fp = WDUP(fs8); else *fp = fs8;
+                    if (hr >= 2) *(uint32_t *)fp = LDUP(fs8); else if (hr) *(uint16_t *)fp = WDUP(fs8); else *fp = fs8;
                     fp += SCREEN_W; y++;
                 }
                 uint8_t fmold = (uint8_t)(WALL_BASE + fsh);
                 for (; y <= fde; y++) {
-                    if (hr) *(uint16_t *)fp = WDUP(fmold); else *fp = fmold;
+                    if (hr >= 2) *(uint32_t *)fp = LDUP(fmold); else if (hr) *(uint16_t *)fp = WDUP(fmold); else *fp = fmold;
                     fp += SCREEN_W;
                 }
                 ovl_px_acc += (uint16_t)(prof_frt_read() - ovl_px_t0);
@@ -6384,7 +6417,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                                 int w = sfx >> 9;         /* shade 0..15 -> wood 0..7 */
                                 if (w < 0) w = 0; else if (w > 7) w = 7;
                                 uint8_t wood = (uint8_t)(WOODTOP_BASE + w);
-                                if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
+                                if (hr >= 2) *(uint32_t *)cp = LDUP(wood); else if (hr) *(uint16_t *)cp = WDUP(wood); else *cp = wood;
                                 cp += SCREEN_W; sfx += sstep;
                             }
                             ovl_px_acc += (uint16_t)(prof_frt_read() - ct_px_t0);
@@ -6504,10 +6537,22 @@ void raycast_render(void) {
         if      (mode == 0) eff_hr = 0;
         else if (mode == 1) eff_hr = 1;
         else if (mode == 3) eff_hr = 0;   /* SERIAL diagnostic: full res */
+        else if (mode == 4) eff_hr = 2;   /* QTR: force quarter — inspect the chunk in isolation */
         else {
             if      (frame_ema > 13500) auto_hr = 1;   /* slower than ~F:13.3 → half */
             else if (frame_ema < 11250) auto_hr = 0;   /* faster than ~F:16   → full */
             eff_hr = auto_hr;
+            /* MOTION-GATED QUARTER (Mike's notion): on a VERY heavy frame, drop to
+             * quarter-res ONLY while the player is moving — the 4px chunk is masked
+             * by motion, and it clips the worst spikes; snap back to half/full the
+             * instant they stand still. Own deadband so it can't flip-flop: arm at
+             * frame_ema>16000 (~F:11 or worse), disarm once it eases below 13000.
+             * Requires we're already at half (auto_hr==1); the overlay's 70KB of
+             * stack headroom makes quarter safe everywhere now. */
+            static int auto_q = 0;
+            if      (frame_ema > 16000) auto_q = 1;
+            else if (frame_ema < 13000) auto_q = 0;
+            if (auto_q && auto_hr == 1 && is_walking) eff_hr = 2;
         }
     }
     SHARED_UC->wall_halfres = (uint8_t)eff_hr;

@@ -124,7 +124,7 @@ static void metrics_mode_check(uint16_t pad) {
      * phantom MODE (mis-read pad on real hardware) never toggles anything. */
     if ((pad & SEGA_CTRL_MODE) && (prev & SEGA_CTRL_MODE)) {
         if ((pad & SEGA_CTRL_X) && !(prev & SEGA_CTRL_X))
-            SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 4);
+            SHARED_UC->wall_res_mode = (uint8_t)((SHARED_UC->wall_res_mode + 1) % 5);
         if ((pad & SEGA_CTRL_Y) && !(prev & SEGA_CTRL_Y)) {
             g_metrics_on ^= 1;
             if (!g_metrics_on) hud_genesis_blank();

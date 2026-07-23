@@ -250,6 +250,15 @@ read_joypad:
 		 * it: six-button iff the 3rd TH-low phase shows the 0000 marker AND
 		 * the 4th TH-low r/l slots are not hard-zero (wired 0 on a 3-button
 		 * pad; up+down-both is the impossible combo this guards against). */
+		/* FIELD REVERT / DIAGNOSE (if a tester's pad misbehaves): the live probe
+		 * word is on the pad-test HUD -- pause menu -> METRICS, the RAW: and lamp
+		 * rows show exactly what this reads. A real six-button pad dropping to
+		 * three-button here means this test is too STRICT; a three-button or
+		 * wireless pad faking six-button (ghost MODE/X/Y/Z) means too LOOSE. To
+		 * back the whole phantom-button fix out (68K + the SH-2 MODE-debounce +
+		 * the START-clears-overlays companions): `git revert e5603cf`. To relax
+		 * only this gate, drop the 0x0C00 r/l check just below and keep the
+		 * phase-3 marker test alone. Origin: smokemonster's field report. */
 		andi.w	#0x0C00,d2
 		beq.s	9f				/* r/l slots hard-0: three-button pad */
 		move.w	d0,d2

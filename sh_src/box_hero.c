@@ -4,8 +4,17 @@
 #include "box_hero_data.h"
 
 /* Decode scratch for the full 320x224 frame (line-major, matches the
- * contiguous framebuffer pixel area). */
-static uint8_t hero_scratch[HERO_W * HERO_H];
+ * contiguous framebuffer pixel area).
+ *
+ * MEMORY OVERLAY: this 71 KB buffer is used ONLY here (the box intro at startup)
+ * and is DEAD during gameplay. Parked in its own .hero_overlay section, which the
+ * linker places ABOVE _end (just under the Master stack). That drops _end ~71 KB
+ * so the gameplay stack has ~75 KB of room instead of ~3.3 KB; the stack's spill
+ * lands in this dead buffer, never in live .bss. The intro's own stack peaks at
+ * ~1.5 KB (measured) — nowhere near this buffer's top — so they never collide.
+ * It's scratch (filled before every use), so the missing .bss zero-init is fine. */
+static uint8_t hero_scratch[HERO_W * HERO_H]
+    __attribute__((section(".hero_overlay")));
 
 /* Palette alone — lets screens that borrowed CRAM entries (the asset viewer
  * paints the chair ramp over 53-56) hand them back without a full re-blit. */

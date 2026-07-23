@@ -103,6 +103,18 @@ SECTIONS {
 		end = _end;
 	} > ram
 
+	/* MEMORY OVERLAY: buffers used ONLY at startup/menu and DEAD during gameplay,
+	 * parked ABOVE _end (just under the Master stack at 0x0603F000). This keeps
+	 * _end -- the protected .bss boundary the stack must never cross -- ~71 KB
+	 * lower, so the render stack has ~75 KB of room; its worst-case spill lands in
+	 * these dead buffers, never in live data. NOLOAD: not in ROM, not zero-inited
+	 * by crt0 -- each buffer is scratch, filled before use. */
+	.hero_overlay (NOLOAD) :
+	{
+		. = ALIGN(0x8);
+		*(.hero_overlay)
+	} > ram
+
 	.eh_frame 0 (NOLOAD) :
 	{
 		*(.eh_frame)

@@ -194,7 +194,7 @@ void menu_update(uint16_t pad) {
          * AUTO drives vertical half-res itself now, so no manual VERT row. */
         if (menu_row == 1) {
             int m = (int)SHARED_UC->wall_res_mode + dir;
-            SHARED_UC->wall_res_mode = (uint8_t)((m + 4) % 4);
+            SHARED_UC->wall_res_mode = (uint8_t)((m + 5) % 5);
         } else if (menu_row == 2) {
             g_metrics_on ^= 1;
             if (!g_metrics_on) hud_genesis_blank();   /* wipe, don't just stop drawing */
@@ -332,8 +332,8 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 48, menu_row == 3, "SHIMMER",
                  (f & LIGHTING_SHIMMER) ? " ON" : "OFF");
     } else if (menu_tab == TAB_VISUALS) {
-        static const char *res_lbl[4] = { "FULL", "HALF", "AUTO", "SERL" };
-        uint8_t m = SHARED_UC->wall_res_mode; if (m > 3) m = 1;
+        static const char *res_lbl[5] = { "FULL", "HALF", "AUTO", "SERL", "QTR" };
+        uint8_t m = SHARED_UC->wall_res_mode; if (m > 4) m = 1;
         draw_row(fb, 32, menu_row == 1, "WALLS", res_lbl[m]);
         draw_row(fb, 40, menu_row == 2, "METRICS",
                  g_metrics_on ? " ON" : "OFF");
