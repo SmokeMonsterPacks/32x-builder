@@ -228,6 +228,10 @@ uint8_t world_map[MAP_H][MAP_W];
 #define FOG_RAMP_DIST     FX(6)
 #define MAX_VIEW_DIST     FX(7)
 #define MAX_VIEW_DIST_INT 7
+/* WALLS=LOD depth bands (perpDist). Below NEAR = full res, NEAR..FAR = half,
+ * beyond FAR = quarter + dither. Tunable — where the three zones fall. */
+#define LOD_T_NEAR        FX(2)
+#define LOD_T_FAR         FX(4)
 
 /* Drop-ceiling grid density — number of panel boundaries per 1-unit map
  * cell. Higher = denser grid. The cost is identical at any density; we
@@ -257,6 +261,18 @@ static fx_t wall_dist[SCREEN_W];
  * neanderthal-behind-a-partition bug). Same cache-through discipline. */
 static int16_t part_topv[SCREEN_W];
 #define PART_TOP(i) (((volatile int16_t *)((uintptr_t)part_topv | 0x20000000))[i])
+
+/* Recorded main-wall silhouette (clamped drawStart/drawEnd) at each raycast
+ * anchor column, for the SEAMS=SMOOTH post-pass. Each CPU only reads back its
+ * OWN column half here (disjoint from the other's), so plain statics — no
+ * cache-through needed, unlike wall_dist/part_topv which the sprite pass reads
+ * across the seam. seam_valid gates: set only where a solid wall actually filled. */
+/* seam_top doubles as the validity flag: -1 = no wall recorded, 0..SCREEN_H-1 =
+ * a solid wall's top (its bottom in seam_bot, depth in WALL_DIST). Saves a
+ * separate seam_valid[] array. */
+static int16_t seam_top[SCREEN_W];
+static int16_t seam_bot[SCREEN_W];
+#define SEAM_VALID(c) (seam_top[c] >= 0)
 
 /* NUM_PARTITIONS_MAX declared in raycast.h so procgen sees the same cap. */
 
@@ -1134,6 +1150,83 @@ static void build_shading_tables(void) {
 /* Linear blend of bright base (weight: SHADE_LEVELS - i) toward fog (weight: i). */
 #define MIX(bright, fog, i) (((bright) * (SHADE_LEVELS - (i)) + (fog) * (i)) / SHADE_LEVELS)
 
+/* ══ Live-tunable palette (COLOR menu tab) ══════════════════════════════════
+ * The four "mood" surfaces — wall, floor, ceiling, light panels — are each
+ * generated from a bright ANCHOR color, transformed by global WARMTH (+R/-B) and
+ * SATURATION (chroma scaled around luma), then faded toward FOG across the 16
+ * shade levels. The COLOR tab edits the anchors + masters live and raycast_pal_
+ * flush() repaints their CRAM in the vblank window. With WARMTH 0 / SAT 100 the
+ * anchors below reproduce the current look exactly; bake settled values here. */
+enum { PSURF_WALL, PSURF_FLOOR, PSURF_CEIL, PSURF_LIGHT, PSURF_N };
+static int8_t g_anchor[PSURF_N][3] = {
+    { 31, 27, 18 },   /* WALL  — milky cream-yellow (Mike-tuned on the PVM) */
+    { 26, 22, 16 },   /* FLOOR — warm tan           */
+    { 25, 22, 16 },   /* CEIL  — warm cream         */
+    { 29, 26, 22 },   /* LIGHT — soft warm ivory    */
+};
+static int g_pal_warmth = 0;     /* -12..+12 : +R -B  */
+static int g_pal_sat    = 100;   /* 0..200 % : chroma */
+static volatile int g_pal_dirty = 0;
+
+static inline int pal_clamp(int v) { return v < 0 ? 0 : (v > 31 ? 31 : v); }
+static void pal_effective(int s, int *er, int *eg, int *eb) {
+    int r = g_anchor[s][0], g = g_anchor[s][1], b = g_anchor[s][2];
+    int luma = (r + g + b) / 3;
+    r = luma + (r - luma) * g_pal_sat / 100 + g_pal_warmth;
+    g = luma + (g - luma) * g_pal_sat / 100;
+    b = luma + (b - luma) * g_pal_sat / 100 - g_pal_warmth;
+    *er = pal_clamp(r); *eg = pal_clamp(g); *eb = pal_clamp(b);
+}
+
+/* Repaint the four mood ramps at brightness lvl/FADE_STEPS. CRAM — call in vblank. */
+void raycast_pal_apply(int lvl) {
+    int wr,wg,wb, fr,fg,fb, cr,cg,cb, lr,lg,lb;
+    pal_effective(PSURF_WALL,  &wr,&wg,&wb);
+    pal_effective(PSURF_FLOOR, &fr,&fg,&fb);
+    pal_effective(PSURF_CEIL,  &cr,&cg,&cb);
+    pal_effective(PSURF_LIGHT, &lr,&lg,&lb);
+    for (int i = 0; i < SHADE_LEVELS; i++) {
+        Hw32xSetBGColor(WALL_BASE + i,  MIX(wr,FOG_R,i)*lvl/FADE_STEPS, MIX(wg,FOG_G,i)*lvl/FADE_STEPS, MIX(wb,FOG_B,i)*lvl/FADE_STEPS);
+        Hw32xSetBGColor(FLOOR_BASE + i, MIX(fr,FOG_R,i)*lvl/FADE_STEPS, MIX(fg,FOG_G,i)*lvl/FADE_STEPS, MIX(fb,FOG_B,i)*lvl/FADE_STEPS);
+        Hw32xSetBGColor(CEIL_BASE + i,  MIX(cr,FOG_R,i)*lvl/FADE_STEPS, MIX(cg,FOG_G,i)*lvl/FADE_STEPS, MIX(cb,FOG_B,i)*lvl/FADE_STEPS);
+    }
+    /* Light: 4 flicker states as brightness ratios of the tuned panel. */
+    static const int lrat[4] = { 100, 93, 79, 62 };
+    for (int i = 0; i < 4; i++)
+        Hw32xSetBGColor(LIGHT_BASE + i, lr*lrat[i]/100*lvl/FADE_STEPS,
+                        lg*lrat[i]/100*lvl/FADE_STEPS, lb*lrat[i]/100*lvl/FADE_STEPS);
+}
+
+/* Called each frame in m_main's vblank window — repaints only when tuning. */
+void raycast_pal_flush(void) {
+    if (!g_pal_dirty) return;
+    g_pal_dirty = 0;
+    raycast_pal_apply(FADE_STEPS);
+}
+
+/* COLOR-tab controls. ch 0/1/2 = R/G/B of surface s; masters are warmth/sat. */
+void raycast_pal_ch(int s, int ch, int dir) {
+    int v = g_anchor[s][ch] + dir; g_anchor[s][ch] = (int8_t)pal_clamp(v); g_pal_dirty = 1;
+}
+int  raycast_pal_ch_get(int s, int ch) { return g_anchor[s][ch]; }
+void raycast_pal_warmth(int dir) {
+    g_pal_warmth += dir; if (g_pal_warmth < -12) g_pal_warmth = -12; if (g_pal_warmth > 12) g_pal_warmth = 12; g_pal_dirty = 1;
+}
+int  raycast_pal_warmth_get(void) { return g_pal_warmth; }
+void raycast_pal_sat(int dir) {
+    g_pal_sat += dir * 5; if (g_pal_sat < 0) g_pal_sat = 0; if (g_pal_sat > 200) g_pal_sat = 200; g_pal_dirty = 1;
+}
+int  raycast_pal_sat_get(void) { return g_pal_sat; }
+/* Reset every mood anchor + masters to the shipped defaults. Keep this literal
+ * in sync with the g_anchor[] initializer above (both are the baked palette). */
+void raycast_pal_reset(void) {
+    static const int8_t def[PSURF_N][3] = {
+        { 31, 27, 18 }, { 26, 22, 16 }, { 25, 22, 16 }, { 29, 26, 22 } };
+    for (int s = 0; s < PSURF_N; s++)
+        for (int c = 0; c < 3; c++) g_anchor[s][c] = def[s][c];
+    g_pal_warmth = 0; g_pal_sat = 100; g_pal_dirty = 1;
+}
+
 /* Set the gameplay palette scaled to brightness lvl/FADE_STEPS (FADE_STEPS
  * = full bright, 0 = black) — drives the lobby->map fade-through-black.
  * Must be called inside vblank (CRAM write). FADE_STEPS is in raycast.h. */
@@ -1152,21 +1245,9 @@ void raycast_paint_chair_ramp(void) {
 void raycast_set_brightness(int lvl) {
     if (lvl < 0) lvl = 0; else if (lvl > FADE_STEPS) lvl = FADE_STEPS;
     Hw32xSetBGColor(0, 0, 0, 0);
-    for (int i = 0; i < SHADE_LEVELS; i++) {
-        Hw32xSetBGColor(WALL_BASE + i,
-            MIX(30,FOG_R,i)*lvl/FADE_STEPS, MIX(28,FOG_G,i)*lvl/FADE_STEPS, MIX(18,FOG_B,i)*lvl/FADE_STEPS);
-        Hw32xSetBGColor(FLOOR_BASE + i,
-            MIX(25,FOG_R,i)*lvl/FADE_STEPS, MIX(21,FOG_G,i)*lvl/FADE_STEPS, MIX(15,FOG_B,i)*lvl/FADE_STEPS);
-        Hw32xSetBGColor(CEIL_BASE + i,
-            MIX(25,FOG_R,i)*lvl/FADE_STEPS, MIX(23,FOG_G,i)*lvl/FADE_STEPS, MIX(16,FOG_B,i)*lvl/FADE_STEPS);
-    }
-    {
-        /* Soft warm-white troffer, movie-matched: tube (0) vs panel (1) is a
-         * SUBTLE 2-step variance, not the old stark 8; gentle fog steps below. */
-        static const uint8_t lt[4][3] = {{29,29,26},{27,27,24},{23,23,20},{18,18,15}};
-        for (int i = 0; i < 4; i++)
-            Hw32xSetBGColor(LIGHT_BASE + i, lt[i][0]*lvl/FADE_STEPS, lt[i][1]*lvl/FADE_STEPS, lt[i][2]*lvl/FADE_STEPS);
-    }
+    /* Wall/floor/ceil/light ramps come from the tunable palette engine (COLOR
+     * tab), so a fade re-applies whatever the anchors/masters currently are. */
+    raycast_pal_apply(lvl);
     {
         static const uint8_t ch[4][3] = { {12,10,7}, {15,12,9}, {17,14,11}, {18,15,12} };
         for (int i = 0; i < 4; i++)
@@ -1239,48 +1320,15 @@ static void build_palette(void) {
                         (18 * (7 - i) + FOG_R * i) / 7,
                         (16 * (7 - i) + FOG_G * i) / 7,
                         (13 * (7 - i) + FOG_B * i) / 7);
-    /* Walls: milky cream-yellow. Desaturated from the old gold (30,27,13,
-     * R-B gap 17) by lifting B to 18 (gap 12, sat ~0.40) — reads as pale
-     * old wallpaper under fluorescent light rather than school-bus gold,
-     * matching the washed-out HobbyTown reference. */
-    for (int i = 0; i < SHADE_LEVELS; i++) {
-        Hw32xSetBGColor(WALL_BASE + i,
-                        MIX(30, FOG_R, i),
-                        MIX(28, FOG_G, i),
-                        MIX(18, FOG_B, i));
-    }
-    /* Carpet: muted warm tan, hue leaned back toward the original warm-orange
-     * cast while keeping the desaturated look. Journey: old Tang (27,22,11,
-     * sat ~0.59) -> flat tan (23,21,17, ~0.26, too dead) -> (24,21,16, ~0.33)
-     * -> here (25,21,15): R-G gap widened to 4 (the warm/orange character)
-     * and B nudged down, sat ~0.40 — warmer than neutral tan but well clear
-     * of the old orange. Still a touch darker than the walls so the seam reads. */
-    for (int i = 0; i < SHADE_LEVELS; i++) {
-        Hw32xSetBGColor(FLOOR_BASE + i,
-                        MIX(25, FOG_R, i),
-                        MIX(21, FOG_G, i),
-                        MIX(15, FOG_B, i));
-    }
-    /* Ceiling: pulled further into the yellow family — was reading too
-     * "white drop ceiling" against the warm walls. B dropped from 18 to
-     * 14, G from 26 to 25; still slightly cooler/less saturated than the
-     * walls (30,27,13) but unmistakably in the same warm yellow palette. */
-    for (int i = 0; i < SHADE_LEVELS; i++) {
-        Hw32xSetBGColor(CEIL_BASE + i,
-                        MIX(25, FOG_R, i),
-                        MIX(23, FOG_G, i),
-                        MIX(16, FOG_B, i));
-    }
+    /* Walls / carpet / ceiling / fluorescent panels all come from the tunable
+     * palette engine (COLOR tab) — anchors default to the shipped look, warmth 0,
+     * sat 100. Edit anchors there live; bake settled values into g_anchor[]. */
+    raycast_pal_apply(FADE_STEPS);
     /* Crawlspace ceiling: dark-beige drop-panel. The fill is a warm muted tan;
      * the seam is a darker tan for the panel grid, which gives the surface the
      * parallax/structure cue that a flat fill lacked (flat read as a void). */
     Hw32xSetBGColor(LOWCEIL_COLOR, 16, 14, 10);
     Hw32xSetBGColor(LOWCEIL_SEAM,  10,  8,  5);
-    /* Fluorescent lights: 4 brightness states for flicker (full / 75 / 50 / 25%). */
-    Hw32xSetBGColor(LIGHT_BASE + 0, 29, 29, 26);   /* tube: soft warm white */
-    Hw32xSetBGColor(LIGHT_BASE + 1, 27, 27, 24);   /* panel: 2 steps below tube (subtle) */
-    Hw32xSetBGColor(LIGHT_BASE + 2, 23, 23, 20);   /* gentle fog steps */
-    Hw32xSetBGColor(LIGHT_BASE + 3, 18, 18, 15);
     /* Neanderthal cardboard standup. Index 0 = cardboard back (warm tan
      * brown). 1-7 = quantized figure shades pulled from the 32x64 PNG
      * texture by 7-bucket brightness quantization. */
@@ -1782,25 +1830,27 @@ void raycast_load_lobby(void) {
  * mimics a dying fluorescent's flicker. Must be called from inside
  * vblank (after the COMM12 tick wait) to avoid mid-frame CRAM tearing. */
 void raycast_shimmer(void) {
-    /* Gated by LIGHTING_SHIMMER. When off, leave CRAM at the original
-     * build_palette values — the WALL_BASE/CEIL_BASE entries stop
-     * pulsing each frame. */
-    if (!(SHARED_UC->lighting_flags & LIGHTING_SHIMMER)) {
-        Hw32xSetBGColor(WALL_BASE, 30, 25, 6);
-        Hw32xSetBGColor(CEIL_BASE, 26, 26, 26);
-        return;
+    /* Flicker AROUND the current tuned palette — never hardcode. This runs every
+     * frame, so pulling the bright wall/ceil from the palette engine also makes
+     * it the per-frame re-asserter of live COLOR-tab edits (fixing the old bug
+     * where stale constants here stamped grey over the brightest ceiling and
+     * clobbered every palette change). When shimmer is off the flicker is 0, so
+     * it simply holds the tuned bright values. */
+    int wr, wg, wb, cr, cg, cb;
+    pal_effective(PSURF_WALL, &wr, &wg, &wb);
+    pal_effective(PSURF_CEIL, &cr, &cg, &cb);
+    int wall_f = 0, ceil_f = 0;
+    if (SHARED_UC->lighting_flags & LIGHTING_SHIMMER) {
+        static uint32_t frame_count = 0;
+        frame_count++;
+        uint32_t r = frame_count * 1103515245u + 12345u;   /* LCG, top bits cleanest */
+        wall_f = (r >> 28) & 3;     /* 0..3, barely visible per pixel, reads as flicker */
+        ceil_f = (r >> 26) & 3;
     }
-    static uint32_t frame_count = 0;
-    frame_count++;
-    /* LCG, top bits are the most uncorrelated. */
-    uint32_t r = frame_count * 1103515245u + 12345u;
-    int wall_f = (r >> 28) & 3;     /* 0..3 */
-    int ceil_f = (r >> 26) & 3;
-    /* Subtract from bright base. WALL_BASE base is (30,25,6); CEIL_BASE
-     * base is (26,26,26). Subtracting up to 3 units is barely visible
-     * per pixel but reads as flicker when it changes every frame. */
-    Hw32xSetBGColor(WALL_BASE, 30 - wall_f, 25 - wall_f, 6);
-    Hw32xSetBGColor(CEIL_BASE, 26 - ceil_f, 26 - ceil_f, 26 - ceil_f);
+    #define SUB(v, f) ((v) - (f) < 0 ? 0 : (v) - (f))
+    Hw32xSetBGColor(WALL_BASE, SUB(wr, wall_f), SUB(wg, wall_f), wb);  /* wall B steady */
+    Hw32xSetBGColor(CEIL_BASE, SUB(cr, ceil_f), SUB(cg, ceil_f), SUB(cb, ceil_f));
+    #undef SUB
 }
 
 
@@ -4536,7 +4586,12 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
         uint8_t fogc = (uint8_t)(FLOOR_BASE + SHADE_LEVELS - 1);
         for (int c = col_start; c < col_end; c++) *hp++ = fogc;
     }
-    for (int y = horizon_y + 1; y < SCREEN_H; y++) {
+    /* VERT: floor-cast only the even rows (line table duplicates them down).
+     * Halves the per-row DIVU + stain stamps. Start on the first even row past
+     * the horizon so the even grid matches the wall/clear passes. */
+    int cystep = SHARED_UC->wall_vert ? 2 : 1;
+    int y0 = (cystep == 2) ? ((horizon_y + 2) & ~1) : (horizon_y + 1);
+    for (int y = y0; y < SCREEN_H; y += cystep) {
         if (y < 0) continue;        /* extreme positive pitch */
         /* Skip + LOD key off the geometric (unshifted) distance so far rows
          * stay fog-skipped. The crouch color shift only brightens what we DO
@@ -4626,13 +4681,19 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                 int dsh = base_shade + DARK_ROOM_SHADE;
                 if (dsh > SHADE_LEVELS - 1) dsh = SHADE_LEVELS - 1;
                 uint8_t ddk = (uint8_t)(FLOOR_BASE + dsh);
-                int c0 = cA & ~1, c1 = cB | 1;
-                if (c1 > col_end - 1) c1 = col_end - 1;
+                /* Fill 4px words (was 2px) — same solid coverage, half the stores
+                 * and half the per-column dark tests. And skip cell_is_dark when
+                 * there's a single dark room: the column-clip above already bounds
+                 * us to its bbox, so every column in range is dark. Only disjoint
+                 * dark rooms (union bbox spans the gaps) need the per-column test. */
+                int test_dark = (g_map_n_dark > 1);
+                int c0 = cA & ~3; if (c0 < col_start) c0 = col_start;
                 uint8_t *drow = fb + y * SCREEN_W;
                 fx_t dwx = wx0 + stepX * c0, dwy = wy0 + stepY * c0;
-                for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
-                    if (!cell_is_dark(dwx, dwy)) continue;
-                    *(uint16_t *)(drow + col) = WDUP(ddk);
+                for (int col = c0; col + 3 < col_end && col <= cB;
+                     col += 4, dwx += stepX * 4, dwy += stepY * 4) {
+                    if (test_dark && !cell_is_dark(dwx, dwy)) continue;
+                    *(uint32_t *)(drow + col) = LDUP(ddk);
                 }
             }
         }
@@ -4782,7 +4843,7 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
             int oty = (int)(ty >> FX_SHIFT);
             if (oty >= DOOR_TEX_HEIGHT) oty = DOOR_TEX_HEIGHT - 1;
             uint8_t c8 = dlut[col_base[oty]];
-            if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
+            if (hr >= 2) *(uint32_t *)pd = LDUP(c8); else if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
             pd += SCREEN_W;
             ty += ty_step;
         }
@@ -4830,7 +4891,7 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
             int oty = (int)(ty >> FX_SHIFT);
             if (oty >= DOOR_TEX_HEIGHT) oty = DOOR_TEX_HEIGHT - 1;
             uint8_t c8 = dlut[col_base[oty]];
-            if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
+            if (hr >= 2) *(uint32_t *)pd = LDUP(c8); else if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
             pd += SCREEN_W;
             ty += ty_step;
         }
@@ -4903,7 +4964,7 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
         } else {
             c8 = dlut[col_base[oty]];
         }
-        if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
+        if (hr >= 2) *(uint32_t *)pd = LDUP(c8); else if (hr) *(uint16_t *)pd = WDUP(c8); else *pd = c8;
         pd += SCREEN_W;
     }
 }
@@ -4949,8 +5010,23 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     /* Effective half-res, resolved by the primary each frame (menu mode + lobby
      * override + AUTO frame-time decision) and published via cache-through so
      * both CPUs draw the same resolution. */
-    const int hr = SHARED_UC->wall_halfres;   /* 0 full, 1 half, 2 quarter */
-    const int cstep = (hr >= 2) ? 4 : (hr ? 2 : 1);
+    /* hr0/cstep0 are the GLOBAL (non-LOD) resolution. In WALLS=LOD the loop below
+     * shadows hr/cstep per quad from depth; hr0/cstep0 stay the fallback and drive
+     * the gates here. */
+    const int hr0 = SHARED_UC->wall_halfres;  /* 0 full, 1 half, 2 quarter */
+    const int vert = SHARED_UC->wall_vert;    /* 1 = store even rows only (vertical half-res) */
+    const int cstep0 = (hr0 >= 2) ? 4 : (hr0 ? 2 : 1);
+    /* SEAMS=SMOOTH only bites when the fill is coarsened (cstep>1). The half→full
+     * dissolve runs at FULL res (cstep==1) and re-doubles pairs over the wall
+     * band, so it needs the SAME silhouette record. Record for either; clear the
+     * validity for this half up front, anchors set it as they fill. */
+    const int seam_smooth = SHARED_UC->wall_seam_smooth && cstep0 > 1;
+    const int dissolve    = (cstep0 == 1) ? (int)SHARED_UC->wall_dissolve : 0;
+    const int qdither     = (cstep0 == 4) ? (int)SHARED_UC->wall_qdither : 0;
+    const int lod         = (cstep0 == 1) ? (int)SHARED_UC->wall_lod : 0;
+    const int seam_rec    = seam_smooth || dissolve || qdither || lod;
+    if (seam_rec)
+        for (int c = col_start; c < col_end; c++) seam_top[c] = -1;
 
     /* Decal broad-phase: filter the wall-embedded decals down to the ones
      * actually in front of the camera and within this CPU's screen span,
@@ -4986,7 +5062,28 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         }
     }
 
-    for (int col = col_start; col < col_end; col += cstep) {
+    /* WALLS=LOD wraps the column loop in 4-col quads: each quad picks its render
+     * resolution from the PREVIOUS quad's depth (walls are spatially coherent, so
+     * the one-quad lag is invisible except a frame of the wrong res at a hard
+     * corner), and the inner loop casts 1/2/4 rays accordingly — the real perf
+     * win: far quads raycast once and word-fill 4px. For every non-LOD mode
+     * cstep_q == cstep0 for all quads, so this reproduces the old loop exactly. */
+    fx_t lod_prev_depth = 0;   /* 0 => nearest (full res) for the first quad */
+    /* Motion drops the NEAR band from full to half: chunkiness is masked while
+     * moving, and it's the biggest (most expensive) columns, so it's the best
+     * place to reclaim time. Snaps back to full the instant you stand still to
+     * take stock. (is_walking = any motion; swap to is_running for sprint-only.) */
+    int lod_near_cs = (lod && SHARED_UC->is_walking) ? 2 : 1;
+    for (int qcol = col_start; qcol < col_end; qcol += 4) {
+        int cstep_q = cstep0;
+        if (lod) {
+            cstep_q = (lod_prev_depth < LOD_T_NEAR) ? lod_near_cs
+                    : (lod_prev_depth < LOD_T_FAR)  ? 2 : 4;
+        }
+        fx_t quad_depth = 0x7FFFFFFF;
+        for (int col = qcol; col < qcol + 4 && col < col_end; col += cstep_q) {
+        int cstep = cstep_q;
+        int hr = lod ? ((cstep_q >= 4) ? 2 : (cstep_q >= 2) ? 1 : 0) : hr0;
         WALL_DIST(col) = 0x7FFFFFFF;
         for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = 0x7FFFFFFF;
         PART_TOP(col) = 0;
@@ -5896,6 +5993,15 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         fx_t tex_step = (fx_t)divu_read();
         fx_t tex_pos  = (fx_t)(drawStart - wall_top) * tex_step;
         uint8_t *p = (uint8_t *)fb + col + drawStart * SCREEN_W;
+        /* Record this anchor's drawn silhouette for the SEAMS=SMOOTH post-pass.
+         * We're past every void/hidden/see-over goto, so a solid wall WILL fill
+         * here — exactly the columns worth smoothing. */
+        if (seam_rec) {
+            seam_top[col] = (int16_t)drawStart;
+            seam_bot[col] = (int16_t)drawEnd;
+            /* seam_top[col] set above is the validity flag; depth from WALL_DIST(col) */
+        }
+        if (lod && perpDist < quad_depth) quad_depth = perpDist;  /* drives next quad's res */
         /* Hand-rolled SH-2 asm wall column inner loop. 4 pixels per
          * iteration, no spills, indexed byte load via @(R0,Rm), DT-
          * driven count-down for one cmp/bra per 4 pixels.
@@ -5953,6 +6059,32 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 if (by <= drawEnd) { *(uint16_t *)p = WDUP(shadow_color); p += SCREEN_W; by++; }
                 for (; by <= drawEnd; by++) { *(uint16_t *)p = WDUP(base_color); p += SCREEN_W; }
             }
+        } else if (vert) {
+            /* VERTICAL half-res: full-width columns, but store only EVEN rows;
+             * the line table shows each even row twice (2px-tall blocks). This
+             * halves the 320-strided, uncached framebuffer stores that BIND this
+             * loop (per PERF_30FPS: the store is ~60% of per-pixel cost). C loop,
+             * not the 4px asm — we've already halved the stores (the bottleneck),
+             * so a second row-strided asm variant isn't worth the surface area.
+             * Falls through to the molding/baseboard on the same even grid. */
+            const int RS = SCREEN_W << 1;              /* even-row byte stride */
+            int y = (drawStart + 1) & ~1;              /* first even row >= drawStart */
+            uint8_t *pv = (uint8_t *)fb + col + y * SCREEN_W;
+            if (total > 0 && detail_factor == 0) {
+                uint8_t flat = lut5[0];
+                for (; y <= wall_end; y += 2) { *pv = flat; pv += RS; }
+            } else if (total > 0) {
+                fx_t tstep2 = tex_step << 1;
+                fx_t tp = (fx_t)(y - wall_top) * tex_step;
+                for (; y <= wall_end; y += 2) {
+                    *pv = shade_lut[(tp >> FX_SHIFT) & tex_h_mask];
+                    pv += RS;
+                    tp += tstep2;
+                }
+            }
+            /* Molding shadow line then baseboard, snapped onto the even grid. */
+            if (y <= drawEnd) { *pv = shadow_color; pv += RS; y += 2; }
+            for (; y <= drawEnd; y += 2) { *pv = base_color; pv += RS; }
         } else {
         if (total > 0 && detail_factor == 0) {
             /* Faded distance: the pattern adds nothing, so the whole wall
@@ -6428,7 +6560,9 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         }
             if (fg_n) { ovl_acc += (uint16_t)(prof_frt_read() - ovl_t0); ovl_cols++; }
         }
-    }
+        }   /* inner per-sub-block loop */
+        if (lod && quad_depth != 0x7FFFFFFF) lod_prev_depth = quad_depth;
+    }       /* per-quad loop */
     if (col_start == 0) {              /* primary half only: HUD reads these */
         prof_dda_steps = (uint16_t)dda_steps;
         prof_dda_fat   = (uint16_t)dda_fat;
@@ -6440,6 +6574,136 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         prof_ovl_px    = ovl_px_acc;
     }
 
+    /* ── SEAMS=SMOOTH: silhouette anti-staircase ────────────────────────────
+     * The coarse fill gave every column in a cstep-block the anchor's top and
+     * bottom, so the wall→ceiling and wall→floor edges staircase. A flat face's
+     * edges are straight lines on screen, so interpolate each block's edges
+     * between its two anchors and repaint just the fringe: erase the overshoot
+     * back to the ceiling/floor gradient (row_color, same as the clear pass),
+     * or extend the wall into the undershoot. The coarse interior is untouched —
+     * only the 1px silhouette moves, which is the part the eye actually reads. */
+    if (seam_smooth) {
+        int sample_bias = (SCREEN_H / 2 - horizon_y) + CROUCH_GRAD_SHIFT(eye_h);
+        int last = col_end - cstep0;              /* need the next anchor in-half */
+        for (int ac = col_start; ac < last; ac += cstep0) {
+            int an = ac + cstep0;
+            if (!SEAM_VALID(ac) || !SEAM_VALID(an)) continue;
+            int t0 = seam_top[ac], b0 = seam_bot[ac];
+            int dt = seam_top[an] - t0, db = seam_bot[an] - b0;
+            if (!dt && !db) continue;            /* block already flat */
+            /* Only smooth when both anchors sit on the SAME surface — i.e. their
+             * depths are close. A near wall's edge can drop steeply across 4
+             * columns yet still be one continuous face (small depth delta); a
+             * corner or an opening is a depth JUMP. Testing depth (not the screen
+             * pixel jump) lets steep-but-continuous edges smooth while leaving
+             * genuine silhouette breaks hard, so we don't eat a near wall's
+             * pixels into a far one behind it. Threshold: half the nearer depth. */
+            fx_t d0 = WALL_DIST(ac), d1 = WALL_DIST(an);
+            fx_t dd = d1 - d0; if (dd < 0) dd = -dd;
+            if (dd > (d0 >> 1)) continue;        /* depth step → corner, leave hard */
+            for (int j = 1; j < cstep0; j++) {
+                int x  = ac + j;
+                int tt = t0 + dt * j / cstep0;
+                int bb = b0 + db * j / cstep0;
+                if (tt < 0) tt = 0; else if (tt >= SCREEN_H) tt = SCREEN_H - 1;
+                if (bb < 0) bb = 0; else if (bb >= SCREEN_H) bb = SCREEN_H - 1;
+                uint8_t *fx = fb + x;
+                /* TOP: shift the wall's top edge from t0 to tt. */
+                if (tt > t0) {                   /* overshoot → restore ceiling */
+                    for (int y = t0; y < tt; y++) {
+                        int sy = y + sample_bias;
+                        if (y <= horizon_y && sy > SCREEN_H / 2) sy = SCREEN_H / 2;
+                        if (sy < 0) sy = 0; else if (sy >= SCREEN_H) sy = SCREEN_H - 1;
+                        fx[y * SCREEN_W] = row_color[sy];
+                    }
+                } else if (tt < t0) {            /* undershoot → extend wall up */
+                    uint8_t wc = fx[t0 * SCREEN_W];
+                    for (int y = tt; y < t0; y++) fx[y * SCREEN_W] = wc;
+                }
+                /* BOTTOM: shift the wall's bottom edge from b0 to bb. */
+                if (bb < b0) {                   /* overshoot → restore floor */
+                    for (int y = bb + 1; y <= b0; y++) {
+                        int sy = y + sample_bias;
+                        if (sy < 0) sy = 0; else if (sy >= SCREEN_H) sy = SCREEN_H - 1;
+                        fx[y * SCREEN_W] = row_color[sy];
+                    }
+                } else if (bb > b0) {            /* undershoot → extend wall down */
+                    uint8_t wc = fx[b0 * SCREEN_W];
+                    for (int y = b0 + 1; y <= bb; y++) fx[y * SCREEN_W] = wc;
+                }
+            }
+        }
+    }
+
+    /* ── Half→full dither DISSOLVE ──────────────────────────────────────────
+     * Runs only at full res during the up-transition (transient, while still —
+     * budget is relaxed). Re-double a dither-selected, shrinking fraction of
+     * column pairs back to half over their wall band: the even column is copied
+     * onto the odd, so that pair reads 2px like half-res. As the level decays
+     * 3→2→1→0, fewer pairs are faked and the wall focus-pulls up to full. The
+     * dith4 order spreads the faked pairs so the sweep isn't banded. */
+    if (dissolve) {
+        static const uint8_t dith4[4] = { 0, 2, 1, 3 };
+        for (int x = col_start; x + 1 < col_end; x += 2) {
+            if (!SEAM_VALID(x)) continue;
+            if (dith4[(x >> 1) & 3] >= dissolve) continue;   /* this pair stays full */
+            int y0 = seam_top[x], y1 = seam_bot[x];
+            uint8_t *sx = fb + x;
+            for (int y = y0; y <= y1; y++) sx[y * SCREEN_W + 1] = sx[y * SCREEN_W];
+        }
+    }
+
+    /* ── Quarter-res boundary DITHER ────────────────────────────────────────
+     * Real spatial ordered-dither: ramp the right side of each 4px block toward
+     * the NEXT block's color with a 4x4 Bayer threshold that rises left→right
+     * (~10/30/60% at cols +1/+2/+3). The flat 4px block becomes a dithered
+     * gradient into its neighbour, so the hard shade step softens. Static per
+     * frame (no stutter); the Bayer blends on both axes so it reads smooth on the
+     * PVM and as an intentional dither texture (not a blocky step) on sharp HDMI.
+     * Runs only at quarter (cstep==4) and only over each block's wall band. */
+    if (qdither) {
+        static const uint8_t bayer4[4][4] = {
+            {  0,  8,  2, 10 }, { 12,  4, 14,  6 },
+            {  3, 11,  1,  9 }, { 15,  7, 13,  5 } };
+        for (int ac = col_start; ac + 4 < col_end; ac += 4) {
+            if (!SEAM_VALID(ac)) continue;
+            int y0 = seam_top[ac], y1 = seam_bot[ac];
+            uint8_t *base = fb + ac;
+            for (int y = y0; y <= y1; y++) {
+                uint8_t *row = base + y * SCREEN_W;
+                uint8_t bcol = row[4];                 /* next block's left column */
+                const uint8_t *br = bayer4[y & 3];
+                if (br[3] <  9) row[3] = bcol;         /* ~60% toward neighbour */
+                if (br[2] <  5) row[2] = bcol;         /* ~30% */
+                if (br[1] <  2) row[1] = bcol;         /* ~10% */
+            }
+        }
+    }
+
+    /* ── WALLS=LOD: dither the FAR quads ────────────────────────────────────
+     * The render already drew each quad at its own resolution (near = 4 full
+     * cols, mid = 2 half-pairs, far = 1 quarter block — the actual perf win), so
+     * nothing needs re-blocking here. This just softens the far quarter blocks:
+     * a Bayer ramp of the block's right side toward the next quad, same as the
+     * global DITHER but keyed to depth (WALL_DIST >= LOD_T_FAR). */
+    if (lod) {
+        static const uint8_t bayer4[4][4] = {
+            {  0,  8,  2, 10 }, { 12,  4, 14,  6 },
+            {  3, 11,  1,  9 }, { 15,  7, 13,  5 } };
+        for (int q = col_start; q + 4 < col_end; q += 4) {
+            if (!SEAM_VALID(q) || WALL_DIST(q) < LOD_T_FAR) continue;  /* far quads only */
+            int y0 = seam_top[q], y1 = seam_bot[q];
+            uint8_t *base = fb + q;
+            for (int y = y0; y <= y1; y++) {
+                uint8_t *r = base + y * SCREEN_W;
+                uint8_t bcol = r[4];                   /* next quad's left column */
+                const uint8_t *br = bayer4[y & 3];
+                if (br[3] <  9) r[3] = bcol;           /* ~60% toward neighbour */
+                if (br[2] <  5) r[2] = bcol;           /* ~30% */
+                if (br[1] <  2) r[1] = bcol;           /* ~10% */
+            }
+        }
+    }
 }
 
 /* The other tex_pos reference in this file is in the old fixed-split
@@ -6475,6 +6739,9 @@ RAMTEXT void raycast_clear_half(int col_start, int col_end) {
     uint32_t *fb32 = (uint32_t *)fb;
     int col_words = (col_end - col_start) >> 2;
     int col_word_start = col_start >> 2;
+    /* VERT: only even rows are ever displayed (line table), so clear only those
+     * — halves this pass's stores. Odd rows keep stale content, unseen. */
+    int ystep = SHARED_UC->wall_vert ? 2 : 1;
     /* Background fill must follow the shifted horizon — otherwise the
      * ceiling-vs-floor color split stays pinned at SCREEN_H/2 while the
      * wall draws and grid overlays move with pitch, producing a visible
@@ -6492,7 +6759,7 @@ RAMTEXT void raycast_clear_half(int col_start, int col_end) {
      * the whole tone gradient travels together. */
     int sample_bias = (SCREEN_H / 2 - horizon_y)
                     + CROUCH_GRAD_SHIFT(SHARED_UC->eye_h);
-    for (int y = 0; y < SCREEN_H; y++) {
+    for (int y = 0; y < SCREEN_H; y += ystep) {
         int sy = y + sample_bias;
         /* Ceiling rows must never sample floor colors: the crouch shift would
          * otherwise pull floor (mustard) up above the horizon — the bleed band
@@ -6508,6 +6775,33 @@ RAMTEXT void raycast_clear_half(int col_start, int col_end) {
         for (int x = 0; x < col_words; x++) row[x] = c32;
     }
 }
+
+/* ── AUTO resolution boundaries (the "boundaries we establish") ─────────────
+ * frame_ema is the smoothed frame period — HIGHER = slower frame. These are the
+ * trigger points, in one place to tune. Half is the normal moving tier; QUARTER
+ * is last-resort — it only arms when the frame is much slower than the half
+ * boundary, AND you're already at half, AND moving. Raised QTR_ON for tolerance:
+ * quarter now needs a genuinely struggling frame, not just "a bit heavy". */
+#define AUTO_HALF_ON   13500   /* above → drop to half   (~sub-F:13) */
+#define AUTO_HALF_OFF  11250   /* below → back to full   (~F:16+)    */
+#define AUTO_QTR_ON    19000   /* above → allow quarter  (was 16000; more tolerant) */
+#define AUTO_QTR_OFF   15500   /* below → release quarter back to half (stays in half band) */
+
+/* Frames of held-still before AUTO heads to full res. Tiny: the instant input
+ * stops we snap to half, then collapse straight to full. Nonzero so a one-frame
+ * is_walking dropout mid-stride can't strobe. */
+#define STILL_FULL_FRAMES 2
+/* Per-level dwell while COARSENING down (full→half→quarter) — kept gentle so the
+ * drop into low-res never pops while moving. Sharpening UP uses RES_STEP_UP. */
+#define RES_STEP_FRAMES 4
+/* Sharpen-UP dwell: 1 = collapse the up-transition to full as fast as frames
+ * allow. A snap-guard below still shows the half breather for one frame first. */
+#define RES_STEP_UP 1
+/* Half→full dither dissolve (the one transition with no intermediate res).
+ * Collapsed to a single ~50% softener frame: kick 2, peel 2/frame → one dither
+ * frame then full. Pure frame-count, no compute cost. */
+#define DISSOLVE_STEPS 2
+#define DISSOLVE_DECAY 2
 
 void raycast_render(void) {
     uint16_t prof_start = prof_frt_read();
@@ -6530,6 +6824,9 @@ void raycast_render(void) {
      * self-stabilizes since switching res moves the period across the band). */
     static int auto_hr = 1;
     int eff_hr;
+    int vert = 0;                          /* VERT: skip odd rows + row-double via line table */
+    int lod  = 0;                          /* LOD: full render + depth-banded re-block post-pass */
+    int dissolve_out = 0;                  /* AUTO half→full dither dissolve level (0 = off) */
     if (g_lobby_ceiling) {
         eff_hr = 0;
     } else {
@@ -6538,9 +6835,11 @@ void raycast_render(void) {
         else if (mode == 1) eff_hr = 1;
         else if (mode == 3) eff_hr = 0;   /* SERIAL diagnostic: full res */
         else if (mode == 4) eff_hr = 2;   /* QTR: force quarter — inspect the chunk in isolation */
+        else if (mode == 5) { eff_hr = 0; vert = 1; }  /* VERT: full horizontal + vertical half-res */
+        else if (mode == 6) { eff_hr = 0; lod  = 1; }  /* LOD: full render + depth-banded re-block */
         else {
-            if      (frame_ema > 13500) auto_hr = 1;   /* slower than ~F:13.3 → half */
-            else if (frame_ema < 11250) auto_hr = 0;   /* faster than ~F:16   → full */
+            if      (frame_ema > AUTO_HALF_ON)  auto_hr = 1;   /* slower → half */
+            else if (frame_ema < AUTO_HALF_OFF) auto_hr = 0;   /* faster → full */
             eff_hr = auto_hr;
             /* MOTION-GATED QUARTER (Mike's notion): on a VERY heavy frame, drop to
              * quarter-res ONLY while the player is moving — the 4px chunk is masked
@@ -6550,12 +6849,66 @@ void raycast_render(void) {
              * Requires we're already at half (auto_hr==1); the overlay's 70KB of
              * stack headroom makes quarter safe everywhere now. */
             static int auto_q = 0;
-            if      (frame_ema > 16000) auto_q = 1;
-            else if (frame_ema < 13000) auto_q = 0;
+            if      (frame_ema > AUTO_QTR_ON)  auto_q = 1;
+            else if (frame_ema < AUTO_QTR_OFF) auto_q = 0;
             if (auto_q && auto_hr == 1 && is_walking) eff_hr = 2;
+            /* STILLNESS RATCHET (Mike): motion masks the chunk, so AUTO happily
+             * sits at half/quarter while you move through a busy room. But the
+             * instant you STOP to take stock, judder can't hide anything and fps
+             * matters less (nothing's moving) — so spend the frame on detail.
+             * Count stationary frames and step resolution UP the longer we hold
+             * still, OVERRIDING the frame_ema clamp that otherwise pins a busy
+             * room at half. Beat 1 (quarter→half) is already instant on stop
+             * because quarter is motion-gated above; beat 2 lifts to full once we
+             * hold past the "taking stock" pause. Moving resets it to 0, snapping
+             * straight back to the responsive low-res the instant you step off. */
+            static int still_frames = 0;
+            if (is_walking) still_frames = 0;
+            else if (still_frames < STILL_FULL_FRAMES) still_frames++;
+            int still_full = (still_frames >= STILL_FULL_FRAMES);
+            if (still_full) eff_hr = 0;   /* held still → full (taking stock) */
+
+            /* SMOOTH the transition. A hard full→quarter pop is jarring even while
+             * moving, so ease the published res one level per RES_STEP_FRAMES —
+             * it steps full→half→quarter over <1s and motion hides the small
+             * steps. The stillness sharpen stays snappy: once held still and
+             * heading to full, step every frame so it reads as a deliberate snap. */
+            static int cur_hr = 0, step_ctr = 0;
+            int target = eff_hr;
+            /* The instant input stops, hop straight to half as a 1-frame step —
+             * never sit at quarter while still. `snapped` holds the ramp off for
+             * that one frame so the half breather is actually visible before we
+             * collapse to full. Quarter is motion-only, so this fires only on the
+             * moving→still edge. */
+            int snapped = 0;
+            if (!is_walking && cur_hr > 1) { cur_hr = 1; step_ctr = 0; snapped = 1; }
+            /* Asymmetric ease: coarsening DOWN stays gentle (RES_STEP_FRAMES) so the
+             * drop into low-res never pops while moving; sharpening UP collapses
+             * (RES_STEP_UP=1) since going to full costs no visible perf. */
+            int step_frames = (target < cur_hr) ? RES_STEP_UP : RES_STEP_FRAMES;
+            if (!snapped && cur_hr != target) {
+                if (++step_ctr >= step_frames) { step_ctr = 0; cur_hr += (target > cur_hr) ? 1 : -1; }
+            } else if (cur_hr == target) {
+                step_ctr = 0;
+            }
+            eff_hr = cur_hr;
+
+            /* Dither dissolve: half→full is the one step with no intermediate
+             * resolution, so kick a focus-pull the frame we reach full FROM half
+             * and decay it over DISSOLVE_STEPS frames of full-res rendering. */
+            static int prev_cur = 0, dissolve_ctr = 0;
+            if (prev_cur == 1 && cur_hr == 0)      dissolve_ctr = DISSOLVE_STEPS;
+            else if (cur_hr != 0)                  dissolve_ctr = 0;   /* coarsened again: abort */
+            else if (dissolve_ctr > 0)             dissolve_ctr -= DISSOLVE_DECAY;
+            if (dissolve_ctr < 0) dissolve_ctr = 0;
+            prev_cur = cur_hr;
+            dissolve_out = dissolve_ctr;
         }
     }
     SHARED_UC->wall_halfres = (uint8_t)eff_hr;
+    SHARED_UC->wall_vert    = (uint8_t)vert;
+    SHARED_UC->wall_lod     = (uint8_t)lod;
+    SHARED_UC->wall_dissolve = (uint8_t)dissolve_out;
 
     /* Vertical head bob is applied below via the framebuffer line table —
      * no position translation needed (lateral sway felt like drunk
@@ -6722,9 +7075,16 @@ void raycast_render(void) {
         /* sin in -FX_ONE..+FX_ONE, scaled to ±2 pixels for a tight micro-bob. */
         bob_y = (int)((SIN_FX(bob_phase) * 2) >> FX_SHIFT);
     }
+    /* VERT (vertical half-res): map each display row-pair to a single EVEN
+     * framebuffer row (i & ~1). The passes only ever write those even rows, so
+     * the odd rows are never sampled — this is what turns row-skipped rendering
+     * into a coherent 2px-tall-block image. bob still shifts the whole table;
+     * snapping to even just quantizes the bob to the block grid (invisible). */
+    int vert_lt = SHARED_UC->wall_vert;
     volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
     for (int i = 0; i < SCREEN_H; i++) {
         int src = i + bob_y;
+        if (vert_lt)         src &= ~1;
         if (src < 0)         src = 0;
         if (src >= SCREEN_H) src = SCREEN_H - 1;
         line_table[i] = (uint16_t)(src * 160 + 0x100);

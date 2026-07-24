@@ -15,4 +15,9 @@ shared_t shared = {
     .lighting_flags = LIGHTING_FLICKER | LIGHTING_STROBE | LIGHTING_SHIMMER,
     .wall_halfres = 1,    /* effective flag (primary recomputes each frame) */
     .wall_res_mode = 2,   /* default AUTO — crisp when the frame can afford it, half when heavy */
+    .wall_vert = 0,       /* vertical half-res off until proven (opt-in VERT mode) */
+    .wall_seam_smooth = 1,/* SMOOTH silhouette by default (auto-quarter needs it); HARD is the A/B */
+    .wall_dissolve = 0,   /* transient; driven by the AUTO half→full ramp */
+    .wall_qdither = 1,    /* quarter-res boundary dither (spatial, static per frame) */
+    .wall_lod = 0,        /* WALLS=LOD prototype off by default */
 };

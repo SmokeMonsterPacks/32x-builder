@@ -119,6 +119,39 @@ typedef struct {
      * above each frame — that effective flag is what both CPUs' draw_walls read.
      * AUTO uses hysteresis on the frame period so it doesn't flip-flop per frame. */
     volatile uint8_t wall_res_mode;
+    /* Vertical half-res toggle. 1 = every render pass writes only EVEN framebuffer
+     * rows and the display line table maps each row-pair to that even row (2px-tall
+     * blocks) — halves the whole frame's stores at once (walls + clear + ceiling +
+     * carpet + sprites), the one lever horizontal half-res can't reach (wall stores
+     * are 320-strided vertical). Like wall_halfres it lives here because every pass
+     * on BOTH CPUs reads it; cache-through keeps the two halves in lockstep. */
+    volatile uint8_t wall_vert;
+    /* Seam-smoothing toggle (VISUALS: SEAMS HARD/SMOOTH). When half/quarter-res
+     * coarsens the wall fill, the wall→ceiling and wall→floor silhouette turns
+     * into a 2/4px staircase. SMOOTH interpolates each block's top/bottom edge
+     * between the raycast anchor columns (exact for a flat face — its edges
+     * project to straight lines) and repaints the fringe, so the silhouette
+     * reads as a clean diagonal over the still-coarse interior. */
+    volatile uint8_t wall_seam_smooth;
+    /* Half→full dissolve level (0 = off, else 1..N). There's no resolution
+     * between half and full, so the up-transition would otherwise be one hard
+     * flip. During it we render FULL (affordable while still) and this many
+     * "steps" of a dither-selected fraction of column pairs get re-doubled back
+     * to half over the wall band — a focus-pull sweep from half to full. Decays
+     * to 0 across a few frames. Both CPUs' wall post-pass read it. */
+    volatile uint8_t wall_dissolve;
+    /* Quarter-res boundary DITHER (1 = on). Real spatial ordered-dither: a post-
+     * pass ramps the right edge of each 4px block toward the next block's color
+     * (ordered Bayer threshold over the wall band), turning the hard 4px shade
+     * step into a dithered gradient. Static per frame (no stutter). On the PVM the
+     * dither fuses toward smooth; on sharp HDMI it reads as an intentional dither
+     * texture rather than a blocky step. Both CPUs read it, each dithers its half. */
+    volatile uint8_t wall_qdither;
+    /* WALLS=LOD prototype (1 = on). Full-res render + a post-pass that re-blocks
+     * each 4-col quad by DEPTH: near = leave full, mid = half (2px pairs), far =
+     * quarter + dither toward the neighbour. Visual proof of the three-band zoning
+     * — it ADDS cost (no render saving yet); the perf version skips rendering. */
+    volatile uint8_t wall_lod;
     /* Door swing animation, 0 = closed .. 16 = fully open. Primary eases it each
      * frame toward the target (toggled by the interact button near the door);
      * both CPUs' wall-embedded door fill read it to foreshorten the leaf and

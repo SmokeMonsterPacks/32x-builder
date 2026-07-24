@@ -94,6 +94,19 @@ void raycast_init(void);
 #define FADE_STEPS 16
 void raycast_set_brightness(int lvl);
 void raycast_paint_chair_ramp(void);   /* chair CRAM entries, full bright */
+
+/* Live-tunable palette (COLOR menu tab). flush() repaints in vblank when dirty;
+ * the ch/warmth/sat calls are the tuner controls; the _get variants feed the UI.
+ * Surface s: 0=WALL 1=FLOOR 2=CEIL 3=LIGHT. ch: 0=R 1=G 2=B. */
+void raycast_pal_apply(int lvl);
+void raycast_pal_flush(void);
+void raycast_pal_ch(int s, int ch, int dir);
+int  raycast_pal_ch_get(int s, int ch);
+void raycast_pal_warmth(int dir);
+int  raycast_pal_warmth_get(void);
+void raycast_pal_sat(int dir);
+int  raycast_pal_sat_get(void);
+void raycast_pal_reset(void);   /* COLOR tab: A button — back to defaults */
 /* Fill world_map/partitions and park the player. Call before raycast_init
  * (or before re-calling init_lights) so the lighting grid matches. */
 void raycast_load_fixed(void);
