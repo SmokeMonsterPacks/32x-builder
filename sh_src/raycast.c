@@ -352,6 +352,9 @@ static uint8_t standup_fall_dir[MAX_STANDUPS];
  * panel hinged at the feet, rotating down; at MAX it hands off to the flat
  * floor bitmap. Read by the secondary for its draw half, so it rides the purge. */
 #define STANDUP_FALL_MAX 5
+/* hero_dying ramp per frame (0..255). 6 => ~42 frames ~= 2.5s at ~15fps for the
+ * full speed-up / reverse / fade tape-death of the Voyager hello. */
+#define HERO_DYING_RATE  6
 static uint8_t standup_fall_prog[MAX_STANDUPS];
 /* Which side hit the floor: 1 = pushed from the FRONT, figure lands face up
  * (the printed side shows); 0 = pushed from BEHIND, lands face down — the
@@ -382,6 +385,7 @@ void standups_clear(void) {
 /* Distance from (bx,by) along engine-angle `dir` to the nearest solid cell,
  * capped at `maxd`. Marched in 1/8-cell steps (<=8 for a 0.9 body). Lets a
  * toppling cutout lean against a wall instead of half-sinking into it. */
+extern uint8_t pedge_cell[MAP_H][MAP_W];   /* defined below: cell touches a partition */
 static fx_t standup_wall_reach(fx_t bx, fx_t by, uint8_t dir, fx_t maxd) {
     fx_t dx = COS_FX(dir), dy = SIN_FX(dir);
     for (fx_t t = FX(0.125); t <= maxd; t += FX(0.125)) {
@@ -389,6 +393,9 @@ static fx_t standup_wall_reach(fx_t bx, fx_t by, uint8_t dir, fx_t maxd) {
         int my = (by + FX_MUL(dy, t)) >> FX_SHIFT;
         if (mx < 0 || mx >= MAP_W || my < 0 || my >= MAP_H) return t;
         if (world_map[my][mx] != 0) return t;
+        /* Partitions are free-standing slabs, not world_map cells — but a toppling
+         * cutout should still lean against one instead of clipping under it. */
+        if (g_pedge_any && pedge_cell[my][mx]) return t;
     }
     return maxd;
 }
@@ -2191,6 +2198,18 @@ void player_update(uint16_t pad) {
         for (int si = 0; si < NUM_STANDUPS; si++)
             if (standup_down[si] && standup_fall_prog[si] < STANDUP_FALL_MAX)
                 standup_fall_prog[si]++;
+        /* Broken-tape death of the Voyager hello: ramp hero_dying while a felled
+         * neanderthal (any non-chair standup that's down) exists, reset to alive
+         * otherwise. ~2.5s to fully dead; the mixer reads it to warp the hello. */
+        int neander_down = 0;
+        for (int si = 0; si < NUM_STANDUPS; si++)
+            if (standups[si].kind != CHAIR_SPRITE_KIND && standup_down[si]) { neander_down = 1; break; }
+        if (neander_down) {
+            int hd = (int)SHARED_UC->hero_dying + HERO_DYING_RATE;
+            SHARED_UC->hero_dying = (uint8_t)(hd > 255 ? 255 : hd);
+        } else {
+            SHARED_UC->hero_dying = 0;
+        }
         if (a_latch > 0) a_latch--;
         prev_move = move;
         prev_a = (uint16_t)(pad & SEGA_CTRL_A);
@@ -4269,8 +4288,7 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
      * the per-pixel test below isn't an uncached WALL_DIST read every pixel —
      * the slab fills a lot of screen inside a tunnel, so that read dominated. */
     static fx_t slab_far[SCREEN_W];
-    static fx_t wd[SCREEN_W];
-    for (int c = col_start; c < col_end; c++) { slab_far[c] = 0; wd[c] = WALL_DIST(c); }
+    for (int c = col_start; c < col_end; c++) slab_far[c] = 0;
 
     for (int y = 0; y < horizon_y && y < SCREEN_H; y++) {
         int prow = horizon_y - y;
@@ -4287,6 +4305,13 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
         if (grid_shade > SHADE_LEVELS - 1) grid_shade = SHADE_LEVELS - 1;
         uint8_t lc_tile = (uint8_t)(CEIL_BASE + tile_shade);
         uint8_t lc_grid = (uint8_t)(CEIL_BASE + grid_shade);
+        /* Dark-room variants: the crawlspace ceiling is a real surface, so it must
+         * honor a dark room like the walls/floor do. Push it DARK_ROOM_SHADE deeper
+         * into the CEIL fog when the cell is dark (picked per-column below). */
+        int tsd = tile_shade + DARK_ROOM_SHADE; if (tsd > SHADE_LEVELS - 1) tsd = SHADE_LEVELS - 1;
+        int gsd = grid_shade + DARK_ROOM_SHADE; if (gsd > SHADE_LEVELS - 1) gsd = SHADE_LEVELS - 1;
+        uint8_t lc_tile_d = (uint8_t)(CEIL_BASE + tsd);
+        uint8_t lc_grid_d = (uint8_t)(CEIL_BASE + gsd);
 
         fx_t wxL = px + FX_MUL(rowDist, leftDirX);
         fx_t wyL = py + FX_MUL(rowDist, leftDirY);
@@ -4346,12 +4371,14 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
         fx_t wy = wyL + stepy * c0;
         for (int col = c0; col <= c1; col += 2, wx += stepx * 2, wy += stepy * 2) {
             if (!ceil_is_low(wx, wy)) continue;        /* this cell's ceiling is full */
-            if (rowDist >= wd[col]) continue;          /* behind a nearer wall (cached) */
+            if (rowDist >= WALL_DIST(col)) continue;   /* behind a nearer wall */
             /* Lightless ceiling TILE: dim CEIL_BASE fill with a darker grid line
              * on the 0.25-cell tile lattice (matches the open ceiling's tiles). */
             int grid = (((int)wx & CEIL_TILE_MASK) < CEIL_TILE_LINE) ||
                        (((int)wy & CEIL_TILE_MASK) < CEIL_TILE_LINE);
-            uint8_t cv = grid ? lc_grid : lc_tile;
+            int dk = g_dark_active && cell_is_dark(wx, wy);   /* dark room dims the panel */
+            uint8_t cv = grid ? (dk ? lc_grid_d : lc_grid)
+                              : (dk ? lc_tile_d : lc_tile);
             *(uint16_t *)(row_p + col) = ((uint16_t)cv << 8) | cv;  /* col & col+1 */
             slab_far[col] = rowDist; slab_far[col + 1] = rowDist;
         }
@@ -4681,19 +4708,19 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                 int dsh = base_shade + DARK_ROOM_SHADE;
                 if (dsh > SHADE_LEVELS - 1) dsh = SHADE_LEVELS - 1;
                 uint8_t ddk = (uint8_t)(FLOOR_BASE + dsh);
-                /* Fill 4px words (was 2px) — same solid coverage, half the stores
-                 * and half the per-column dark tests. And skip cell_is_dark when
-                 * there's a single dark room: the column-clip above already bounds
-                 * us to its bbox, so every column in range is dark. Only disjoint
-                 * dark rooms (union bbox spans the gaps) need the per-column test. */
+                /* 2px fill keeps the dark/lit floor boundary fine (4px staircased
+                 * it). The real win is skipping cell_is_dark when there's a single
+                 * dark room: the column-clip above already bounds us to its bbox,
+                 * so every column in range is dark. Only disjoint dark rooms (union
+                 * bbox spans the gaps) need the per-column test. */
                 int test_dark = (g_map_n_dark > 1);
-                int c0 = cA & ~3; if (c0 < col_start) c0 = col_start;
+                int c0 = cA & ~1, c1 = cB | 1;
+                if (c1 > col_end - 1) c1 = col_end - 1;
                 uint8_t *drow = fb + y * SCREEN_W;
                 fx_t dwx = wx0 + stepX * c0, dwy = wy0 + stepY * c0;
-                for (int col = c0; col + 3 < col_end && col <= cB;
-                     col += 4, dwx += stepX * 4, dwy += stepY * 4) {
+                for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
                     if (test_dark && !cell_is_dark(dwx, dwy)) continue;
-                    *(uint32_t *)(drow + col) = LDUP(ddk);
+                    *(uint16_t *)(drow + col) = WDUP(ddk);
                 }
             }
         }

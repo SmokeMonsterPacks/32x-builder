@@ -335,6 +335,31 @@ void amb_pump(void) {
                     / HELLO_FADE_RADIUS_SQ;     /* 0..256 */
     }
 
+    /* Broken-tape death of the hello (SHARED_UC->hero_dying, 0 = alive). Three
+     * phases warp the reused sample: A) overload speed-up (forward), B) the motor
+     * gives out and it plays in REVERSE, C) a slow drift + fade to silence. Bit-
+     * crush grows throughout for the lo-fi/mechanical grit. Snapshot per fill;
+     * hero_dying ramps over ~2.5s so the 64 ms step is smooth. */
+    int32_t hstep_eff = (int32_t)hstep;   /* signed: negative = reverse */
+    int death_amp = 256, crush = 0;
+    {
+        int hd = (int)SHARED_UC->hero_dying;
+        if (hd) {
+            if (hd < 85) {                 /* A: surge 1x -> ~2.6x forward */
+                hstep_eff = (int32_t)(((uint32_t)hstep * (256u + (uint32_t)hd * 5u)) >> 8);
+                crush = hd >> 6;                                  /* 0..1 */
+            } else if (hd < 190) {         /* B: reverse ~1.5x, warbling lo-fi */
+                hstep_eff = -(int32_t)(((uint32_t)hstep * 3u) >> 1);
+                crush = 1 + ((hd - 85) >> 6);                     /* 1..2 */
+            } else {                       /* C: slow drift, fade to nothing */
+                hstep_eff = (int32_t)(hstep >> 2);
+                death_amp = 256 - (hd - 190) * 256 / 65;
+                if (death_amp < 0) death_amp = 0;
+                crush = 3;
+            }
+        }
+    }
+
     static uint32_t buzz_pos = 0;
     for (int i = 0; i < len; i++) {
         /* Buzz with envelope. >>9 (was >>8) halves the contribution so
@@ -361,13 +386,22 @@ void amb_pump(void) {
          * headroom — hello carries the voyager voice and audibility
          * matters more than peak budgeting for it. Worst-case overlap
          * (close + walking + neon) goes through the soft-clipper. */
-        if (hello_amp > 0) {
+        if (hello_amp > 0 && death_amp > 0) {
             uint32_t hello_idx = hello_pos_fx >> 16;
-            int hello = (int)amb_hello_samples[hello_idx] << 2;
-            delta += (hello * hello_amp) >> 8;
+            int s = (int)amb_hello_samples[hello_idx];
+            if (crush) s = (s >> crush) << crush;          /* lo-fi quantize (tape grit) */
+            int hello = s << 2;
+            delta += (((hello * hello_amp) >> 8) * death_amp) >> 8;
         }
-        hello_pos_fx += hstep;
-        if ((hello_pos_fx >> 16) >= AMB_HELLO_SAMPLE_COUNT) hello_pos_fx = 0;
+        /* Signed advance so the death's phase-B plays backward; clamp at 0 on a
+         * reverse underflow (settles at the sample start), wrap at the end forward. */
+        if (hstep_eff >= 0) {
+            hello_pos_fx += (uint32_t)hstep_eff;
+            if ((hello_pos_fx >> 16) >= AMB_HELLO_SAMPLE_COUNT) hello_pos_fx = 0;
+        } else {
+            uint32_t dec = (uint32_t)(-hstep_eff);
+            hello_pos_fx = (hello_pos_fx > dec) ? (hello_pos_fx - dec) : 0;
+        }
 
         /* Carpet footstep — bypasses primary `vol` (amb_volume) below.
          * >>9 (was >>8) halves its contribution so it shares the

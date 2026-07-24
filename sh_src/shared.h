@@ -152,6 +152,11 @@ typedef struct {
      * quarter + dither toward the neighbour. Visual proof of the three-band zoning
      * — it ADDS cost (no render saving yet); the perf version skips rendering. */
     volatile uint8_t wall_lod;
+    /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
+     * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
+     * mixer reads it to warp the Voyager hello — speed up, reverse, drift to
+     * nothing. Cache-through so the secondary sees each frame's value. */
+    volatile uint8_t hero_dying;
     /* Door swing animation, 0 = closed .. 16 = fully open. Primary eases it each
      * frame toward the target (toggled by the interact button near the door);
      * both CPUs' wall-embedded door fill read it to foreshorten the leaf and
