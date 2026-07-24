@@ -4,6 +4,38 @@ Each item below is something we attempted, hit a wall on, or deliberately
 deferred. Listed in roughly the order I think they'd be productive to
 revisit.
 
+## Story / triggered lighting  (requested 2026-07-24)
+
+**Status:** feature request — not started. Mike wants lighting to become a
+narrative/scripting tool, not just static ambiance.
+
+The vision, smallest-first:
+
+- **Walk-on trigger lights.** A cell (or a tagged space) is dark until the
+  player steps onto/into it, then its light turns on. The first building block:
+  event-driven, per-cell light activation tied to player position.
+- **Sequenced cell lighting.** Once single-cell triggers work, chain them: a
+  corridor that lights up cell-by-cell ahead of (or behind) you, timed light
+  sequences, a room that powers on in a pattern. Lighting as a scripted beat.
+- Beyond that: "lighting all around" — this is meant to grow into a whole
+  system (reactive dark rooms, flicker-to-life, follow/lead lights, maybe
+  scripted light cues that pair with the audio work).
+
+**Infra we already have to build on:** `cell_light[MAP_H][MAP_W]` (per-cell
+light level + the CELL_DARK top-bit for dark rooms), `init_lights` that seeds
+it per map, and the gen-gated secondary purge so both CPUs stay coherent when
+it changes ([[reference_secondary_cpu_cache_coherency]]). The NEW part is a
+*runtime* mutation path: mark cells for trigger/sequence activation at map load,
+then flip their `cell_light` (and re-fog / re-shade) as the player crosses
+tiles, with the secondary purging the changed lines. A small per-map "light
+script" (cell + condition + timing) is the likely data model — mirrors how the
+crawlspace/dark-room rects are authored per map.
+
+Open design questions to settle when we start: authored (per-map light-script
+table, like decals/dark rects) vs procgen-tagged; instant vs flicker-to-life
+ramp; one-shot vs re-armable; how a sequence is timed (frame counter vs
+player-crossing chained triggers).
+
 ## Visual / atmospheric
 
 ### Ceiling lights as actual grid-tile illumination
