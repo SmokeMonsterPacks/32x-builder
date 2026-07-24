@@ -45,6 +45,14 @@ canon: Backrooms
 [partitions]
 22,22 -> 26,22  style=spotted height=low crawl=no
 20,11 -> 20,14  style=spotted height=low crawl=no
+# Cubicle test crosses (half-height): chevron + polka-dot side by side in the
+# upper-right room, same row so both textures read at matched distance for LOD A/B.
+# Chevron cross, center (25,13)
+25,12 -> 25,14  style=chevron height=half crawl=no
+24,13 -> 26,13  style=chevron height=half crawl=no
+# Polka-dot cross, center (29,13)
+29,12 -> 29,14  style=spotted height=half crawl=no
+28,13 -> 30,13  style=spotted height=half crawl=no
 
 [decals]
 chair  9.5,15.5 face=E

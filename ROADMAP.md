@@ -267,6 +267,39 @@ Still pending — would layer over the existing buzz/hum bed.
 
 ## Performance
 
+### Partition parity — deferred items + the cost wall  (2026-07-24)
+**Status:** parity batch banked (commit "Partition parity: near-slab LOD…").
+The slab/overlay path is a second-class render citizen: it re-implements, by
+hand, every system the wall path gets for free. This session ported the
+high-impact ones (texture LOD, per-column LOD, see-over PART_TOP, cap-plane
+occlusion, topple line-of-sight). **Deferred, low-impact, cosmetic — do NOT
+invest pre-pivot:**
+- **#8 SEAMS** — overlay records no silhouette into `seam_top/seam_bot`, so
+  counter top edges staircase at coarse res and the smoother can chew the wall
+  edge behind a slab.
+- **#9 DITHER** — slab bands never dithered (keyed on the #8 seam buffers).
+- **#12 dark-room / crawlspace shade** — overlay shade block lacks the
+  `g_lowceil` / `g_dark` modifiers, so a counter glows like a lit plank on dark
+  maps / under low headers.
+- **Top-cap lip dropout** — the 0.35-cell lip clamp (`raycast.c` countertop
+  block) foreshortens to sub-pixel, so half-height counters go topless at
+  distance. Relaxing it reintroduces "THE seam" (build-127). Needs a real fix,
+  not just a bigger clamp.
+- **Topple-through-end-cap** — `standup_wall_reach` marches only the fall
+  centerline; a glancing topple parallel to a counter's end-cap isn't capped and
+  the flat body draws beside/through the thin end slab. Test-fixture edge case.
+- **#2 `cap<0` guard** (1-line safety), **#11 vert-mode branch** (wasted odd-row
+  writes, invisible), **#13 far strobe** (cosmetic).
+
+**The wall behind all of it:** measured `F:` in a slab-heavy view is F:05
+standing / F:09 walking — *below the 15 floor regardless*, and near-independent
+of standup count (partitions dominate, the 3 neanderthals added ~0 standing).
+Parity makes partitions **correct, not fast**. Getting above the floor with
+partitions in view needs the structural fork, not more parity patches:
+decouple grid resolution from cell size (`MAP_RES`) so a thin divider becomes a
+first-class DDA cell and inherits depth/LOD/occlusion natively — cost is DDA
+steps + map RAM. See the doom-staircase / major-pivot discussion.
+
 ### Mine the Doom 32X Resurrection codebase for techniques
 **Status:** strategic resource — deep-mine report landed; concrete
 adopt-list below in ranked-ROI order.

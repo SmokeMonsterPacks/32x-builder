@@ -232,6 +232,14 @@ uint8_t world_map[MAP_H][MAP_W];
  * beyond FAR = quarter + dither. Tunable — where the three zones fall. */
 #define LOD_T_NEAR        FX(2)
 #define LOD_T_FAR         FX(4)
+/* B-fix: a see-over partition THIS close overrides the LOD near-band drop and
+ * forces the quad back to full horizontal res. The near-band drop (lod_near_cs)
+ * coarsens the whole near band for FPS in slab-heavy views, but a partition an
+ * arm's length away is exactly where the chunkiness screams — so we spend the
+ * res back, but ONLY nose-to-slab, so a room full of distant dividers keeps the
+ * speedup. Lagged one quad (mirrors lod_prev_depth), so at most a 4px near edge
+ * stays coarse before it snaps to full. */
+#define PART_SHARP_D      FX(2.5)
 /* Partition-dense feedback (SHARED_UC->wall_dense): the primary latches ON when
  * last frame's wall pass exceeds WALL_DENSE_ON and OFF below WALL_DENSE_OFF, in
  * raw FRT ticks. The band is wide because dropping the near band to half roughly
@@ -393,6 +401,12 @@ void standups_clear(void) {
  * the old billboard used the same 0.9 for its fall, so the brief length "pop" at
  * the start of the fall is unchanged. */
 #define STANDUP_FALL_LEN FX(0.9)
+
+/* Standing-billboard word-pair LOD: a figure taller than this (px) is close
+ * enough that it dominates the sprite pass, so its fill drops to 2px blocks via
+ * word stores (halves the FB writes). ~100px = within ~1.5 cells, where the
+ * figure fills most of the screen height and the blocking is invisible. */
+#define STANDUP_LOD_H  100
 
 /* Distance from (bx,by) along engine-angle `dir` to the nearest solid cell,
  * capped at `maxd`. Marched in 1/8-cell steps (<=8 for a 0.9 body). Lets a
@@ -2173,8 +2187,23 @@ void player_update(uint16_t pad) {
          * cutout within reach and treat it as the shove target below. */
         if (a_trigger && shove < 0) {
             int64_t bestd2 = (int64_t)FX(1.3) * FX(1.3);
+            int pfxc = FX_INT(player.x), pfyc = FX_INT(player.y);
             for (int si = 0; si < NUM_STANDUPS; si++) {
                 if (standups[si].kind == CHAIR_SPRITE_KIND || standup_down[si]) continue;
+                /* Don't topple THROUGH a partition: if a flagged slab edge sits
+                 * between the player's cell and the cutout's, you can't actually
+                 * reach it (the same pedge_w/pedge_n test the movement collision
+                 * uses at ~1974). Without this, a cutout parked behind a counter
+                 * tips over when you press A on the far side. */
+                if (g_pedge_any) {
+                    int sxc = FX_INT(standups[si].x), syc = FX_INT(standups[si].y);
+                    if (sxc != pfxc) { int line = sxc > pfxc ? sxc : pfxc;
+                        if ((unsigned)pfyc < (unsigned)MAP_H && line >= 0 && line <= MAP_W &&
+                            (pedge_w[pfyc][line] & CM_PEDGE_PRESENT)) continue; }
+                    if (syc != pfyc) { int line = syc > pfyc ? syc : pfyc;
+                        if ((unsigned)pfxc < (unsigned)MAP_W && line >= 0 && line <= MAP_H &&
+                            (pedge_n[line][pfxc] & CM_PEDGE_PRESENT)) continue; }
+                }
                 fx_t ddx = standups[si].x - player.x, ddy = standups[si].y - player.y;
                 int64_t d2 = (int64_t)ddx * ddx + (int64_t)ddy * ddy;
                 if (d2 < bestd2) { bestd2 = d2; shove = si; }
@@ -3510,7 +3539,18 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             }
         }
 
-        for (int stripe = drawStartX; stripe <= drawEndX; stripe++) {
+        /* Big near figure: word-pair columns (2px blocks). A close standee
+         * covers most of the screen height, and on the 32X a byte FB write
+         * pays ~word cost — so sampling one texel and writing the pair as a
+         * 16-bit word halves the store cost of exactly the figures that
+         * dominate the sprite pass (a room of them was F:04). At this size the
+         * 2px block is masked by the figure's own scale; small/far figures stay
+         * full-res. Round the start UP to even so the pair never reads a
+         * negative texX, and stripe+1 stays < col_end (drawEndX <= col_end-1,
+         * col_end a multiple of 4), so it can't write into the other CPU's half. */
+        int lod2 = (spriteHeight > STANDUP_LOD_H);
+        int sx0 = lod2 ? ((drawStartX + 1) & ~1) : drawStartX;
+        for (int stripe = sx0; stripe <= drawEndX; stripe += (lod2 ? 2 : 1)) {
             int clip_bot = drawEndY;
             if (transformY >= WALL_DIST(stripe)) {
                 /* Occluded — but by WHAT? A partial (see-over) divider only
@@ -3544,13 +3584,24 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
              * negative — tex_pos starts >= 0 and step is positive).
              * clip_bot < drawEndY when a see-over divider hides the lower
              * rows: only the part above its band draws. */
-            for (int y = drawStartY; y <= clip_bot; y++) {
-                int texY = tex_pos >> FX_SHIFT;
-                if (texY >= tex_h) texY = tex_h - 1;
-                uint8_t v = col_base[texY * col_step];
-                if (v != 0) *p = vmap[v];
-                p += SCREEN_W;
-                tex_pos += texY_step;
+            if (lod2) {
+                for (int y = drawStartY; y <= clip_bot; y++) {
+                    int texY = tex_pos >> FX_SHIFT;
+                    if (texY >= tex_h) texY = tex_h - 1;
+                    uint8_t v = col_base[texY * col_step];
+                    if (v != 0) *(uint16_t *)p = WDUP(vmap[v]);   /* stripe & stripe+1 */
+                    p += SCREEN_W;
+                    tex_pos += texY_step;
+                }
+            } else {
+                for (int y = drawStartY; y <= clip_bot; y++) {
+                    int texY = tex_pos >> FX_SHIFT;
+                    if (texY >= tex_h) texY = tex_h - 1;
+                    uint8_t v = col_base[texY * col_step];
+                    if (v != 0) *p = vmap[v];
+                    p += SCREEN_W;
+                    tex_pos += texY_step;
+                }
             }
         }
     }
@@ -5144,6 +5195,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * win: far quads raycast once and word-fill 4px. For every non-LOD mode
      * cstep_q == cstep0 for all quads, so this reproduces the old loop exactly. */
     fx_t lod_prev_depth = 0;   /* 0 => nearest (full res) for the first quad */
+    fx_t lod_prev_pt = 0x7FFFFFFF;   /* nearest see-over slab in prev quad; big => none */
     /* Motion drops the NEAR band from full to half: chunkiness is masked while
      * moving, and it's the biggest (most expensive) columns, so it's the best
      * place to reclaim time. Snaps back to full the instant you stand still to
@@ -5157,8 +5209,16 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         if (lod) {
             cstep_q = (lod_prev_depth < LOD_T_NEAR) ? lod_near_cs
                     : (lod_prev_depth < LOD_T_FAR)  ? 2 : 4;
+            /* B-fix: a near see-over slab pulls this quad back to full res when
+             * you STOP to look, overriding the near-band drop that pixel-doubles
+             * it. While MOVING we keep the drop (same cstep the walls take), so
+             * orbiting a slab-heavy scene stays cheap; the sharp snap is for
+             * standing still — which is when the stair-steps are worth spending
+             * on and when there's no motion cost to spare it. */
+            if (lod_prev_pt < PART_SHARP_D && !SHARED_UC->is_walking) cstep_q = 1;
         }
         fx_t quad_depth = 0x7FFFFFFF;
+        fx_t quad_pt = 0x7FFFFFFF;   /* nearest see-over slab in THIS quad */
         for (int col = qcol; col < qcol + 4 && col < col_end; col += cstep_q) {
         int cstep = cstep_q;
         int hr = lod ? ((cstep_q >= 4) ? 2 : (cstep_q >= 2) ? 1 : 0) : hr0;
@@ -6354,6 +6414,9 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             WALL_DIST(col) = fg_t[0];
             for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = fg_t[0];
         }
+        /* B-fix: remember the nearest slab in this quad (index 0 = nearest in
+         * painter order) so the NEXT quad's cstep can veto the LOD drop. */
+        if (lod && fg_n && fg_t[0] < quad_pt) quad_pt = fg_t[0];
         /* Draw the kept partials FAR to NEAR (painter's order): the divider
          * behind a counter renders first, the counter over it. */
         for (int fk = fg_n - 1; fk >= 0; fk--) {
@@ -6371,6 +6434,17 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 int ftop = fbot - fdlh;
                 int fds  = ftop < 0 ? 0 : ftop;
                 int fde  = fbot >= SCREEN_H ? SCREEN_H - 1 : fbot;
+                /* #7 parity: the nearest see-over counter owns this column's
+                 * PART_TOP, so the sprite pass lets a standup's head show ABOVE
+                 * the band instead of vanishing column-wide (mirrors the wall
+                 * path's promoted-divider write near line 5969). Only the
+                 * nearest slab (fk==0) and only when see-over (fht < eye_h) — a
+                 * full-height T-stem stays a full occluder (PART_TOP left 0). */
+                if (fk == 0 && fht < eye_h) {
+                    int16_t pt = (int16_t)(ftop < 1 ? 1 : ftop);
+                    PART_TOP(col) = pt;
+                    for (int j = 1; j < cstep; j++) PART_TOP(col + j) = pt;
+                }
                 if (fk && fde >= fg_clip) fde = fg_clip - 1;  /* behind near band */
                 /* Shade: distance ramp + uniform + N/S side-shade, then cell-
                  * light cap — matching the wall pass exactly so the arm reads
@@ -6401,22 +6475,19 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     else if (ft < FX(3.5)) { fdetail = (int)(((FX(3.5) - ft) * PARTITION_DETAIL) / FX(1.5)); if (fdetail < 0) fdetail = 0; }
                     else                     fdetail = 0;
                 } else {
-                    /* Chevron: same texture pick AND the same detail ramp as
-                     * the main wall pass. This branch used to hardcode
-                     * fdetail = 0 — invisible while every tall chevron
-                     * divider PROMOTED to the main path, but half-height
-                     * counters always render here, and theirs was the
-                     * "bare wallpaper up close" bug: zero detail maps every
-                     * texel to one flat shade. */
-                    if (ft < WALL_LOD_THRESHOLD) {
-                        ftex = (const uint8_t *)wall_tex_hi_ram;
-                        ftw = WALL_TEX_HI_WIDTH; fth = WALL_TEX_HI_HEIGHT;
-                        ftlx = WALL_TILE_HI_X;   ftly = WALL_TILE_HI_Y;
-                    } else {
-                        ftex = (const uint8_t *)wall_tex_ram;
-                        ftw = WALL_TEX_WIDTH;    fth = WALL_TEX_HEIGHT;
-                        ftlx = WALL_TILE_X;      ftly = WALL_TILE_Y;
-                    }
+                    /* Chevron: keep the 64x64 texture at ALL distances, like the
+                     * spotted branch above, and let fdetail carry the distance
+                     * fade. Half-height counters ONLY render through this overlay
+                     * path (they never promote to the main wall pass), so the
+                     * main pass's hi->lo LOD swap at WALL_LOD_THRESHOLD = FX(2)
+                     * was firing at arm's length here and dropping every counter
+                     * past 2 cells to the 16x16 wall_tex — a quarter-texel-density
+                     * "stair-stepped" look across the whole room. The swap only
+                     * ever paid off on genuinely distant FULL-height walls; on a
+                     * draw-bound partition the texture size is ~free. */
+                    ftex = (const uint8_t *)wall_tex_hi_ram;
+                    ftw = WALL_TEX_HI_WIDTH; fth = WALL_TEX_HI_HEIGHT;
+                    ftlx = WALL_TILE_HI_X;   ftly = WALL_TILE_HI_Y;
                     if (ft < FX(2)) {
                         fdetail = WALL_PATTERN_MAX;
                     } else if (ft < FX(3.5)) {
@@ -6598,6 +6669,17 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                         if (ce0 >= SCREEN_H) ce0 = SCREEN_H - 1;
                         if (fk && ce0 >= fg_clip) ce0 = fg_clip - 1;
                         if (cs0 <= ce0) {
+                            /* #7 occlusion: the counter's silhouette TOP is the
+                             * cap's back edge (cs0), not the band top (ftop, set
+                             * as PART_TOP earlier). A sprite behind must clip
+                             * ABOVE the cap or it paints over the top plane — the
+                             * "neanderthal seen through the counter" bug. Tighten
+                             * PART_TOP to the cap for the nearest see-over slab. */
+                            if (fk == 0) {
+                                int16_t pt = (int16_t)(cs0 < 1 ? 1 : cs0);
+                                PART_TOP(col) = pt;
+                                for (int j = 1; j < cstep; j++) PART_TOP(col + j) = pt;
+                            }
                             int s0 = fsh;                 /* front edge shade */
                             int s1;                       /* back edge: wall fog ramp */
                             {
@@ -6640,6 +6722,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         }
         }   /* inner per-sub-block loop */
         if (lod && quad_depth != 0x7FFFFFFF) lod_prev_depth = quad_depth;
+        if (lod) lod_prev_pt = quad_pt;   /* big when no slab => no veto next quad */
     }       /* per-quad loop */
     if (col_start == 0) {              /* primary half only: HUD reads these */
         prof_dda_steps = (uint16_t)dda_steps;

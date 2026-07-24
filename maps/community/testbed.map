@@ -54,8 +54,17 @@ next: BACKROOMS
 [partitions]
 3,3 -> 3,8  style=chevron height=full crawl=no
 6,3 -> 6,8  style=spotted height=low crawl=no
+# CRISP / LOD BACK-OFF TEST (chevron texture LOD + B column-LOD parity): two
+# half-height dividers, one of each style, side by side. Walk up, then back off
+# past ~2.5 cells in an ADAPTIVE=LOD mode — both must stay crisp, not stair-step.
 9,3 -> 9,8  style=chevron height=half crawl=no
 12,3 -> 12,8  style=spotted height=half crawl=no
+# SEE-OVER TEST (#7 PART_TOP parity): a half-height counter parked just SOUTH of
+# the neanderthal trio at row 21. Approach from the south facing N — their heads
+# must show ABOVE the band, bodies hidden below it (before the fix they vanished
+# column-wide). The chair stress block behind other dividers stays fully hidden,
+# confirming the chair-occluder branch is untouched.
+12,22 -> 15,22  style=chevron height=half crawl=no
 
 [decals]
 neanderthal 12.5,21.5 face=S
