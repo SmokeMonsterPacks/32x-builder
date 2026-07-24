@@ -42,6 +42,14 @@ next: BACKROOMS
 
 [crawl]
 20,4 dir=E len=9
+# CRAWL STRESS: a 5-wide, 15-deep tunnel straight ahead of the N-facing spawn so
+# looking forward fills the view with low-ceiling slab + bulkhead mouth (the F:06
+# spike repro). Six rects total also exercises the bulkhead's per-rect divides.
+14,10 dir=S len=15
+15,10 dir=S len=15
+16,10 dir=S len=15
+17,10 dir=S len=15
+18,10 dir=S len=15
 
 [partitions]
 3,3 -> 3,8  style=chevron height=full crawl=no

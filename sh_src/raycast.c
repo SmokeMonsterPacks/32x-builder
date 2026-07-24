@@ -232,6 +232,13 @@ uint8_t world_map[MAP_H][MAP_W];
  * beyond FAR = quarter + dither. Tunable — where the three zones fall. */
 #define LOD_T_NEAR        FX(2)
 #define LOD_T_FAR         FX(4)
+/* Partition-dense feedback (SHARED_UC->wall_dense): the primary latches ON when
+ * last frame's wall pass exceeds WALL_DENSE_ON and OFF below WALL_DENSE_OFF, in
+ * raw FRT ticks. The band is wide because dropping the near band to half roughly
+ * halves the slab cost — a sparse room sits ~2-5k, the SM Furniture pit ~14k, and
+ * the pit at half-near-res lands ~8k, still well above OFF so it can't strobe. */
+#define WALL_DENSE_ON     9000
+#define WALL_DENSE_OFF    4500
 
 /* Drop-ceiling grid density — number of panel boundaries per 1-unit map
  * cell. Higher = denser grid. The cost is identical at any density; we
@@ -361,18 +368,23 @@ static uint8_t standup_fall_prog[MAX_STANDUPS];
  * blank cardboard back shows, mirrored. Set at the shove from the same
  * front/back dot test the standing billboard uses. */
 static uint8_t standup_fall_face[MAX_STANDUPS];
-/* Final tip angle in engine units (0..64 = 0..90 deg), fixed at the shove by a
- * ray along the fall direction: 64 = clear floor ahead, falls flat (old
- * billboard-slice + floor-cast path); <64 = a wall is within the body length, so
- * he leans against it at this angle (tilted world-quad, which the flat renderers
- * can't do). 0 while standing. Read by the secondary, rides the sprite purge. */
-static uint8_t standup_fall_angle[MAX_STANDUPS];
+/* Fallen body length along the floor, in 1/64 world units (so 0.9 -> 57). Set at
+ * the shove to min(reach, 0.9): a body falling toward a partition stops AT it
+ * instead of clipping through (partitions aren't in the WALL_DIST z-buffer, so
+ * the flat renderer can't z-cull them). 0 = "not set" -> full 0.9. Read by the
+ * secondary for its draw half, so it rides the sprite-cache purge. */
+static uint8_t standup_fall_len_q[MAX_STANDUPS];
+static inline fx_t standup_body_len(int i) {
+    uint8_t q = standup_fall_len_q[i];
+    return q ? ((fx_t)q << (FX_SHIFT - 6)) : FX(0.9);
+}
 void standups_clear(void) {
     num_standups = 0;
     for (int i = 0; i < MAX_STANDUPS; i++) {
         standup_armed[i] = 0; standup_down[i] = 0;
         standup_fall_dir[i] = 0; standup_fall_prog[i] = 0;
-        standup_fall_face[i] = 1; standup_fall_angle[i] = 0;
+        standup_fall_face[i] = 1;
+        standup_fall_len_q[i] = 0;
     }
 }
 
@@ -388,14 +400,18 @@ void standups_clear(void) {
 extern uint8_t pedge_cell[MAP_H][MAP_W];   /* defined below: cell touches a partition */
 static fx_t standup_wall_reach(fx_t bx, fx_t by, uint8_t dir, fx_t maxd) {
     fx_t dx = COS_FX(dir), dy = SIN_FX(dir);
+    int bmx = (int)(bx >> FX_SHIFT), bmy = (int)(by >> FX_SHIFT);   /* his own cell */
     for (fx_t t = FX(0.125); t <= maxd; t += FX(0.125)) {
         int mx = (bx + FX_MUL(dx, t)) >> FX_SHIFT;
         int my = (by + FX_MUL(dy, t)) >> FX_SHIFT;
         if (mx < 0 || mx >= MAP_W || my < 0 || my >= MAP_H) return t;
         if (world_map[my][mx] != 0) return t;
-        /* Partitions are free-standing slabs, not world_map cells — but a toppling
-         * cutout should still lean against one instead of clipping under it. */
-        if (g_pedge_any && pedge_cell[my][mx]) return t;
+        /* Partitions are free-standing slabs, not world_map cells — lean against
+         * one instead of clipping under it. But ONLY once the march leaves his own
+         * cell: pedge_cell is true if the cell merely TOUCHES a partition on any
+         * edge, so a slab beside his feet (not in his fall path) would otherwise
+         * pin him upright and he'd never topple. */
+        if (g_pedge_any && (mx != bmx || my != bmy) && pedge_cell[my][mx]) return t;
     }
     return maxd;
 }
@@ -2188,10 +2204,16 @@ void player_update(uint16_t pad) {
                 uint8_t fdir = standup_fall_face[shove]
                              ? (uint8_t)(facing + 128) : facing;
                 standup_fall_dir[shove] = fdir;
-                /* Lean against a wall if one is within the body length ahead. */
+                /* Always land FLAT on the floor (fall_angle 64) — a permanent
+                 * mid-air lean reads as "frozen." But the flat body ignores
+                 * partitions in the z-buffer (they're a free-standing overlay,
+                 * not in WALL_DIST), so cap its floor length to whatever's ahead
+                 * so he stops AT the slab instead of clipping through it. */
                 fx_t reach = standup_wall_reach(standups[shove].x, standups[shove].y,
                                                 fdir, STANDUP_FALL_LEN);
-                standup_fall_angle[shove] = standup_lean_angle(reach, STANDUP_FALL_LEN);
+                if (reach > STANDUP_FALL_LEN) reach = STANDUP_FALL_LEN;
+                if (reach < FX(0.4))          reach = FX(0.4);  /* keep a visible body */
+                standup_fall_len_q[shove] = (uint8_t)(reach >> (FX_SHIFT - 6));
             } else standup_armed[shove] = 1;                   /* first contact */
         }
         /* Advance every toppling cutout's fall one step per frame. */
@@ -2303,7 +2325,7 @@ static void draw_fallen_standup(int i, int col_start, int col_end,
     fx_t fdx = COS_FX(fa), fdy = SIN_FX(fa);
     fx_t ppx = -fdy, ppy = fdx;             /* unit perpendicular (width axis) */
     fx_t Bx = standups[i].x, By = standups[i].y;
-    const fx_t L    = FX(0.9);              /* length along the floor */
+    const fx_t L    = standup_body_len(i); /* length along the floor (capped at slabs) */
     const fx_t HALFW = FX(0.225);           /* half width */
     fx_t k_t = FX_DIV(FX(tex_h), L);        /* texY units per world-unit along */
     fx_t k_s = FX_DIV(FX(tex_w), HALFW * 2);/* texX units per world-unit across */
@@ -2406,7 +2428,7 @@ static void draw_falling_standup(int i, int col_start, int col_end,
     fx_t wpy = SIN_FX((uint8_t)(standups[i].facing_angle + 64));
     int fall_rev = (FX_MUL(inv_det,
                        FX_MUL(dirY, wpx) - FX_MUL(dirX, wpy)) < 0);
-    const fx_t H = FX(0.9);
+    const fx_t H = standup_body_len(i);     /* capped at slabs so he stops, not clips */
     const fx_t HALFW = FX(0.225);
     fx_t cs = COS_FX(theta), sn = SIN_FX(theta);
 
@@ -2839,11 +2861,18 @@ static void draw_standup_quad(int i, int col_start, int col_end,
         if (bdepth < FX(0.2)) return;   /* base behind/at camera: don't fold it forward */
         int prog = standup_fall_prog[i];
         if (prog > STANDUP_FALL_MAX) prog = STANDUP_FALL_MAX;
-        uint8_t theta = (uint8_t)(((int)standup_fall_angle[i] * prog) / STANDUP_FALL_MAX);
+        uint8_t theta = (uint8_t)(((int)64 * prog) / STANDUP_FALL_MAX);
         is_front = standup_fall_face[i];
         fx_t fdx = COS_FX(standup_fall_dir[i]), fdy = SIN_FX(standup_fall_dir[i]);
-        fx_t hf = FX_MUL(STANDUP_FALL_LEN, SIN_FX(theta));   /* head reach */
-        head_h  = FX_MUL(STANDUP_FALL_LEN, COS_FX(theta));   /* head height */
+        /* Pivot length eases from the STANDING height (Hh) upright to the lying
+         * body length (STANDUP_FALL_LEN) as he tips. Was FALL_LEN flat, so a
+         * shallow lean set head_h = FALL_LEN*cos(0) ≈ 0.9 > Hh (0.667) and popped
+         * him taller instead of tilting — visible on any short-reach lean (a
+         * partition/wall right beside him). */
+        fx_t st = SIN_FX(theta), ct = COS_FX(theta);
+        fx_t plen = Hh + FX_MUL(STANDUP_FALL_LEN - Hh, st);
+        fx_t hf = FX_MUL(plen, st);   /* head reach */
+        head_h  = FX_MUL(plen, ct);   /* head height */
         hbx = bx + FX_MUL(fdx, hf);
         hby = by + FX_MUL(fdy, hf);
     } else {
@@ -3051,8 +3080,7 @@ static void draw_standup_shadow(int i, int col_start, int col_end,
         fx_t inv_det, int horizon_y, uint8_t *fb) {
     /* Only vanish once he's SETTLED flat (body covers it). While he tips, the
      * shadow stays and shrinks with him (below). */
-    if (standup_down[i] && standup_fall_angle[i] >= 64
-        && standup_fall_prog[i] >= STANDUP_FALL_MAX) return;
+    if (standup_down[i] && standup_fall_prog[i] >= STANDUP_FALL_MAX) return;
     const sprite_def_t *sd = &sprite_defs[standups[i].kind];
     const uint8_t *tex = sd->tex; int tw = sd->w, th = sd->h;     /* lo-res silhouette is plenty */
     int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
@@ -3072,7 +3100,7 @@ static void draw_standup_shadow(int i, int col_start, int col_end,
     if (standup_down[i]) {
         int prog = standup_fall_prog[i];
         if (prog > STANDUP_FALL_MAX) prog = STANDUP_FALL_MAX;
-        theta = (uint8_t)(((int)standup_fall_angle[i] * prog) / STANDUP_FALL_MAX);
+        theta = (uint8_t)(((int)64 * prog) / STANDUP_FALL_MAX);
     }
     fx_t len = FX_MUL(STANDUP_SHADOW_LEN, COS_FX(theta));
     /* Find the closest ceiling light, then point the shadow feet->away-from-it.
@@ -3266,24 +3294,19 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                                         planeX, planeY, inv_det, horizon_y, fb);
             }
         }
-        /* Shoved over. Clear floor ahead (fall_angle==64): fall FLAT via the
-         * billboard-slice + perspective floor-cast — reads as a real body on the
-         * ground and dodges the affine-flat "shrink". Wall within reach
-         * (fall_angle<64): LEAN the tilted world-quad against it at that angle
-         * (the flat renderers assume flat-on-floor and can't). */
+        /* Shoved over -> fall FLAT to the floor via the billboard-slice +
+         * perspective floor-cast (reads as a real body on the ground, dodges the
+         * affine-flat "shrink"). The body length is capped to whatever's ahead
+         * (standup_body_len), so a body toppling toward a partition stops AT the
+         * slab instead of clipping through it — no permanent mid-air lean. */
         if (standup_down[i]) {
-            if (standup_fall_angle[i] >= 64) {
-                if (standup_fall_prog[i] < STANDUP_FALL_MAX) {   /* mid tip-over */
-                    uint8_t theta = (uint8_t)(((int)standup_fall_prog[i] * 64) / STANDUP_FALL_MAX);
-                    draw_falling_standup(i, col_start, col_end, px, py, dirX, dirY,
-                                         planeX, planeY, inv_det, horizon_y, fb, theta);
-                } else {                                         /* settled: flat */
-                    draw_fallen_standup(i, col_start, col_end, px, py, dirX, dirY,
-                                        planeX, planeY, inv_det, horizon_y, fb);
-                }
-            } else {                                             /* leaning on a wall */
-                draw_standup_quad(i, col_start, col_end, px, py, dirX, dirY,
-                                  planeX, planeY, inv_det, horizon_y, fb);
+            if (standup_fall_prog[i] < STANDUP_FALL_MAX) {   /* mid tip-over */
+                uint8_t theta = (uint8_t)(((int)standup_fall_prog[i] * 64) / STANDUP_FALL_MAX);
+                draw_falling_standup(i, col_start, col_end, px, py, dirX, dirY,
+                                     planeX, planeY, inv_det, horizon_y, fb, theta);
+            } else {                                         /* settled: flat */
+                draw_fallen_standup(i, col_start, col_end, px, py, dirX, dirY,
+                                    planeX, planeY, inv_det, horizon_y, fb);
             }
             continue;
         }
@@ -4074,6 +4097,7 @@ void raycast_purge_sprite_cache(void) {
     purge_cache_range(standup_fall_dir, sizeof standup_fall_dir);
     purge_cache_range(standup_fall_prog, sizeof standup_fall_prog);
     purge_cache_range(standup_fall_face, sizeof standup_fall_face);
+    purge_cache_range(standup_fall_len_q, sizeof standup_fall_len_q);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop
@@ -4288,7 +4312,15 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
      * the per-pixel test below isn't an uncached WALL_DIST read every pixel —
      * the slab fills a lot of screen inside a tunnel, so that read dominated. */
     static fx_t slab_far[SCREEN_W];
-    for (int c = col_start; c < col_end; c++) slab_far[c] = 0;
+    /* Cached WALL_DIST (>>4, int16) for the per-pixel z-test — reading the
+     * cache-through WALL_DIST uncached per crawl pixel tanked the crawl pass.
+     * int16 keeps it half the RAM of the old fx_t copy; 1/16-cell z is plenty. */
+    static int16_t wd[SCREEN_W];
+    for (int c = col_start; c < col_end; c++) {
+        slab_far[c] = 0;
+        int32_t d = WALL_DIST(c) >> 4;
+        wd[c] = (int16_t)(d > 32767 ? 32767 : d);
+    }
 
     for (int y = 0; y < horizon_y && y < SCREEN_H; y++) {
         int prow = horizon_y - y;
@@ -4371,7 +4403,7 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
         fx_t wy = wyL + stepy * c0;
         for (int col = c0; col <= c1; col += 2, wx += stepx * 2, wy += stepy * 2) {
             if (!ceil_is_low(wx, wy)) continue;        /* this cell's ceiling is full */
-            if (rowDist >= WALL_DIST(col)) continue;   /* behind a nearer wall */
+            if ((rowDist >> 4) >= wd[col]) continue;    /* behind a nearer wall (cached) */
             /* Lightless ceiling TILE: dim CEIL_BASE fill with a darker grid line
              * on the 0.25-cell tile lattice (matches the open ceiling's tiles). */
             int grid = (((int)wx & CEIL_TILE_MASK) < CEIL_TILE_LINE) ||
@@ -4476,6 +4508,11 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
                     fx_t ex = px + FX_MUL(t + STEP, rdx);
                     fx_t ey = py + FX_MUL(t + STEP, rdy);
                     if (ex < zx0 || ex > zx1 || ey < zy0 || ey > zy1) continue;
+                    /* Only cap where the ceiling actually STEPS DOWN — i.e. the cell
+                     * the ray came FROM is open. If it's another crawl cell (two
+                     * runs side by side), this is an interior edge with no header;
+                     * capping it split the ceiling with phantom vertical walls. */
+                    if (ceil_is_low(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy))) continue;
                     if (t < best) { best = t; hit_along = hx; }
                 }
             }
@@ -4489,6 +4526,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
                     fx_t ex = px + FX_MUL(t + STEP, rdx);
                     fx_t ey = py + FX_MUL(t + STEP, rdy);
                     if (ex < zx0 || ex > zx1 || ey < zy0 || ey > zy1) continue;
+                    if (ceil_is_low(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy))) continue;
                     if (t < best) { best = t; hit_along = hy; }
                 }
             }
@@ -4512,6 +4550,16 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
                bsh = 2 + (int)((past * 13) / span); }
         bsh += 2;
         if (bsh > SHADE_LEVELS - 1) bsh = SHADE_LEVELS - 1;
+        /* Dark room: the crawlspace MOUTH cap is a real surface too, so push it
+         * DARK_ROOM_SHADE deeper into fog like the walls/floor/slab (the low-
+         * ceiling slab already does; this is the outer-edge header). */
+        if (g_dark_active) {
+            fx_t hitx = px + FX_MUL(best, rdx), hity = py + FX_MUL(best, rdy);
+            if (cell_is_dark(hitx, hity)) {
+                bsh += DARK_ROOM_SHADE;
+                if (bsh > SHADE_LEVELS - 1) bsh = SHADE_LEVELS - 1;
+            }
+        }
 
         /* Chevron wallpaper, same texture as the walls, so the header reads as
          * part of the structure. The texture maps over the FULL wall height; the
@@ -5099,8 +5147,11 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     /* Motion drops the NEAR band from full to half: chunkiness is masked while
      * moving, and it's the biggest (most expensive) columns, so it's the best
      * place to reclaim time. Snaps back to full the instant you stand still to
-     * take stock. (is_walking = any motion; swap to is_running for sprint-only.) */
-    int lod_near_cs = (lod && SHARED_UC->is_walking) ? 2 : 1;
+     * take stock. (is_walking = any motion; swap to is_running for sprint-only.)
+     * ALSO drops on wall_dense: a partition-heavy view where full-res-standing is
+     * the F:05 pit (~84% of the pass is near slabs). Standing in a normal room
+     * stays full — wall_dense only latches when last frame's wall cost was high. */
+    int lod_near_cs = (lod && (SHARED_UC->is_walking || SHARED_UC->wall_dense)) ? 2 : 1;
     for (int qcol = col_start; qcol < col_end; qcol += 4) {
         int cstep_q = cstep0;
         if (lod) {
@@ -6936,6 +6987,15 @@ void raycast_render(void) {
     SHARED_UC->wall_vert    = (uint8_t)vert;
     SHARED_UC->wall_lod     = (uint8_t)lod;
     SHARED_UC->wall_dissolve = (uint8_t)dissolve_out;
+    /* Partition-dense latch from LAST frame's wall pass. Only meaningful in LOD
+     * (the near-band drop is a LOD lever); wide hysteresis so halving the near
+     * band — which lowers the cost the latch reads — can't oscillate it. */
+    {
+        static uint8_t dense_latch = 0;
+        if      (prof_pass_walls > WALL_DENSE_ON)  dense_latch = 1;
+        else if (prof_pass_walls < WALL_DENSE_OFF) dense_latch = 0;
+        SHARED_UC->wall_dense = lod ? dense_latch : 0;
+    }
 
     /* Vertical head bob is applied below via the framebuffer line table —
      * no position translation needed (lateral sway felt like drunk

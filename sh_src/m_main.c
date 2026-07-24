@@ -291,14 +291,14 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * (crawlspace, scene-dependent), P = lights + standups sprites. This is
      * the ~25%-of-frame block that was invisible until now. */
     {
-        extern volatile uint16_t prof_pass_ovl, prof_pass_sprite;
+        extern volatile uint16_t prof_pass_ovl, prof_pass_sprite, prof_pass_slab;
         extern volatile uint16_t prof_split_col, prof_dda_fat, prof_ovl_px;
-        static const char lbl[5] = {'O', 'U', 'P', 'K', 'E'};
-        uint16_t pv[5] = { prof_pass_ovl, prof_ovl_px, prof_pass_sprite,
-                           prof_split_col, prof_dda_fat };
-        char t3[42];
+        static const char lbl[6] = {'L', 'O', 'U', 'P', 'K', 'E'};
+        uint16_t pv[6] = { prof_pass_slab, prof_pass_ovl, prof_ovl_px,
+                           prof_pass_sprite, prof_split_col, prof_dda_fat };
+        char t3[52];
         int pos = 0;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {
             t3[pos++] = lbl[i];
             t3[pos++] = ':';
             uint16_t x = pv[i];
