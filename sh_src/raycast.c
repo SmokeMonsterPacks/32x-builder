@@ -518,6 +518,8 @@ typedef struct { fx_t x, y, z; uint8_t axis; uint8_t kind; } decal_t;
  * 64 steps eased at DOOR_OPEN_STEP/frame ≈ 1.5 s open at ~14 fps. */
 #define DOOR_OPEN_MAX   64
 #define DOOR_OPEN_STEP  12    /* ~0.4s open/close at ~14fps (2x faster again) */
+#define RECESS_SHADE_BASE 4   /* base dimness inside the open door's recess;
+                               * door_shade (distance) adds on top */
 static int g_door_open = 0, g_door_target = 0;
 /* Leaf rectangle inside the door texture (column-major door_tex[x][y]). Only
  * this slab swings; the EXIT sign and the wall surround outside it stay static.
@@ -2359,6 +2361,13 @@ void player_update(uint16_t pad) {
 
     /* Track walking state and advance bob phase. */
     is_walking = (dx != 0 || dy != 0);
+    /* Turning-in-place counts as motion for the res/LOD gates (a spin redraws
+     * every column); detected by angle delta so it covers every turn path. */
+    {
+        static uint8_t prev_ang_t;
+        SHARED_UC->is_turning = (player.angle != prev_ang_t);
+        prev_ang_t = (uint8_t)player.angle;
+    }
     /* Running = actually moving while sprinting (A held). The pump reads this
      * to play the carpet footsteps at a faster cadence to match the stride. */
     is_running = (is_walking && sprinting) ? 1 : 0;
@@ -3654,7 +3663,8 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * figure within 4 cells and he renders full-res -- that's exactly when
          * you're studying him and exactly when there's frame time to spare. */
         int lod2 = (spriteHeight > STANDUP_LOD_H)
-                && (SHARED_UC->is_walking || transformY >= FX(4));
+                && (SHARED_UC->is_walking || SHARED_UC->is_turning
+                    || transformY >= FX(4));
         int sx0 = lod2 ? ((drawStartX + 1) & ~1) : drawStartX;
         for (int stripe = sx0; stripe <= drawEndX; stripe += (lod2 ? 2 : 1)) {
             int clip_bot = drawEndY;
@@ -5090,7 +5100,7 @@ RAMTEXT __attribute__((noinline)) static void
 draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
                  int drawStart, int drawEnd, int wall_top,
                  int draw_lineHeight, fx_t perpDist, int wall_shade,
-                 int horizon_y, int eye_h) {
+                 int horizon_y, int eye_h, fx_t exit_d, fx_t drift, fx_t cell_lo) {
     /* The door footprint stays full width — frame, hinge edge and the EXIT
      * sign are painted flat on the wall and never move. `flip` mirrors the whole
      * render (texture + swing) when the door is viewed from the side that the
@@ -5211,24 +5221,74 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
         return;
     }
 
-    /* Fake recess: a back wall ONE cell deeper than the door — shorter, centred
-     * on the horizon, ceiling above + floor below. Shrink = perpDist/(perpDist+1). */
-    fx_t back_scale = (fx_t)(((int64_t)perpDist << FX_SHIFT) / (perpDist + FX(1)));
-    int back_h  = (int)(((int64_t)draw_lineHeight * back_scale) >> FX_SHIFT);
-    /* Position the recess back wall like a real wall one cell deeper: floor line
-     * at the eye-split below the horizon, ceiling above — so it honors free-look
-     * (horizon_y = pitch) AND crouch (eye_h), same as the room's walls. */
+    /* REAL recess: the door cell's actual interior. This column's ray crosses
+     * the opening at perpDist and would leave the cell's far face at exit_d
+     * (the DDA's live tmax, passed in free). Between them it either reaches
+     * the BACK of the cell, or drifts across the door footprint and hits a
+     * JAMB side face first: along(d) moves by `drift` per unit depth, so the
+     * edge in the drift direction is met at t_jamb. One hw divide replaces the
+     * old fake's int64 soft divide (perpDist/(perpDist+1)) -- cheaper AND the
+     * recess now has true parallax + visible jamb sides at oblique angles. */
+    fx_t rec_d = exit_d;                      /* depth of the surface we see */
+    int  jamb  = 0;
+    if (drift > 64 || drift < -64) {          /* near-parallel: never meets an edge */
+        fx_t adrift = drift < 0 ? -drift : drift;
+        /* THIN FRAME + OPEN CAVITY, at the CELL's true width. Two side planes:
+         * within the first REVEAL_D of thickness the aperture is door-width and
+         * a side hit is the wood frame (t at the FOOTPRINT edge); past the
+         * reveal the carve flares to the cell's full interior, so the side is
+         * the CELL edge, wallpapered (jamb 2). The wall really is wider than
+         * the door -- now the inside shows it. */
+        fx_t edge_f = (drift > 0) ? (2 * DECAL_DOOR_HW - along) : along;
+        if (edge_f < 0) edge_f = 0;
+        fx_t t_f = perpDist + fx_div_hw(edge_f, adrift);
+        if (t_f - perpDist < FX(0.25)) {
+            if (t_f < exit_d) { rec_d = t_f; jamb = 1; }   /* wood reveal */
+        } else {
+            fx_t edge_c = (drift > 0) ? (cell_lo + FX_ONE - along)
+                                      : (along - cell_lo);
+            if (edge_c < 0) edge_c = 0;
+            fx_t t_c = perpDist + fx_div_hw(edge_c, adrift);
+            if (t_c < exit_d) { rec_d = t_c; jamb = 2; }   /* cavity side wall */
+        }
+    }
+    if (rec_d < FX(0.1)) rec_d = FX(0.1);
+    int back_h  = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)rec_d);
+    /* Floor line at the eye-split below the horizon, ceiling above -- honors
+     * free-look (horizon_y = pitch) AND crouch (eye_h), same as real walls. */
     int rec_bot = horizon_y + ((back_h * eye_h) >> 8);
     int rec_top = rec_bot - back_h;
 
-    /* The recess reads as the room's own surfaces seen through the doorway, but
-     * FLAT (no texture) and dimmed: ceiling-tile colour up top, wall colour on
-     * the back wall, stained-carpet colour on the floor. RECESS_SHADE sets how
-     * dim (higher = darker). */
-    const int RECESS_SHADE = 6;
-    uint8_t rec_ceil = (uint8_t)(CEIL_BASE  + RECESS_SHADE);
-    uint8_t rec_wall = (uint8_t)(WALL_BASE  + RECESS_SHADE);
-    uint8_t rec_floor = (uint8_t)(FLOOR_BASE + RECESS_SHADE);
+    /* Flat-shaded surfaces (no texture): ceiling tile above, the cell's far
+     * face (or the jamb's FRAME wood) ahead, carpet below. Depth-shaded so a
+     * near-open door reads brighter inside than one across the room. */
+    int rsh = RECESS_SHADE_BASE + door_shade;
+    if (rsh > SHADE_LEVELS - 3) rsh = SHADE_LEVELS - 3;
+    uint8_t rec_ceil  = (uint8_t)(CEIL_BASE  + rsh);
+    uint8_t rec_floor = (uint8_t)(FLOOR_BASE + rsh);
+    uint8_t rec_wall = 0;
+    const uint8_t *bw_col = 0;
+    fx_t bw_step = 0;
+    if (jamb == 1) {
+        int fp = 4 - door_shade; if (fp < 1) fp = 1;    /* keep off the bright end */
+        rec_wall = (uint8_t)(FRAME_BASE + fp);          /* jamb: door-frame wood */
+    } else {
+        /* The cell's interior wears the CHEVRON WALLPAPER -- the "inverse cell"
+         * read: through the doorway you see the room's own skin, not a flat
+         * band. Back face (jamb 0): sampled by the ray's exit position across
+         * the footprint. Cavity side wall (jamb 2): sampled by depth into the
+         * cell, so the pattern runs along the side like a real interior wall.
+         * Vertical maps the full wall tiling over the true projected height. */
+        fx_t ax = (jamb == 2) ? (rec_d - perpDist)
+                              : (along + FX_MUL(drift, rec_d - perpDist));
+        if (ax < 0) ax = 0;
+        int btx = (int)(((uint32_t)ax * (WALL_TEX_HI_WIDTH * WALL_TILE_HI_X))
+                        >> FX_SHIFT) & (WALL_TEX_HI_WIDTH - 1);
+        bw_col  = wall_tex_hi_ram[btx];
+        bw_step = (fx_t)divu_u32(
+            (uint32_t)((WALL_TEX_HI_HEIGHT * WALL_TILE_HI_Y) << FX_SHIFT),
+            (uint32_t)back_h);
+    }
 
     /* Leaf LUT: the swinging LEAF dims as it rotates into the recess (leaf_darken)
      * AND with distance/light (door_shade) — both shift down the shared grey ramp.
@@ -5264,10 +5324,20 @@ draw_door_column(uint8_t *fb, int col, int hr, fx_t along, int flip,
         if (oty >= LEAF_Y0 && oty <= LEAF_Y1) {
             int d = oty - leaf_cy;
             if (void_leaf || d < -leaf_halff || d > leaf_halff) {
-                /* See past the leaf into the recess: ceiling / wall / carpet. */
+                /* See past the leaf into the recess: ceiling / far face / carpet. */
                 if (y < rec_top)      c8 = rec_ceil;
                 else if (y > rec_bot) c8 = rec_floor;
-                else                  c8 = rec_wall;
+                else if (jamb == 1)   c8 = rec_wall;
+                else {
+                    int bv = (int)(((fx_t)(y - rec_top) * bw_step) >> FX_SHIFT)
+                             & (WALL_TEX_HI_HEIGHT - 1);
+                    int ws = rsh + (bw_col[bv] >> 1)    /* chevron texel 0..4 */
+                           + (jamb == 2);               /* side-wall form cue: one
+                                                         * step darker so the cavity
+                                                         * corner READS as a corner */
+                    if (ws > SHADE_LEVELS - 1) ws = SHADE_LEVELS - 1;
+                    c8 = (uint8_t)(WALL_BASE + ws);
+                }
             } else {
                 int srow = (int)(srow_fx >> FX_SHIFT);
                 if (srow < LEAF_Y0) srow = LEAF_Y0;
@@ -5390,7 +5460,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * ALSO drops on wall_dense: a partition-heavy view where full-res-standing is
      * the F:05 pit (~84% of the pass is near slabs). Standing in a normal room
      * stays full — wall_dense only latches when last frame's wall cost was high. */
-    int lod_near_cs = (lod && (SHARED_UC->is_walking || SHARED_UC->wall_dense)) ? 2 : 1;
+    int lod_near_cs = (lod && (SHARED_UC->is_walking || SHARED_UC->is_turning
+                               || SHARED_UC->wall_dense)) ? 2 : 1;
     for (int qcol = col_start; qcol < col_end; qcol += 4) {
         int cstep_q = cstep0;
         if (lod) {
@@ -5402,7 +5473,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
              * orbiting a slab-heavy scene stays cheap; the sharp snap is for
              * standing still — which is when the stair-steps are worth spending
              * on and when there's no motion cost to spare it. */
-            if (lod_prev_pt < PART_SHARP_D && !SHARED_UC->is_walking) cstep_q = 1;
+            if (lod_prev_pt < PART_SHARP_D && !SHARED_UC->is_walking
+                && !SHARED_UC->is_turning) cstep_q = 1;
         }
         fx_t quad_depth = 0x7FFFFFFF;
         fx_t quad_pt = 0x7FFFFFFF;   /* nearest see-over slab in THIS quad */
@@ -6157,11 +6229,26 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     flip = (px < decals[d].x);      /* viewed from the west (looking E) */
                 }
                 if (along < 0 || along > 2 * DECAL_DOOR_HW) continue;
+                /* REAL recess geometry: the cell's far-face depth is the DDA's
+                 * live tmax pair (sideDist minus nothing -- at the hit break
+                 * each holds the NEXT crossing), and the ray's drift across the
+                 * door footprint per unit depth is just the along-axis rayDir
+                 * component. Both free here; the door fn uses them to draw the
+                 * true back wall and jamb sides instead of the painted fake. */
+                fx_t exit_d = sideDistX < sideDistY ? sideDistX : sideDistY;
+                if (partition_hit) exit_d = perpDist + FX_ONE;  /* slab: keep 1-deep look */
+                fx_t drift = decals[d].axis ? rayDirX : rayDirY;
+                /* Low edge of the DOOR CELL in along-space (offset from the
+                 * footprint origin, <= 0): the cavity behind the thin reveal
+                 * opens to the CELL's full width, not the door's. */
+                fx_t cell_lo = decals[d].axis
+                    ? (((fx_t)mapX << FX_SHIFT) - (decals[d].x - DECAL_DOOR_HW))
+                    : (((fx_t)mapY << FX_SHIFT) - (decals[d].y - DECAL_DOOR_HW));
                 /* Big door fill lives in its own function so this hot loop stays
                  * inside the SH-2 I-cache (see draw_door_column's comment). */
                 draw_door_column(fb, col, hr, along, flip, drawStart, drawEnd,
                                  wall_top, draw_lineHeight, perpDist, wall_shade,
-                                 horizon_y, eye_h);
+                                 horizon_y, eye_h, exit_d, drift, cell_lo);
                 door_drawn = 1;
                 break;
             }

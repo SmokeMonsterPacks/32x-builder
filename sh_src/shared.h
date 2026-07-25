@@ -65,6 +65,12 @@ typedef struct {
      * footstep audio — advances and mixes the step sample when set,
      * silent otherwise. */
     volatile uint8_t is_walking;
+    /* Turning in place (angle changed this frame, no positional move needed).
+     * The res/LOD gates treat it as motion -- a spin re-renders every column,
+     * so it deserves the same near-band drop walking gets; chunkiness is
+     * masked by the rotation just like it is by the stride. Does NOT drive
+     * footsteps/bob (those stay on is_walking). */
+    volatile uint8_t is_turning;
     /* Set by the primary to 1 when the player is moving AND sprinting (A
      * held). The pump advances the footstep sample ~1.5x faster while set,
      * so the carpet cadence quickens to match the run. Ignored unless
