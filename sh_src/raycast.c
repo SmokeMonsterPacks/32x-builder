@@ -3649,7 +3649,12 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * full-res. Round the start UP to even so the pair never reads a
          * negative texX, and stripe+1 stays < col_end (drawEndX <= col_end-1,
          * col_end a multiple of 4), so it can't write into the other CPU's half. */
-        int lod2 = (spriteHeight > STANDUP_LOD_H);
+        /* Standing-still snap (same rule as the wall LOD): the word-pair cost
+         * cap is for MOTION, where the chunkiness is masked. Stop to look at a
+         * figure within 4 cells and he renders full-res -- that's exactly when
+         * you're studying him and exactly when there's frame time to spare. */
+        int lod2 = (spriteHeight > STANDUP_LOD_H)
+                && (SHARED_UC->is_walking || transformY >= FX(4));
         int sx0 = lod2 ? ((drawStartX + 1) & ~1) : drawStartX;
         for (int stripe = sx0; stripe <= drawEndX; stripe += (lod2 ? 2 : 1)) {
             int clip_bot = drawEndY;
