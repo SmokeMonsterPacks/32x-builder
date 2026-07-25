@@ -294,7 +294,7 @@ static void place_dark_crawlspace(void) {
         if ((unsigned)ox >= MAP_W || (unsigned)oy >= MAP_H) continue;
         if (world_map[oy][ox] != 0) continue;     /* need open floor outside */
         open_cell(cx, cy);                        /* carve the wall cell */
-        ceil_h_add_run(cx - dx, cy - dy, dx, dy, 2); /* low: interior + wall cell */
+        ceil_h_add_run_h(cx - dx, cy - dy, dx, dy, 2, CRAWL_CEIL_H); /* low: interior + wall cell */
         return;
     }
 }
@@ -500,7 +500,7 @@ static void place_crawlspaces(int count) {
         }
         if (!ok) continue;
         for (int k = 0; k < L; k++) world_map[y + dy * k][x + dx * k] = 0;  /* carve passage */
-        ceil_h_add_run(x, y, dx, dy, L);                                    /* mark it low   */
+        ceil_h_add_run_h(x, y, dx, dy, L, CRAWL_CEIL_H);                    /* mark it low   */
         placed++;
     }
 }

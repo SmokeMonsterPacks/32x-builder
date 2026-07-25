@@ -55,7 +55,11 @@
   }
  },
  "crawl": {
-  "_doc": "low-ceiling run -> ceil_h_add_run(cx,cy,dx,dy,len). dir gives dx,dy.",
+  "_doc": "low-ceiling run -> ceil_h_add_run(cx,cy,dx,dy,len). dir gives dx,dy. h names the slab height (ceil_h value, wall=256): crawl=classic duct, header=tall doorway soffit. Every height forces crouch-through; they differ visually. Each DISTINCT height in a map costs its own render pass-pair, so heights stay a small named set.",
+  "h": {
+   "crawl": 135,
+   "header": 200
+  },
   "dir": {
    "E": [
     1,

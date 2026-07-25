@@ -276,6 +276,18 @@ static fx_t wall_dist[SCREEN_W];
  * neanderthal-behind-a-partition bug). Same cache-through discipline. */
 static int16_t part_topv[SCREEN_W];
 #define PART_TOP(i) (((volatile int16_t *)((uintptr_t)part_topv | 0x20000000))[i])
+/* BACKGROUND depth (>>4, like the slab pass's wd[] cache) saved when a see-over
+ * partial overwrites WALL_DIST with its own near depth. The ceiling-tail passes
+ * (crawl slab / bulkhead / caps) draw rows ABOVE the partial's PART_TOP, so they
+ * must z-test those rows against what's BEHIND the counter, not the counter --
+ * without this a bulkhead vanished column-wide behind any half-height divider
+ * (the same disease PART_TOP cured for sprites). 32767 = no background saved.
+ * Same cache-through discipline. */
+static uint8_t bg_distv[SCREEN_W];   /* depth >> 12 (1/16 cell, range 16 cells):
+                                      * coarse is fine -- it answers "is the
+                                      * ceiling slab in front of the backdrop",
+                                      * surfaces cells apart. 255 = none. */
+#define BG_DIST(i) (((volatile uint8_t *)((uintptr_t)bg_distv | 0x20000000))[i])
 
 /* Recorded main-wall silhouette (clamped drawStart/drawEnd) at each raycast
  * anchor column, for the SEAMS=SMOOTH post-pass. Each CPU only reads back its
@@ -843,7 +855,11 @@ int g_lobby_ceiling = 0;
  * low cells is a crawlspace; collision, forced-crouch, light culling and the
  * slab render all read this array, so crawlspaces can be placed anywhere (and
  * by procgen) without special-casing a single zone. */
-#define CRAWL_CEIL_H 135           /* 0.53 of wall height */
+/* ONE primitive: a per-cell lowered ceiling. ANY lowered cell forces a crouch
+ * (uniform rule -- the walk-under "bulkhead" category was collapsed back into
+ * crawlspace: two names for one thing, and the gameplay split wasn't worth a
+ * second rule). Heights differ only VISUALLY; the named values live in
+ * raycast.h (CRAWL_CEIL_H / BULKHEAD_CEIL_H) beside ceil_h_add_run_h. */
 uint8_t ceil_h[MAP_H][MAP_W];      /* extern: procgen/loaders author it */
 #define CEIL_H(y,x) (((volatile uint8_t *)((uintptr_t)ceil_h | 0x20000000))[(y)*MAP_W + (x)])
 
@@ -852,6 +868,12 @@ uint8_t ceil_h[MAP_H][MAP_W];      /* extern: procgen/loaders author it */
  * rects (a single union bbox caps the wrong faces when crawlspaces are
  * disjoint), so each low-ceiling run is recorded as its own rect. */
 int   g_lowceil_active = 0;
+/* Distinct slab heights present in this map, one render pass-pair each. Small
+ * on purpose (heights are a named set in registry.json); overflow beyond the
+ * cap falls back to CRAWL height at authoring time via lint, never silently. */
+#define MAX_CEIL_HS 3
+static uint8_t ceil_hs[MAX_CEIL_HS];
+static int     n_ceil_hs = 0;
 /* Replicate a palette byte into both lanes of a 16-bit word for the half-res
  * wall word-stores. The toggle itself lives in SHARED_UC->wall_halfres (both
  * CPUs run draw_walls, so it must be cache-through coherent). */
@@ -865,6 +887,12 @@ int   g_lowceil_active = 0;
 static fx_t g_lowceil_x0, g_lowceil_y0, g_lowceil_x1, g_lowceil_y1;
 #define MAX_LOWCEIL_RECTS 8
 static fx_t lowceil_rect[MAX_LOWCEIL_RECTS][4];   /* {x0,y0,x1,y1} world coords */
+/* Each rect's slab height (CRAWL_CEIL_H / BULKHEAD_CEIL_H). The slab + cap
+ * passes run once PER HEIGHT and must touch only their own rects -- an untagged
+ * list capped crawl rects at bulkhead height and vice versa (phantom bright
+ * bands), and a merged union bbox made every pass scan every zone (the F:05
+ * two-pass slideshow). */
+static uint8_t lowceil_rect_h[MAX_LOWCEIL_RECTS];
 static int  n_lowceil_rect = 0;
 
 /* Reset every cell to full-height open ceiling (called by each map loader).
@@ -874,23 +902,33 @@ void ceil_h_clear(void) {
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++) ceil_h[y][x] = CEIL_H_FULL;
     g_lowceil_active = 0;
+    n_ceil_hs = 0;
     n_lowceil_rect = 0;
 }
 
 /* Mark a straight run of `len` cells from (cx,cy) along (dx,dy) as a low-ceiling
  * crawlspace, recording it as one rect (so its mouth gets capped correctly) and
  * growing the overall render bbox. dx,dy in {0,1}; len>=1. */
-void ceil_h_add_run(int cx, int cy, int dx, int dy, int len) {
+void ceil_h_add_run_h(int cx, int cy, int dx, int dy, int len, int h) {
     if (len < 1) return;
+    {   /* record the height in the distinct-heights list (one pass-pair each) */
+        int known = 0;
+        for (int i = 0; i < n_ceil_hs; i++) if (ceil_hs[i] == (uint8_t)h) known = 1;
+        if (!known) {
+            if (n_ceil_hs < MAX_CEIL_HS) ceil_hs[n_ceil_hs++] = (uint8_t)h;
+            else h = CRAWL_CEIL_H;   /* over the cap: render as classic crawl */
+        }
+    }
     for (int k = 0; k < len; k++) {
         int x = cx + dx * k, y = cy + dy * k;
-        if ((unsigned)x < MAP_W && (unsigned)y < MAP_H) ceil_h[y][x] = CRAWL_CEIL_H;
+        if ((unsigned)x < MAP_W && (unsigned)y < MAP_H) ceil_h[y][x] = (uint8_t)h;
     }
     fx_t x0 = FX(cx), y0 = FX(cy);
     fx_t x1 = FX(cx + dx * (len - 1) + 1), y1 = FX(cy + dy * (len - 1) + 1);
     if (n_lowceil_rect < MAX_LOWCEIL_RECTS) {
         lowceil_rect[n_lowceil_rect][0] = x0; lowceil_rect[n_lowceil_rect][1] = y0;
         lowceil_rect[n_lowceil_rect][2] = x1; lowceil_rect[n_lowceil_rect][3] = y1;
+        lowceil_rect_h[n_lowceil_rect] = (uint8_t)h;
         n_lowceil_rect++;
     }
     if (!g_lowceil_active) {
@@ -903,10 +941,6 @@ void ceil_h_add_run(int cx, int cy, int dx, int dy, int len) {
         if (y1 > g_lowceil_y1) g_lowceil_y1 = y1;
     }
 }
-
-/* Single low-ceiling cell (a 1-long run). */
-void ceil_h_set_low(int cx, int cy) { ceil_h_add_run(cx, cy, 0, 0, 1); }
-
 /* Drop the secondary's stale cache of the crawlspace render geometry before it
  * runs the tail pass (CMD_TAIL). These are written ONCE by the primary at map
  * load; the secondary purges the lines so it re-reads the fresh values from
@@ -917,6 +951,9 @@ void raycast_purge_lowceil_cache(void) {
     purge_cache_range(&g_lowceil_x0,     4 * sizeof(fx_t));   /* x0,y0,x1,y1 */
     purge_cache_range(&n_lowceil_rect,   sizeof n_lowceil_rect);
     purge_cache_range(lowceil_rect,      sizeof lowceil_rect);
+    purge_cache_range(lowceil_rect_h,    sizeof lowceil_rect_h);
+    purge_cache_range(ceil_hs,           sizeof ceil_hs);
+    purge_cache_range(&n_ceil_hs,        sizeof n_ceil_hs);
     purge_cache_range(ceil_h,            sizeof ceil_h);  /* slab reads it cached */
 }
 
@@ -929,6 +966,14 @@ static inline int ceil_is_low(fx_t wx, fx_t wy) {
     int cx = FX_INT(wx), cy = FX_INT(wy);
     if ((unsigned)cx >= MAP_W || (unsigned)cy >= MAP_H) return 0;
     return ceil_h[cy][cx] != CEIL_H_FULL;
+}
+/* This cell's ceiling height, or CEIL_H_FULL out of bounds. Lets a ceiling pass
+ * fill/cap only the cells at ITS height, so crawlspaces (135) and bulkheads (200)
+ * cast as separate single-height planes. */
+static inline int ceil_h_at(fx_t wx, fx_t wy) {
+    int cx = FX_INT(wx), cy = FX_INT(wy);
+    if ((unsigned)cx >= MAP_W || (unsigned)cy >= MAP_H) return CEIL_H_FULL;
+    return ceil_h[cy][cx];
 }
 
 /* Per-cell light boost (0..LIGHT_BOOST_MAX): each fixture brightens its own
@@ -1674,7 +1719,7 @@ void raycast_load_fixed(void) {
      * and the slab render all derive from ceil_h[] now, so this is just "these
      * cells have a low ceiling" — place more anywhere by marking more cells. */
     ceil_h_clear();
-    ceil_h_add_run(1, 22, 0, 1, 5);   /* col 1, rows 22-26 — one capped run */
+    ceil_h_add_run_h(1, 22, 0, 1, 5, CRAWL_CEIL_H);   /* col 1, rows 22-26 — one capped run */
     /* Wall outlet on the east wall of the spawn corridor (col 17, west face,
      * rows 24-28), ~2 cells ahead and just right of spawn so it reads on the
      * way out. X 0.16 west of the X=17 face so it sits just in front; z=0.20
@@ -1740,9 +1785,12 @@ void raycast_load_custom(int idx) {
     /* Ceiling: full everywhere, then the low-ceiling crawl runs. */
     g_lobby_ceiling = m->lobby_ceiling;
     ceil_h_clear();
+    /* Slab height comes from the map now (registry crawl.h names -> ceil_h
+     * values); 0 from older generated tables means classic crawl. */
     for (int i = 0; i < m->n_crawls; i++)
-        ceil_h_add_run(m->crawls[i].cx, m->crawls[i].cy,
-                       m->crawls[i].dx, m->crawls[i].dy, m->crawls[i].len);
+        ceil_h_add_run_h(m->crawls[i].cx, m->crawls[i].cy,
+                         m->crawls[i].dx, m->crawls[i].dy, m->crawls[i].len,
+                         m->crawls[i].h ? m->crawls[i].h : CRAWL_CEIL_H);
 
     /* Decals: explicit placements first, then optional auto-helpers. Kind 2 is
      * a FREE-STANDING cutout, not a wall decal — it belongs in standups[]
@@ -2162,7 +2210,9 @@ void player_update(uint16_t pad) {
      * quickly reorient while sprinting. No running while crouched; crawling
      * is slow. */
     int sprinting = !crouching && (pad & SEGA_CTRL_A) != 0;
-    fx_t walk = crouching ? FX(0.04) : (sprinting ? FX(0.15) : FX(0.08));
+    fx_t walk = crouching ? FX(0.064) : (sprinting ? FX(0.15) : FX(0.08));
+    /* crawl was FX(0.04); +60% -- ducts and headers are set dressing to move
+     * through, not a molasses toll. Still slower than the 0.08 walk. */
     uint8_t turn = sprinting ? 8 : 4;
 
     /* B toggles left/right between turning and strafing. */
@@ -4068,6 +4118,12 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
     for (int i = 0; i < NUM_LIGHTS; i++) {
         fx_t lx = lights[i].x;
         fx_t ly = lights[i].y;
+        /* A fixture whose own cell has a low ceiling (crawl or bulkhead) sits
+         * ABOVE the slab -- from under the slab it's hidden, and the flat light
+         * quad z-fights the slab's stamped depth and pokes through. Cull it: no
+         * fixture renders through a low ceiling. Fixes the light-bleed in the
+         * crawl tunnels (and any bulkhead cell), gated so lit maps pay nothing. */
+        if (g_lowceil_active && ceil_is_low(lx, ly)) continue;
         /* Floor to the fixture's tile; span TWO tiles in X, one in Y = a 2:1
          * troffer rectangle (the tubes run the long X axis). */
         fx_t tx0 = (lx / TILE) * TILE, tx1 = tx0 + 2 * TILE;
@@ -4382,10 +4438,10 @@ RAMTEXT void raycast_draw_ceiling_grid(int col_start, int col_end) {
  * tricks. Run AFTER the wall pass (WALL_DIST valid) and z-tested per column so
  * the slab occludes the far wall-tops/ceiling behind it and is hidden by nearer
  * walls — a sector ceiling. One full-width pass on the primary post-sync. */
-RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
+RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end, int slab_h) {
     if (!g_lowceil_active) return;
     int eye = (int)SHARED_UC->eye_h;
-    if (eye >= CRAWL_CEIL_H) return;    /* eye at/above the slab: not overhead */
+    if (eye >= slab_h) return;    /* eye at/above the slab: not overhead */
 
     fx_t px = SHARED_UC->player.x;
     fx_t py = SHARED_UC->player.y;
@@ -4401,10 +4457,30 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
     /* Depth-per-row uses the slab's height above the eye, same focal form as the
      * open ceiling (which uses 256-eye). A lower slab => nearer => looms larger. */
-    int focal = (SCREEN_H * (CRAWL_CEIL_H - eye)) >> 8;   /* > 0 here */
+    int focal = (SCREEN_H * (slab_h - eye)) >> 8;   /* > 0 here */
 
-    fx_t zx0 = g_lowceil_x0, zx1 = g_lowceil_x1;
-    fx_t zy0 = g_lowceil_y0, zy1 = g_lowceil_y1;
+    /* Bbox of THIS height's rects only. The old shared union bbox merged the
+     * crawl tunnels with a distant bulkhead into one giant scan region, so both
+     * passes walked ~2.5x the columns per row for nothing (the F:05 slideshow).
+     * n_lowceil_rect <= 8, so this is a handful of compares per frame. */
+    fx_t zx0 = 0, zx1 = 0, zy0 = 0, zy1 = 0;
+    {
+        int any = 0;
+        for (int r = 0; r < n_lowceil_rect; r++) {
+            if (lowceil_rect_h[r] != slab_h) continue;
+            if (!any) {
+                zx0 = lowceil_rect[r][0]; zy0 = lowceil_rect[r][1];
+                zx1 = lowceil_rect[r][2]; zy1 = lowceil_rect[r][3];
+                any = 1;
+            } else {
+                if (lowceil_rect[r][0] < zx0) zx0 = lowceil_rect[r][0];
+                if (lowceil_rect[r][1] < zy0) zy0 = lowceil_rect[r][1];
+                if (lowceil_rect[r][2] > zx1) zx1 = lowceil_rect[r][2];
+                if (lowceil_rect[r][3] > zy1) zy1 = lowceil_rect[r][3];
+            }
+        }
+        if (!any) return;   /* no zone at this height */
+    }
 
     /* Per-column farthest slab depth, captured so we can stamp the z-buffer
      * AFTER the row loop (writing it mid-loop would corrupt the wall-occlusion
@@ -4413,7 +4489,8 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
      * wd[] snapshots the per-column wall depth (the z-test) into cache ONCE, so
      * the per-pixel test below isn't an uncached WALL_DIST read every pixel —
      * the slab fills a lot of screen inside a tunnel, so that read dominated. */
-    static fx_t slab_far[SCREEN_W];
+    static int16_t slab_far[SCREEN_W];   /* depth >> 4, wd[] precision -- fx_t was
+                                          * 640B of SDRAM we needed back for BG_DIST */
     /* Cached WALL_DIST (>>4, int16) for the per-pixel z-test — reading the
      * cache-through WALL_DIST uncached per crawl pixel tanked the crawl pass.
      * int16 keeps it half the RAM of the old fx_t copy; 1/16-cell z is plenty. */
@@ -4421,7 +4498,23 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
     for (int c = col_start; c < col_end; c++) {
         slab_far[c] = 0;
         int32_t d = WALL_DIST(c) >> 4;
-        wd[c] = (int16_t)(d > 32767 ? 32767 : d);
+        int16_t w16 = (int16_t)(d > 32767 ? 32767 : d);
+        /* See-over fold: when a half-height counter owns this column's z, every
+         * row this pass draws (y < horizon) sits ABOVE the counter's silhouette
+         * top, so the ceiling slab z-tests against the BACKGROUND depth instead
+         * -- otherwise a bulkhead vanished column-wide behind any counter. Only
+         * when the silhouette top is below the horizon (standing): crouched
+         * behind a counter its band covers ceiling rows and must keep occluding.
+         * Folded into wd[] at snapshot time: zero extra arrays, zero per-pixel
+         * cost. */
+        {
+            int pt = PART_TOP(c);
+            if (pt && pt >= horizon_y) {
+                int32_t bgw = (int32_t)BG_DIST(c) << 8;   /* >>12 -> wd's >>4 scale */
+                w16 = (int16_t)(bgw > 32767 ? 32767 : bgw);
+            }
+        }
+        wd[c] = w16;
     }
 
     for (int y = 0; y < horizon_y && y < SCREEN_H; y++) {
@@ -4429,6 +4522,8 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
         if (prow <= 0) continue;
         fx_t rowDist = (fx_t)divu_u32((uint32_t)((fx_t)focal << FX_SHIFT),
                                       (uint32_t)prow);
+        int32_t rd16v = rowDist >> 4;
+        int16_t row16 = (int16_t)(rd16v > 32767 ? 32767 : rd16v);
 
         /* Distance fog for the unlit tile: darken toward the fog end of the
          * CEIL_BASE ramp with depth, so the crawlspace ceiling fades like the
@@ -4504,8 +4599,10 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
         fx_t wx = wxL + stepx * c0;
         fx_t wy = wyL + stepy * c0;
         for (int col = c0; col <= c1; col += 2, wx += stepx * 2, wy += stepy * 2) {
-            if (!ceil_is_low(wx, wy)) continue;        /* this cell's ceiling is full */
-            if ((rowDist >> 4) >= wd[col]) continue;    /* behind a nearer wall (cached) */
+            if (ceil_h_at(wx, wy) != slab_h) continue;  /* only cells at THIS pass's height */
+            if ((rowDist >> 4) >= wd[col]) continue;    /* behind a nearer occluder
+                                                         * (see-over fold already
+                                                         * baked into wd[]) */
             /* Lightless ceiling TILE: dim CEIL_BASE fill with a darker grid line
              * on the 0.25-cell tile lattice (matches the open ceiling's tiles). */
             int grid = (((int)wx & CEIL_TILE_MASK) < CEIL_TILE_LINE) ||
@@ -4514,16 +4611,23 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
             uint8_t cv = grid ? (dk ? lc_grid_d : lc_grid)
                               : (dk ? lc_tile_d : lc_tile);
             *(uint16_t *)(row_p + col) = ((uint16_t)cv << 8) | cv;  /* col & col+1 */
-            slab_far[col] = rowDist; slab_far[col + 1] = rowDist;
+            slab_far[col] = row16; slab_far[col + 1] = row16;
         }
     }
     /* Stamp the z-buffer with the slab's far edge so draw_lights occludes any
      * fixture beyond it — the distant corridor lights no longer bleed through. */
-    for (int c = col_start; c < col_end; c++)
-        if (slab_far[c]) WALL_DIST(c) = slab_far[c];
+    for (int c = col_start; c < col_end; c++) {
+        /* only if NEARER: via the see-over fold the slab can draw while FARTHER
+         * than a counter that owns this column's z — the counter must keep it
+         * (sprites still hide behind the counter). */
+        fx_t sf = (fx_t)slab_far[c] << 4;
+        if (sf && sf < WALL_DIST(c)) WALL_DIST(c) = sf;
+    }
 }
 
-/* ── Low-ceiling bulkheads ───────────────────────────────────────────────────
+/* ── Low-ceiling edge caps ───────────────────────────────────────────────────
+ * (Historically "bulkheads" -- renamed: it caps the boundary faces of ANY
+ * lowered-ceiling zone at that zone's height, duct or doorway header alike.)
  * Cap the crawlspace at its four boundary faces with a vertical wall band from
  * the slab (g_lowceil_h) up to the full ceiling (256), so the entrance reads as
  * a solid low header you crawl under — not a floating slab / invisible barrier.
@@ -4532,7 +4636,7 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end) {
  * corridor walls (e.g. the west boundary) z-cull the side faces automatically;
  * the open ends and any open side get a visible cap. Runs post-sync with the
  * slab, both reading the committed WALL_DIST z-buffer. */
-RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
+RAMTEXT static void raycast_draw_ceil_caps(int col_start, int col_end, int slab_h) {
     if (!g_lowceil_active) return;
     fx_t px = SHARED_UC->player.x;
     fx_t py = SHARED_UC->player.y;
@@ -4543,7 +4647,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
     uint8_t *fb = fb_pixels();
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
     int eye = (int)SHARED_UC->eye_h;
-    int ch  = CRAWL_CEIL_H;
+    int ch  = slab_h;
     const fx_t PAR  = FX(0.01);   /* skip near-parallel rays (no crossing) */
     const fx_t STEP = FX(0.03);   /* probe just past a crossing for entry/exit */
 
@@ -4558,6 +4662,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
     else {
         fx_t inv_det = fx_div_hw(FX_ONE, det);
         for (int r = 0; r < n_lowceil_rect; r++) {
+            if (lowceil_rect_h[r] != slab_h) continue;   /* this pass's height only */
             fx_t rcx[2] = { lowceil_rect[r][0], lowceil_rect[r][2] };
             fx_t rcy[2] = { lowceil_rect[r][1], lowceil_rect[r][3] };
             int rmin = col_end, rmax = col_start - 1, behind = 0;
@@ -4598,6 +4703,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
          * so probe a point just past the crossing and skip it if it's outside
          * the rect. Take the nearest entry face over all rects. */
         for (int r = 0; r < n_lowceil_rect; r++) {
+            if (lowceil_rect_h[r] != slab_h) continue;   /* this pass's height only */
             fx_t zx0 = lowceil_rect[r][0], zy0 = lowceil_rect[r][1];
             fx_t zx1 = lowceil_rect[r][2], zy1 = lowceil_rect[r][3];
             if (rdy > PAR || rdy < -PAR) {
@@ -4614,7 +4720,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
                      * the ray came FROM is open. If it's another crawl cell (two
                      * runs side by side), this is an interior edge with no header;
                      * capping it split the ceiling with phantom vertical walls. */
-                    if (ceil_is_low(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy))) continue;
+                    if (ceil_h_at(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy)) == slab_h) continue;
                     if (t < best) { best = t; hit_along = hx; }
                 }
             }
@@ -4628,13 +4734,21 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
                     fx_t ex = px + FX_MUL(t + STEP, rdx);
                     fx_t ey = py + FX_MUL(t + STEP, rdy);
                     if (ex < zx0 || ex > zx1 || ey < zy0 || ey > zy1) continue;
-                    if (ceil_is_low(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy))) continue;
+                    if (ceil_h_at(px + FX_MUL(t - STEP, rdx), py + FX_MUL(t - STEP, rdy)) == slab_h) continue;
                     if (t < best) { best = t; hit_along = hy; }
                 }
             }
         }
         if (best == 0x7FFFFFFF) continue;
-        if (best >= WALL_DIST(col)) continue;          /* behind a real wall */
+        int see_over_clip = -1;                        /* no clip by default */
+        if (best >= WALL_DIST(col)) {                  /* behind a nearer occluder */
+            /* See-over exemption (same as the slab fill): a half-height counter
+             * owns this column's z, but the cap band lives ABOVE its silhouette.
+             * Draw against the background depth and clip to above the counter. */
+            int pt = PART_TOP(col);
+            if (!(pt && (best >> 12) < (fx_t)BG_DIST(col))) continue;
+            see_over_clip = pt - 1;
+        }
 
         int lineHeight = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT),
                                        (uint32_t)best);
@@ -4643,6 +4757,7 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
         int top = wall_top < 0 ? 0 : wall_top;
         int bot = wall_bot - ((lineHeight * ch) >> 8); /* slab, height ch */
         if (bot > SCREEN_H - 1) bot = SCREEN_H - 1;
+        if (see_over_clip >= 0 && bot > see_over_clip) bot = see_over_clip;
         if (top > bot) continue;
 
         /* Distance-fog shade, a touch darker (a header in shadow). */
@@ -4698,8 +4813,15 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
             *p = blut[bcol[(bpos >> FX_SHIFT) & bmask]];
             p += SCREEN_W; bpos += bstep;
         }
-        WALL_DIST(col) = best;   /* occlude lights/sprites behind the header */
-        PART_TOP(col) = 0;       /* header is full occlusion: no see-over */
+        /* Occlude lights/sprites behind the header — but only when the header
+         * really is the nearest occluder. Via the see-over exemption this cap
+         * can draw while FARTHER than a counter that owns the column's z;
+         * stamping the far cap depth (and clearing the counter's PART_TOP)
+         * made full sprite bodies bleed through the band. */
+        if (best < WALL_DIST(col)) {
+            WALL_DIST(col) = best;   /* header is the nearest occluder */
+            PART_TOP(col) = 0;       /* full occlusion: no see-over */
+        }
     }
 }
 
@@ -4709,8 +4831,17 @@ RAMTEXT static void raycast_draw_bulkheads(int col_start, int col_end) {
  * the primary calls [0,split), the secondary [split,SCREEN_W) — so the
  * crawlspace cost (which spiked single-CPU) is shared instead of serial. */
 void raycast_draw_tail(int col_start, int col_end) {
-    raycast_draw_low_ceiling(col_start, col_end);
-    raycast_draw_bulkheads(col_start, col_end);
+    /* One single-height plane + its boundary caps per ceiling height present.
+     * Crawl (135) always; bulkheads (200) only when the map has any. The caps
+     * are the vertical faces that frame each slab's edges (slab height -> full
+     * ceiling), so a bulkhead reads as a solid soffit, not a floating patch. */
+    for (int i = 0; i < n_ceil_hs; i++) {
+        int h = ceil_hs[i];
+        /* TESTING>BULKHEAD A/B: OFF skips every non-crawl height's pass-pair. */
+        if (h != CRAWL_CEIL_H && SHARED_UC->bulk_kill) continue;
+        raycast_draw_low_ceiling(col_start, col_end, h);
+        raycast_draw_ceil_caps(col_start, col_end, h);
+    }
 }
 
 /* Carpet wear pass — stamps dark "stains" across the floor (bottom
@@ -5277,6 +5408,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = 0x7FFFFFFF;
         PART_TOP(col) = 0;
         for (int j = 1; j < cstep; j++) PART_TOP(col + j) = 0;
+        BG_DIST(col) = 255;
+        for (int j = 1; j < cstep; j++) BG_DIST(col + j) = 255;
         fx_t cameraX = cameraX_table[col];
         fx_t rayDirX = dirX + FX_MUL(planeX, cameraX);
         fx_t rayDirY = dirY + FX_MUL(planeY, cameraX);
@@ -6400,7 +6533,16 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         if (fg_n) {
             /* The nearest band is the closest solid surface in this column, so
              * the sprite z-buffer must read its depth — otherwise the ceiling
-             * lights (drawn later, z-tested per column) bleed through it. */
+             * lights (drawn later, z-tested per column) bleed through it.
+             * Save what WALL_DIST held first (the background wall) into
+             * BG_DIST so the ceiling-tail passes can still z-test the rows
+             * ABOVE a see-over band against the real backdrop. */
+            {
+                int32_t bgd = WALL_DIST(col) >> 12;
+                uint8_t bg8 = (uint8_t)(bgd > 255 ? 255 : bgd);
+                BG_DIST(col) = bg8;
+                for (int j = 1; j < cstep; j++) BG_DIST(col + j) = bg8;
+            }
             WALL_DIST(col) = fg_t[0];
             for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = fg_t[0];
         }

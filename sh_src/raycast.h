@@ -75,11 +75,16 @@ extern int g_lowceil_active;
  * The first-class crawlspace data model: collision, forced-crouch, light
  * culling and the slab render all read this. Loaders/procgen author it. */
 extern uint8_t ceil_h[MAP_H][MAP_W];
+/* Named slab heights (ceil_h values; wall = 256). ONE primitive: any lowered
+ * cell forces crouch-through; heights differ visually. Mirrors registry.json
+ * crawl.h -- change there for maps, here for procgen/fixed callers. Each
+ * DISTINCT height in a map costs one render pass-pair (engine cap: 3). */
+#define CRAWL_CEIL_H    135   /* 0.53 of wall height -- classic duct slab */
+#define BULKHEAD_CEIL_H 200   /* 0.78 -- taller doorway header/soffit */
 void ceil_h_clear(void);          /* reset all cells to full-height ceiling */
-void ceil_h_set_low(int cx, int cy);  /* mark a single cell as a low ceiling */
-/* Mark a straight run of `len` cells from (cx,cy) along (dx,dy) as ONE
- * crawlspace (so its mouth is capped as a unit). dx,dy in {0,1}. */
-void ceil_h_add_run(int cx, int cy, int dx, int dy, int len);
+/* Mark a straight run of `len` cells from (cx,cy) along (dx,dy) as ONE lowered
+ * ceiling of height h (mouth capped as a unit). dx,dy in {0,1}. */
+void ceil_h_add_run_h(int cx, int cy, int dx, int dy, int len, int h);
 
 /* Wall-mounted decals (the lobby outlet). Count is reset per-map so the
  * outlet only renders in the lobby; the array itself lives in raycast.c. */

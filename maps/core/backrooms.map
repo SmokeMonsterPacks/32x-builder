@@ -40,7 +40,12 @@ canon: Backrooms
 ################################
 
 [crawl]
+# West-wall duct: classic crawl height -- a duct should read tight. (Trialed at
+# h=header; too open for a duct. Headers are for doorway soffits.)
 1,22 dir=S len=5
+# Doorway header over the wide double-door opening north of spawn -- the soffit
+# hangs at h=header (taller than a duct slab); crouch through it like any drop.
+15,16 dir=E len=2 h=header
 
 [partitions]
 22,22 -> 26,22  style=spotted height=low crawl=no

@@ -142,11 +142,16 @@ def resolve(path, reg):
                        kinds[d["kind"]]["kind"], facing[d["face"]]))
 
     crawls = []
+    ch = reg["crawl"]["h"]
     for c in m["crawls"]:
         if c["dir"] not in cdir:
             die("%s: unknown dir %r" % (base, c["dir"]))
+        hname = c.get("h", "crawl")
+        if hname not in ch:
+            die("%s: unknown crawl h %r (named heights: %s)"
+                % (base, hname, "/".join(sorted(ch))))
         dx, dy = cdir[c["dir"]]
-        crawls.append((c["cx"], c["cy"], dx, dy, c["len"]))
+        crawls.append((c["cx"], c["cy"], dx, dy, c["len"], ch[hname]))
 
     # Authored ceiling fixtures. Empty list => the engine falls back to its
     # procedural grid (init_lights), which is what every map did before this.
@@ -237,8 +242,8 @@ def emit(maps, out_path):
             L.append("};")
         if m["crawls"]:
             L.append("static const cm_crawl_t %s_crawls[] = {" % p)
-            for (cx, cy, dx, dy, ln) in m["crawls"]:
-                L.append("    { %d,%d,%d,%d,%d }," % (cx, cy, dx, dy, ln))  # dx,dy signed
+            for (cx, cy, dx, dy, ln, hv) in m["crawls"]:
+                L.append("    { %d,%d,%d,%d,%d,%d }," % (cx, cy, dx, dy, ln, hv))  # dx,dy signed
             L.append("};")
         if m["dark"]:
             L.append("static const cm_dark_t %s_dark[] = {" % p)

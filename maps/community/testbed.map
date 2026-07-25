@@ -42,6 +42,10 @@ next: BACKROOMS
 
 [crawl]
 20,4 dir=E len=9
+# HEADER-HEIGHT TEST BEAM: a standalone N-S soffit at h=header, open ceiling all
+# around -- the tall-slab variant of the crawl primitive (TESTING>BULKHEAD kills
+# its render pass-pair for same-binary A/B on the L: counter).
+22,25 dir=S len=5 h=header
 # CRAWL STRESS: a 5-wide, 15-deep tunnel straight ahead of the N-facing spawn so
 # looking forward fills the view with low-ceiling slab + bulkhead mouth (the F:06
 # spike repro). Six rects total also exercises the bulkhead's per-rect divides.

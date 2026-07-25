@@ -159,6 +159,10 @@ typedef struct {
      * F:05 pit. Primary latches this from last frame's wall cost (hysteresis) and
      * publishes it cache-through so both CPUs drop their near band together. */
     volatile uint8_t wall_dense;
+    /* Bulkhead kill-switch (TESTING menu): 1 = skip the bulkhead-height ceiling
+     * slab + cap passes, for same-binary A/B of their cost (HUD L:). Both CPUs
+     * read it cache-through in raycast_draw_tail. Crawl passes unaffected. */
+    volatile uint8_t bulk_kill;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to
