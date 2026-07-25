@@ -58,6 +58,38 @@ loop (see Perf section) sits inside this split.
 
 ## Level / geometry
 
+### Wall-profile system — carved architecture ("architecture by omission")  (2026-07-25)
+**Status:** designed, not built. The cheap-path answer to arches/openings/doorways
+— distinct from the MAP_RES fork (that's for free-standing thin geometry + floor
+heights). Everything here stays on the grid-wall DDA path, so **zero partition
+tax**; the only new per-frame cost is "continue the ray past a carved cell,"
+which void/exit cells already pay.
+
+**The primitive:** a wall cell stops being a boolean (wall/void/exit) and carries
+a small per-cell **profile** — where the solid part of the column lives:
+- floor-anchored partial (floor->H) — ALREADY EXISTS as `part_height` (see-over dividers)
+- **ceiling-anchored partial (ceiling->D) — the missing inverse; the key new primitive**
+- mid-carve (header + opening + optional sill)
+
+Reuses already in the tree: void/exit ray-continue (template for "draw a band,
+keep marching"), the crawlspace bulkhead/mouth cap (a ceiling-anchored band
+draw), `FRAME_BASE` (jamb/casing palette), `g_door_target` (swinging door), the
+crawlspace eye-height gate (walk-under).
+
+**Staged deliverables (shared foundation first):**
+1. **Foundation** — per-cell profile field + column draw clips to it + DDA
+   continues past a partial (void-cell path is the template). Everything below rides this.
+2. **Bulkhead** — ceiling-anchored partial (hang a soffit/beam, walk under). It's
+   `part_height` mirrored top-down; highest reuse, first to land. NOTE: we do NOT
+   currently do top-down — we do floor-up (`part_height`) and lowered *ceilings*
+   (`CEIL_H`). This is the new one.
+3. **Arch** — walk-through opening: ceiling-anchored header + open-below + passable
+   cell. Flat lintel first; curve is polish.
+4. **Doorway** — mid-carve + jamb REVEAL (draw the wall-thickness side faces in
+   `FRAME_BASE` so the opening has depth = "the interior cell") + the door leaf
+   recessed in it. Ties into the "different door types" list.
+5. **Curve LUT** — round/pointed arch tops (polish).
+
 ### Bigger / more authentic map
 **Status:** ✅ done — settled on a hand-tuned 32×32.
 

@@ -971,6 +971,47 @@ static int cell_is_dark(fx_t wx, fx_t wy) {
 #define LIT_FOG_CAP     9   /* a lit surface never fogs darker than this (-2 per light level) */
 #define SIDE_SHADE      1   /* N/S-facing faces are this many shades darker (form cue) */
 
+/* Canonical shade for a textured world surface: distance fog ramp -> uniform
+ * darken -> N/S side cue -> capped by local fixture light -> pushed darker under
+ * a low ceiling and in a dark room. EVERY such surface (grid wall, partition,
+ * and anything future) MUST route through this so none can forget the crawlspace
+ * / dark-room push -- that omission is the whole "system X glows where the walls
+ * fog" bug class (partition #12, etc.). Callers derive lit / lowceil_dark /
+ * room_dark from their OWN hit cell (the derivation differs: DDA cell + back-step
+ * for a grid wall, hit point for a free-standing slab) and pass the resolved
+ * inputs in. Far-field strobe is a separate wall effect applied after. Returns a
+ * shade level 0..SHADE_LEVELS-1; add it to the surface's palette base. */
+static inline int surface_shade(fx_t dist, int side, int lit,
+                                int lowceil_dark, int room_dark) {
+    int s;
+    if (dist < FX(2.5)) {
+        s = (int)((dist * 2) / FX(2.5));
+    } else {
+        fx_t past = dist - FX(2.5);
+        fx_t span = FOG_RAMP_DIST - FX(2.5);
+        s = 2 + (int)((past * 13) / span);
+    }
+    if (s > SHADE_LEVELS - 1) s = SHADE_LEVELS - 1;
+    s += 1;                                  /* muted-hallway darken */
+    if (side) s += SIDE_SHADE;               /* N/S form cue */
+    if (s < 0) s = 0;
+    if (s > SHADE_LEVELS - 1) s = SHADE_LEVELS - 1;
+    if (lit) {                               /* lit surface resists fog */
+        int cap = LIT_FOG_CAP - (lit - 1) * 2;
+        if (cap < 0) cap = 0;                /* never invert the ramp */
+        if (s > cap) s = cap;
+    }
+    if (lowceil_dark) {                      /* under a low ceiling: no fixture light */
+        s += 5;
+        if (s > SHADE_LEVELS - 1) s = SHADE_LEVELS - 1;
+    }
+    if (room_dark) {                         /* dark room: only what leaks in */
+        s += DARK_ROOM_SHADE;
+        if (s > SHADE_LEVELS - 1) s = SHADE_LEVELS - 1;
+    }
+    return s;
+}
+
 /* Authored ceiling fixtures for the map being loaded, or NULL for "derive the
  * procedural grid". Set by raycast_load_custom, CLEARED by every other loader
  * (procgen/fixed/lobby) — a stale pointer here would light the next map with
@@ -3514,12 +3555,15 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         uint8_t vmap[8];
         {
             int is_chair = (standups[i].kind == CHAIR_SPRITE_KIND);
+            /* Distance + dark-room fog, shared by the chair AND the neanderthal
+             * (front figure). Baked into the value-LUT so the inner loop stays a
+             * single table read -- fog is effectively free per pixel. */
             int fog = 0;
-            if (is_chair) {
+            {
                 fx_t fd = transformY - FX(2);
                 if (fd > 0) fog = (int)(((int64_t)fd * 5) / (FOG_RAMP_DIST - FX(2)));
-                /* Dark-room chair: full fog — a silhouette in the gloom, like
-                 * the walls around it (mirrors draw_chair_3d's dark clamp). */
+                /* Dark-room: full fog -- a silhouette in the gloom, like the
+                 * walls around it (mirrors draw_chair_3d's dark clamp). */
                 if (cell_is_dark(standups[i].x, standups[i].y)) fog = 5;
             }
             for (int k = 1; k < 8; k++) {
@@ -3532,7 +3576,14 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 } else if (is_silhouette) {
                     vmap[k] = silhouette_color;
                 } else if (is_front) {
-                    vmap[k] = (uint8_t)(sd->base + k);
+                    /* Neanderthal parity: fog the figure toward its dark end as
+                     * it recedes (shades run 1..7) so it stops floating as a
+                     * bright cutout in the fog. Hands off to the silhouette at
+                     * far LOD. If this reads BRIGHTER with distance the ramp is
+                     * reversed -- flip to (sd->base + (8 - sh)). */
+                    int sh = k - fog;
+                    if (sh < 1) sh = 1; else if (sh > 7) sh = 7;
+                    vmap[k] = (uint8_t)(sd->base + sh);
                 } else {
                     vmap[k] = back_color;
                 }
@@ -5800,40 +5851,12 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
          * far ramp now covers a longer span (2.5..6 instead of 3.5..6),
          * pulling perpDist 3-5 walls down 2-3 shade levels — they read
          * as "in the fog" instead of "lit yellow far away". */
-        int wall_shade;
-        if (perpDist < FX(2.5)) {
-            wall_shade = (int)((perpDist * 2) / FX(2.5));
-        } else {
-            fx_t past = perpDist - FX(2.5);
-            fx_t span = FOG_RAMP_DIST - FX(2.5);
-            wall_shade = 2 + (int)((past * 13) / span);
-        }
-        /* Past FOG_RAMP_DIST the formula keeps going up; clamp here
-         * so the LOD/shade_lut math sees a valid index. Everything in
-         * the 6..10 distance band renders at shade 15. */
-        if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
-        /* Bump all walls one shade darker so the wall reads as the
-         * muted yellow of an actual Backrooms hallway instead of the
-         * brightest palette entry. Was previously applied as a side==1
-         * depth cue (one wall darker than the other); now uniform on
-         * both sides so the wallpaper reads consistently and the
-         * chevron sits in the same perceptual region everywhere. */
-        wall_shade += 1;
-        /* Subtle directional form cue: faces whose normal runs N/S (side 1)
-         * are one shade darker than E/W faces, so a wall or partition reads
-         * with form — you can see where it turns a corner — instead of flat. */
-        if (side) wall_shade += SIDE_SHADE;
-        if (wall_shade < 0) wall_shade = 0;
-        /* Final clamp so the baseboard color lookup (WALL_BASE +
-         * wall_shade) and any downstream shade-index user can't walk
-         * off the end of the wall palette into FLOOR_BASE — that bug
-         * was painting distant baseboards as bright carpet yellow. */
-        if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
-
-        /* Light boost: a wall/partition next to a ceiling fixture reads
-         * brighter. Sample the hit cell's precomputed light level and pull
-         * the shade toward bright. Partitions live between cells, so derive
-         * the cell from the actual hit point; solid walls use the DDA cell. */
+        /* Shade via surface_shade() so this face darkens by the SAME rule as
+         * every other surface. We derive only the cell-bools here (wall-specific:
+         * the DDA hit cell, back-stepped to the viewer-side OPEN cell for the
+         * crawl/dark tests since the wall cell itself is solid); the ramp/cap/
+         * push math lives in the helper. */
+        int lit, lowceil_dark = 0, room_dark = 0;
         {
             int litX, litY;
             if (partition_hit) {
@@ -5844,36 +5867,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             } else {
                 litX = mapX; litY = mapY;
             }
-            /* The outer shell terminates the ray OUT of bounds (mapX/mapY is
-             * -1 or MAP_W/MAP_H by construction), and the partition fallback
-             * above lands on those same coords — so clamp before sampling.
-             * An unguarded read here indexed cell_light[-32] and friends and
-             * returned garbage; a garbage `lit` drives the cap below hugely
-             * negative, wall_shade follows, and WALL_BASE + shade wraps the
-             * uint8 into unset palette. That was the corner rendering indigo
-             * in Ares and black on MiSTer — the same index reading whatever
-             * CRAM happened to hold. Patchy per column because each column
-             * read a DIFFERENT garbage byte. */
+            /* Clamp before sampling: the outer shell / partition fallback can
+             * land out of bounds, and an unguarded cell_light read returned
+             * garbage that wrapped the palette (indigo corners in Ares, black on
+             * MiSTer). */
             if (litX < 0) litX = 0; else if (litX >= MAP_W) litX = MAP_W - 1;
             if (litY < 0) litY = 0; else if (litY >= MAP_H) litY = MAP_H - 1;
-            int lit = CELL_LIGHT(litY, litX) & LIGHT_BOOST_MAX;
-            if (lit) {
-                /* A lit surface resists distance fog: cap how dark it gets
-                 * (more headroom the more lit). Near surfaces are already
-                 * below the cap; far-but-lit ones — the rear T-divider —
-                 * stay mid-bright and readable instead of fogging out. */
-                int cap = LIT_FOG_CAP - (lit - 1) * 2;
-                if (cap < 0) cap = 0;      /* never invert the ramp, whatever lit says */
-                if (wall_shade > cap) wall_shade = cap;
-            }
-            /* Crawlspace light model: a wall face SEEN FROM under a low
-             * ceiling gets no fixture light — the slab blocks it. Push it
-             * well into the dark ramp, AFTER the lit-cap above so a fixture
-             * in the room beyond can't cancel it. The low ceiling lives on
-             * the viewer-side OPEN cell (the wall cell itself is full), so
-             * back-step the DDA one cell on the axis it last crossed;
-             * partition hits already carry their open cell in litX/litY.
-             * Gated on g_lowceil_active: crawl-less maps pay nothing. */
+            lit = CELL_LIGHT(litY, litX) & LIGHT_BOOST_MAX;
             if (g_lowceil_active) {
                 int cfx = litX, cfy = litY;
                 if (!partition_hit) {
@@ -5882,16 +5882,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 }
                 if ((unsigned)cfx < (unsigned)MAP_W &&
                     (unsigned)cfy < (unsigned)MAP_H &&
-                    CEIL_H(cfy, cfx) != CEIL_H_FULL) {
-                    wall_shade += 5;
-                    if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
-                }
+                    CEIL_H(cfy, cfx) != CEIL_H_FULL) lowceil_dark = 1;
             }
-            /* DARK ROOM: no fixtures overhead, so a face seen from inside one
-             * gets only what leaks in. Same viewer-side cell as the crawlspace
-             * model (the wall cell itself is solid), and applied AFTER the
-             * lit-cap so a fixture in the lit room beyond can't undo it.
-             * g_dark_active keeps lit maps at zero cost. */
             if (g_dark_active) {
                 int dfx = litX, dfy = litY;
                 if (!partition_hit) {
@@ -5900,12 +5892,10 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 }
                 if ((unsigned)dfx < (unsigned)MAP_W &&
                     (unsigned)dfy < (unsigned)MAP_H &&
-                    (CELL_LIGHT(dfy, dfx) & CELL_DARK)) {
-                    wall_shade += DARK_ROOM_SHADE;
-                    if (wall_shade > SHADE_LEVELS - 1) wall_shade = SHADE_LEVELS - 1;
-                }
+                    (CELL_LIGHT(dfy, dfx) & CELL_DARK)) room_dark = 1;
             }
         }
+        int wall_shade = surface_shade(perpDist, side, lit, lowceil_dark, room_dark);
 
         /* Distant fluorescent strobe burst. Each cell past
          * FOG_RAMP_DIST has its own pseudo-random phase. Most of the
@@ -6449,22 +6439,22 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 /* Shade: distance ramp + uniform + N/S side-shade, then cell-
                  * light cap — matching the wall pass exactly so the arm reads
                  * one step darker than the (E/W-facing) stem, not the same. */
-                int fsh;
-                if (ft < FX(2.5)) fsh = (int)((ft * 2) / FX(2.5));
-                else { fx_t past = ft - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
-                       fsh = 2 + (int)((past * 13) / span); }
-                if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
-                fsh += 1;
-                if (fsd) fsh += SIDE_SHADE;
-                if (fsh > SHADE_LEVELS - 1) fsh = SHADE_LEVELS - 1;
+                /* Same surface_shade() as the walls -- so a slab fogs, caps to
+                 * fixture light, and (the part it USED to skip) darkens under a
+                 * low ceiling and in a dark room like everything around it (#12:
+                 * counters no longer glow in the gloom). A free-standing slab's
+                 * own hit cell IS the open cell, so no viewer-side back-step. */
+                int lit = 0, lowceil_dark = 0, room_dark = 0;
                 {
                     int lx = FX_INT(px + FX_MUL(ft, rayDirX));
                     int ly = FX_INT(py + FX_MUL(ft, rayDirY));
                     if ((unsigned)lx < (unsigned)MAP_W && (unsigned)ly < (unsigned)MAP_H) {
-                        int lit = CELL_LIGHT(ly, lx) & LIGHT_BOOST_MAX;
-                        if (lit) { int cap = LIT_FOG_CAP - (lit - 1) * 2; if (fsh > cap) fsh = cap; }
+                        lit = CELL_LIGHT(ly, lx) & LIGHT_BOOST_MAX;
+                        if (g_lowceil_active && CEIL_H(ly, lx) != CEIL_H_FULL) lowceil_dark = 1;
+                        if (g_dark_active && (CELL_LIGHT(ly, lx) & CELL_DARK)) room_dark = 1;
                     }
                 }
+                int fsh = surface_shade(ft, fsd, lit, lowceil_dark, room_dark);
                 /* Texture + detail (spotted dots fade with distance). */
                 const uint8_t *ftex; int ftw, fth, ftlx, ftly, fdetail;
                 if (fst) {
