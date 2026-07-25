@@ -365,8 +365,16 @@ def submit_url():
     filename = "maps/community/%s.map" % slug
     base = "https://github.com/%s/new/%s" % (config.GITHUB_REPO, config.GITHUB_BRANCH)
     url = "%s?filename=%s&value=%s" % (base, quote(filename, safe=""), quote(text, safe=""))
+    # For maps too big for a pre-filled URL, the client downloads the real .map
+    # and hands the user GitHub's drag-drop UPLOAD page (a real file, no
+    # clipboard) rather than an empty new-file editor — the old fallback silently
+    # dropped the content and produced empty PRs.
+    updir = filename.rsplit("/", 1)[0]
+    upload_url = "https://github.com/%s/upload/%s/%s" % (
+        config.GITHUB_REPO, config.GITHUB_BRANCH, updir)
     return jsonify({"ok": True, "url": url, "bare_url": "%s?filename=%s" % (base, quote(filename, safe="")),
-                    "filename": filename, "text": text, "url_len": len(url)})
+                    "upload_url": upload_url, "filename": filename, "text": text,
+                    "url_len": len(url)})
 
 
 @app.route("/new")

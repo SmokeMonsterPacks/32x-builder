@@ -775,6 +775,16 @@ async function doLoad(name) {
   fitCell(); buildPalette(); buildNextSel(); draw(); saveWip(); announceBudget('loaded ' + name + tag);
 }
 
+/* Trigger a browser download of `text` as `fname`. Unlike a clipboard write,
+   this can't silently fail on a stale user-gesture, so it's the reliable way to
+   get a large map's real content over to GitHub. */
+function downloadText(text, fname) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  const a = document.createElement('a'); a.href = url; a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /* Export = download the .map to the user's disk (the save path on the hosted,
    read-only editor). The session never leaves the browser; the file does. */
 async function doExport() {
@@ -844,10 +854,18 @@ async function doSubmit() {
     window.open(j.url, '_blank');
     status('opening GitHub: sign in, then "Propose new file" → "Create pull request". ' +
            'Your map lands in ' + j.filename + ' under your own name.');
-  } else {                                // huge map: clipboard + bare new-file page
-    try { await navigator.clipboard.writeText(j.text); } catch (e) { /* fall through */ }
-    window.open(j.bare_url, '_blank');
-    status('map copied to clipboard (too big for a URL) — paste it into the GitHub editor that just opened, then "Propose new file".');
+  } else {                                // too big for a URL: hand over a REAL file
+    /* The old path opened GitHub's empty new-file editor and copied the map to
+     * the clipboard for a manual paste — a paste that silently failed (stale
+     * user-gesture) or got skipped, committing an empty file. Instead download
+     * the actual .map and open GitHub's drag-drop UPLOAD page: real content, no
+     * clipboard, no empty editor. */
+    const fname = (j.filename.split('/').pop()) || 'map.map';
+    downloadText(j.text, fname);
+    window.open(j.upload_url, '_blank');
+    status('your map is too big for GitHub’s URL editor, so it downloaded as ' +
+           fname + ' — drag that file into the GitHub upload page that just opened, ' +
+           'then "Propose changes" to open your PR.');
   }
 }
 

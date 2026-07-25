@@ -71,6 +71,17 @@ def parse_map(path, errs):
         text = open(path).read()
     except OSError as ex:
         errs.append("%s: cannot read (%s)" % (base, ex)); return None
+    # An empty or whitespace-only file is the signature of the editor's submit
+    # dropping the map content (the large-map fallback used to open an empty
+    # GitHub editor). Name that plainly instead of leaking a "missing 'name:'"
+    # parser error, so the contributor knows to re-export and resubmit.
+    if not text.strip():
+        errs.append("%s: file is empty — the map content didn't make it into "
+                    "the commit. Re-export the .map from the editor "
+                    "(backrooms-32x-project.fly.dev) and resubmit; if you "
+                    "pasted into the GitHub editor, make sure the paste landed "
+                    "before you committed." % base)
+        return None
     try:
         return mapfmt.parse(text)
     except mapfmt.MapFormatError as ex:

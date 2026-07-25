@@ -88,6 +88,9 @@ def whoami(token):
 def open_map_pr(token, login, upstream, base_branch, path, text, title, body):
     """The whole submission dance, idempotent where possible.
     Returns {"url", "number", "existing": bool}."""
+    if not (text and text.strip()):
+        raise GitHubError("refusing to commit an empty map file — the editor "
+                          "sent no content. Reload the editor and resubmit.")
     owner_repo = upstream.split("/")
     if len(owner_repo) != 2:
         raise GitHubError("bad upstream repo %r" % upstream)
