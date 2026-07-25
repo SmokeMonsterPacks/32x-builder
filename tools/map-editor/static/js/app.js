@@ -141,11 +141,22 @@ function updateBudget() {
   const box = $('#budget');
   if (!box || !ME.model || !ME.reg) return;
   box.innerHTML = '';
+  /* The ~15fps floor in partition edges: the Smooth band's ceiling. The edge
+   * CAP (max_partition_edges, 255) is a hardware uint8 limit, ~3.6x looser than
+   * this \u2014 so an edge count can be "green" against the cap while already under
+   * 15fps. Flag that gap amber on the edges row so the framerate floor is
+   * visible before the hardware cap, not only after. */
+  const smoothEdges = (ME.reg.playability && ME.reg.playability.bands &&
+                       ME.reg.playability.bands[0] && ME.reg.playability.bands[0].max) || Infinity;
   for (const [kind, label, capKey, count] of BUDGET_ROWS) {
     const n = count(ME.model), cap = budgetCap(capKey);
+    const overFloor = kind === 'edges' && n > smoothEdges && n < cap;
     const row = document.createElement('div');
     row.id = 'budget-' + kind;
-    row.className = 'brow' + (n > cap ? ' bover' : n >= cap ? ' bfull' : '');
+    row.className = 'brow' + (n > cap ? ' bover' : n >= cap ? ' bfull' : overFloor ? ' bwarn' : '');
+    if (overFloor)
+      row.title = n + ' edges is past the ~15fps floor (' + smoothEdges + '). Still under the '
+                + cap + '-edge hardware cap, but expect ~12fps or below \u2014 walk-test it.';
     const name = document.createElement('span'); name.textContent = label;
     const val  = document.createElement('span');
     val.textContent = n + ' / ' + (cap === Infinity ? '\u2014' : cap);
