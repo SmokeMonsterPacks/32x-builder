@@ -43,6 +43,53 @@ def _resolve(expr, d):
     return total
 
 
+def _mood_ramps(src, d, pal, SL, FOG):
+    """Reproduce raycast_pal_apply(): WALL/FLOOR/CEIL/LIGHT ramps derived from the
+    baked g_anchor[] anchors through pal_effective() (warmth/sat) then the fog
+    MIX, exactly as the ROM paints CRAM at full brightness (lvl == FADE_STEPS).
+    Silently no-ops if the anchors can't be parsed — matches the pre-engine
+    behavior rather than throwing."""
+    m = re.search(r'g_anchor\[PSURF_N\]\[3\]\s*=\s*\{(.*?)\}\s*;', src, re.S)
+    if not m:
+        return
+    trips = re.findall(r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}', m.group(1))
+    if len(trips) < 4:
+        return
+    anchors = [[int(a), int(b), int(c)] for a, b, c in trips[:4]]
+
+    def _first(pat, default):
+        mm = re.search(pat, src)
+        return int(mm.group(1)) if mm else default
+    warmth = _first(r'g_pal_warmth\s*=\s*(-?\d+)', 0)
+    sat    = _first(r'g_pal_sat\s*=\s*(-?\d+)', 100)
+
+    def clamp5(v):
+        return 0 if v < 0 else (31 if v > 31 else v)
+
+    def effective(r, g, b):                       # pal_effective() at defaults
+        luma = (r + g + b) // 3
+        return (clamp5(luma + (r - luma) * sat // 100 + warmth),
+                clamp5(luma + (g - luma) * sat // 100),
+                clamp5(luma + (b - luma) * sat // 100 - warmth))
+
+    def mix(bright, fog, i):                      # MIX(bright, fog, i)
+        return (bright * (SL - i) + fog * i) // SL
+
+    for surf, key in ((0, "WALL_BASE"), (1, "FLOOR_BASE"), (2, "CEIL_BASE")):
+        base = d.get(key)
+        if base is None:
+            continue
+        er, eg, eb = effective(*anchors[surf])
+        for i in range(SL):
+            pal[base + i] = [mix(er, FOG[0], i), mix(eg, FOG[1], i), mix(eb, FOG[2], i)]
+
+    lbase = d.get("LIGHT_BASE")                    # 4 flicker states, lrat ratios
+    if lbase is not None:
+        lr, lg, lb = effective(*anchors[3])
+        for i, rat in enumerate((100, 93, 79, 62)):
+            pal[lbase + i] = [lr * rat // 100, lg * rat // 100, lb * rat // 100]
+
+
 def build_palette(src):
     """Reproduce build_palette()'s 256-entry palette as 8-bit [[r,g,b],...]."""
     d = _defines(src)
@@ -73,6 +120,15 @@ def build_palette(src):
             pal[base + i] = [(br * (SL - i) + FOG[0] * i) // SL,
                              (bg * (SL - i) + FOG[1] * i) // SL,
                              (bb * (SL - i) + FOG[2] * i) // SL]
+
+    # The four MOOD ramps (wall/floor/ceiling/light) no longer live in
+    # build_palette() — they're painted at runtime by raycast_pal_apply() from
+    # the tunable g_anchor[] table (the COLOR tab). Reproduce them here at the
+    # shipped warmth/sat, or the four biggest surfaces fall through to the [0,0,0]
+    # default and the preview renders them pure BLACK (so dark rooms, which push
+    # DARK_ROOM_SHADE deeper, read as a black screen instead of the 32X's faint
+    # fog-lit grey). See raycast.c: pal_effective() + raycast_pal_apply().
+    _mood_ramps(src, d, pal, SL, FOG)
 
     # Countertop wood ramp: Hw32xSetBGColor(WOODTOP_BASE + i, (R*(7-i)+FOG_R*i)/7, ...)
     # 8 entries, a distinct /7 blend the generic MIX loop above doesn't match.
