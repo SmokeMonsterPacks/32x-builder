@@ -160,6 +160,9 @@ void raycast_purge_sprite_cache(void);
 void standups_clear(void);   /* reset free-standing objects (neanderthals/chairs) */
 void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind);
 int  raycast_standup_in_cell(int cx, int cy);  /* procgen spawn-overlap guard */
+int  raycast_exit_path_cell(int x, int y);     /* protected spawn->exit corridor:
+                                                * placers must keep these cells
+                                                * traversable (exit solvability) */
 void raycast_add_dark_room(int x0, int y0, int x1, int y1);
 
 #endif

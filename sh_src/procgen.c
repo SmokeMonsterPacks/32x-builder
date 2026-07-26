@@ -204,6 +204,7 @@ static void place_neanderthals(int count) {
         int y = xs32_range(2, MAP_H - 3);
         if (!footprint_clear(x, y, 1, 1)) continue;
         if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
+        if (raycast_exit_path_cell(x, y)) continue;    /* keep the exit corridor clear */
         uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);   /* cardinal */
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 2);
@@ -221,6 +222,8 @@ static void place_chairs(int count) {
         int y = xs32_range(2, MAP_H - 3);
         if (!footprint_clear(x, y, 1, 1)) continue;
         if (raycast_standup_in_cell(x, y)) continue;   /* no two assets in one cell */
+        if (raycast_exit_path_cell(x, y)) continue;    /* chairs don't shove: never
+                                                        * on the exit corridor */
         uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 3);
@@ -493,6 +496,8 @@ static void place_crawlspaces(int count) {
         for (int k = 0; k < L && ok; k++) {
             int cx = x + dx * k, cy = y + dy * k;
             if (world_map[cy][cx] != 1) { ok = 0; break; }       /* must be wall to carve */
+            if (raycast_exit_path_cell(cx, cy)) { ok = 0; break; }  /* never tunnel
+                                                 * through the exit door's cavity */
             if (world_map[cy + dx][cx + dy] != 1 ||              /* perp sides wall   */
                 world_map[cy - dx][cx - dy] != 1) { ok = 0; break; }
             int ddx = cx - SPAWN_CX, ddy = cy - SPAWN_CY;        /* keep clear of spawn */

@@ -1602,6 +1602,20 @@ void raycast_init(void) {
  * raycast_init() (or re-call init_lights via raycast_init) so the
  * ceiling-fixture grid is laid over the new map. */
 
+/* Protected spawn->exit corridor. Bit x of row y set = cell (x,y) must stay
+ * traversable: the BFS parent-chain path from the exit door's approach cell
+ * back to spawn, plus the door's own wall cell. Everything procgen places
+ * AFTER the door (chairs are immovable, crawl tubes carve wall cells, outlets
+ * squat on faces) consults this so the exit is solvable BY CONSTRUCTION —
+ * no verify-and-evict pass. Furniture can still block ALTERNATE routes;
+ * that's a detour, not a softlock. */
+uint32_t exit_path_bits[MAP_H];
+static int g_exit_wall_cx = -1, g_exit_wall_cy = -1;   /* the door's wall cell */
+
+int raycast_exit_path_cell(int x, int y) {
+    return (int)((exit_path_bits[y] >> x) & 1u);
+}
+
 /* Pepper outlets across the live world_map's visible wall faces (a wall cell
  * with an open orthogonal neighbour), appending to decals[] until it holds
  * `target` total. Two passes: count candidates, then place every stride-th so
@@ -1633,6 +1647,9 @@ void raycast_place_outlets(int target) {
             else if (world_map[y-1][x] == 0) { axis = 1; px = cx; py = (fx_t)y     << FX_SHIFT; }
             else if (world_map[y+1][x] == 0) { axis = 1; px = cx; py = (fx_t)(y+1) << FX_SHIFT; }
             else continue;
+            /* Never on the exit door's cell: the fixed neighbour order above
+             * can pick the door's own face and squat a plate on the jamb. */
+            if (x == g_exit_wall_cx && y == g_exit_wall_cy) continue;
             if ((seen++ % stride) != 0) continue;
             decals[num_decals++] = (decal_t){ px, py, FX(0.20), axis };
         }
@@ -1822,8 +1839,13 @@ void raycast_load_custom(int idx) {
                 m->decals[i].z, m->decals[i].axis, m->decals[i].kind };
         }
     }
-    if (m->place_outlets)   raycast_place_outlets(m->place_outlets);
+    /* Exit-path state is per-map: clear it so a map that skips
+     * place_exit_door doesn't consult the previous map's door, and place the
+     * DOOR before the outlets so the plate scan can avoid its cell. */
+    for (int i = 0; i < MAP_H; i++) exit_path_bits[i] = 0;
+    g_exit_wall_cx = g_exit_wall_cy = -1;
     if (m->place_exit_door) raycast_place_exit_door();
+    if (m->place_outlets)   raycast_place_outlets(m->place_outlets);
     g_door_open = g_door_target = 0;
     SHARED_UC->door_open = 0;
 
@@ -1839,12 +1861,17 @@ void raycast_place_exit_door(void) {
     const int SPAWN_CX = 16, SPAWN_CY = 28;   /* must match procgen.c */
     static uint8_t  reach[MAP_H][MAP_W];
     static uint16_t queue[MAP_H * MAP_W];
-    for (int y = 0; y < MAP_H; y++)
+    static uint16_t parent[MAP_H * MAP_W];    /* BFS tree: cell -> came-from */
+    for (int y = 0; y < MAP_H; y++) {
+        exit_path_bits[y] = 0;
         for (int x = 0; x < MAP_W; x++) reach[y][x] = 0;
+    }
+    g_exit_wall_cx = g_exit_wall_cy = -1;
 
     /* BFS over open cells from the spawn (16,28 — cleared by the vestibule). */
     int head = 0, tail = 0;
     reach[SPAWN_CY][SPAWN_CX] = 1;
+    parent[SPAWN_CY * MAP_W + SPAWN_CX] = (uint16_t)(SPAWN_CY * MAP_W + SPAWN_CX);
     queue[tail++] = (uint16_t)(SPAWN_CY * MAP_W + SPAWN_CX);
     static const int dxs[4] = { 1, -1, 0, 0 }, dys[4] = { 0, 0, 1, -1 };
     while (head < tail) {
@@ -1854,12 +1881,14 @@ void raycast_place_exit_door(void) {
             if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) continue;
             if (reach[ny][nx] || world_map[ny][nx] != 0) continue;
             reach[ny][nx] = 1;
+            parent[ny * MAP_W + nx] = (uint16_t)c;
             queue[tail++] = (uint16_t)(ny * MAP_W + nx);
         }
     }
 
     /* Farthest reachable open cell that has a wall face to mount the door on. */
     int best_d2 = -1, best_axis = 0;
+    int best_ox = -1, best_oy = -1, best_wx = -1, best_wy = -1;
     fx_t best_px = 0, best_py = 0;
     for (int oy = 1; oy < MAP_H - 1; oy++) {
         for (int ox = 1; ox < MAP_W - 1; ox++) {
@@ -1869,19 +1898,36 @@ void raycast_place_exit_door(void) {
             if (d2 <= best_d2) continue;
             fx_t cx = ((fx_t)ox << FX_SHIFT) + FX(0.5);
             fx_t cy = ((fx_t)oy << FX_SHIFT) + FX(0.5);
-            int axis, found = 1; fx_t px, py;
-            if      (world_map[oy][ox + 1]) { axis = 0; px = (fx_t)(ox + 1) << FX_SHIFT; py = cy; }
-            else if (world_map[oy][ox - 1]) { axis = 0; px = (fx_t)ox       << FX_SHIFT; py = cy; }
-            else if (world_map[oy + 1][ox]) { axis = 1; px = cx; py = (fx_t)(oy + 1) << FX_SHIFT; }
-            else if (world_map[oy - 1][ox]) { axis = 1; px = cx; py = (fx_t)oy       << FX_SHIFT; }
+            int axis, found = 1, wx = ox, wy = oy; fx_t px, py;
+            if      (world_map[oy][ox + 1]) { axis = 0; px = (fx_t)(ox + 1) << FX_SHIFT; py = cy; wx = ox + 1; }
+            else if (world_map[oy][ox - 1]) { axis = 0; px = (fx_t)ox       << FX_SHIFT; py = cy; wx = ox - 1; }
+            else if (world_map[oy + 1][ox]) { axis = 1; px = cx; py = (fx_t)(oy + 1) << FX_SHIFT; wy = oy + 1; }
+            else if (world_map[oy - 1][ox]) { axis = 1; px = cx; py = (fx_t)oy       << FX_SHIFT; wy = oy - 1; }
             else found = 0;
-            if (found) { best_d2 = d2; best_axis = axis; best_px = px; best_py = py; }
+            if (found) {
+                best_d2 = d2; best_axis = axis; best_px = px; best_py = py;
+                best_ox = ox; best_oy = oy; best_wx = wx; best_wy = wy;
+            }
         }
     }
 
-    if (best_d2 >= 0 && num_decals < (int)(sizeof decals / sizeof decals[0]))
+    if (best_d2 >= 0 && num_decals < (int)(sizeof decals / sizeof decals[0])) {
         decals[num_decals++] =
             (decal_t){ best_px, best_py, DECAL_DOOR_Z, (uint8_t)best_axis, 1 };
+        /* Mark the protected corridor: approach -> spawn via the BFS tree
+         * (each hop is the cell it was first reached from, so this is a
+         * shortest walkable path), plus the door's wall cell so the crawl
+         * carver can't tunnel through the cavity itself. */
+        g_exit_wall_cx = best_wx; g_exit_wall_cy = best_wy;
+        exit_path_bits[best_wy] |= 1u << best_wx;
+        int c = best_oy * MAP_W + best_ox;
+        int spawn_c = SPAWN_CY * MAP_W + SPAWN_CX;
+        for (int guard = 0; guard < MAP_W * MAP_H; guard++) {
+            exit_path_bits[c / MAP_W] |= 1u << (c % MAP_W);
+            if (c == spawn_c) break;
+            c = parent[c];
+        }
+    }
     g_door_open = g_door_target = 0;
     SHARED_UC->door_open = 0;
 }
