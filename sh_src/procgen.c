@@ -550,9 +550,14 @@ void procgen_run(uint32_t seed) {
     place_stub_walls(xs32_range(6, 9 + dens));
     enforce_boundary();
     clear_spawn_vestibule();
-    /* The way out: every generated level gets the exit door behind spawn. It
-     * carves its own approach and only opens into the NEXT generated level. */
-    raycast_place_exit_door();
+    /* The way out: every generated level gets ONE exit, and the search is part
+     * of the game — a coin flip between the hinged EXIT door on the farthest
+     * reachable wall face and the dark ceiling HOLE you pull up through over
+     * the farthest reachable cell. Either way the spawn->exit corridor is
+     * recorded and protected from later placement. Only opens into the NEXT
+     * generated level. */
+    if (xs32() & 1) raycast_place_exit_door();
+    else            raycast_place_exit_hole();
 
     /* Elements (the lobby features), all weight-driven:
      *  - extra free-standing dividers on top of the room dividers

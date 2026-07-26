@@ -903,8 +903,26 @@ static int  n_lowceil_rect = 0;
 
 /* Reset every cell to full-height open ceiling (called by each map loader).
  * 255 is "full" (u8 cap; the 1/256 difference is invisible). */
-#define CEIL_H_FULL 255
-void ceil_h_clear(void) {
+
+/* EXIT HOLE: the alternate way out — a dark opening carved into the CENTER of
+ * a wall face (like a crawl mouth, but elevated: you pull up into it). Placed
+ * by exit_place_common(want_hole=1) on the farthest reachable wall face, same
+ * as the door. Drawn by draw_exit_hole in the tail pass (both CPUs — purged
+ * with the lowceil set): dark void interior framed by a lit sill ledge and a
+ * shadowed top reveal, both from TRUE near/far plane projections, so the
+ * cavity has crawlspace-style depth. */
+static int g_exit_hole_cx = -1, g_exit_hole_cy = -1;   /* the WALL cell */
+static int g_exit_hole_ax, g_exit_hole_ay;             /* approach (open) cell */
+static uint8_t g_exit_hole_axis;      /* 1: hole face is a y-plane (like decals) */
+static fx_t g_exit_hole_plane;        /* the face plane's world coordinate */
+static fx_t g_exit_hole_c0;           /* face center along the other axis */
+static int  g_exit_hole_dir;          /* +1/-1: approach -> wall along the axis */
+/* Opening geometry: half-width across the face, sill + head heights /256. */
+#define HOLE_HW  FX(0.30)
+#define HOLE_Z0  100                  /* sill: ~0.39 up the wall — must climb */
+#define HOLE_Z1  212                  /* head: ~0.83 up the wall */
+
+void ceil_h_clear(void) {       /* CEIL_H_FULL lives in raycast.h (procgen reads it) */
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++) ceil_h[y][x] = CEIL_H_FULL;
     g_lowceil_active = 0;
@@ -961,6 +979,14 @@ void raycast_purge_lowceil_cache(void) {
     purge_cache_range(ceil_hs,           sizeof ceil_hs);
     purge_cache_range(&n_ceil_hs,        sizeof n_ceil_hs);
     purge_cache_range(ceil_h,            sizeof ceil_h);  /* slab reads it cached */
+    /* Exit-hole face (drawn in the tail pass on both CPUs). cx..dir are
+     * contiguous statics; purge the whole block by spanning them. */
+    purge_cache_range(&g_exit_hole_cx,   sizeof g_exit_hole_cx);
+    purge_cache_range(&g_exit_hole_cy,   sizeof g_exit_hole_cy);
+    purge_cache_range(&g_exit_hole_axis, sizeof g_exit_hole_axis);
+    purge_cache_range(&g_exit_hole_plane, sizeof g_exit_hole_plane);
+    purge_cache_range(&g_exit_hole_c0,   sizeof g_exit_hole_c0);
+    purge_cache_range(&g_exit_hole_dir,  sizeof g_exit_hole_dir);
 }
 
 /* True if the cell holding world point (wx,wy) is a low crawlspace ceiling.
@@ -1647,9 +1673,11 @@ void raycast_place_outlets(int target) {
             else if (world_map[y-1][x] == 0) { axis = 1; px = cx; py = (fx_t)y     << FX_SHIFT; }
             else if (world_map[y+1][x] == 0) { axis = 1; px = cx; py = (fx_t)(y+1) << FX_SHIFT; }
             else continue;
-            /* Never on the exit door's cell: the fixed neighbour order above
-             * can pick the door's own face and squat a plate on the jamb. */
+            /* Never on the exit's cell: the fixed neighbour order above can
+             * pick the door's face (plate on the jamb) or the exit hole's
+             * (plate floating over the opening). */
             if (x == g_exit_wall_cx && y == g_exit_wall_cy) continue;
+            if (x == g_exit_hole_cx && y == g_exit_hole_cy) continue;
             if ((seen++ % stride) != 0) continue;
             decals[num_decals++] = (decal_t){ px, py, FX(0.20), axis };
         }
@@ -1844,6 +1872,7 @@ void raycast_load_custom(int idx) {
      * DOOR before the outlets so the plate scan can avoid its cell. */
     for (int i = 0; i < MAP_H; i++) exit_path_bits[i] = 0;
     g_exit_wall_cx = g_exit_wall_cy = -1;
+    g_exit_hole_cx = g_exit_hole_cy = -1;
     if (m->place_exit_door) raycast_place_exit_door();
     if (m->place_outlets)   raycast_place_outlets(m->place_outlets);
     g_door_open = g_door_target = 0;
@@ -1852,26 +1881,30 @@ void raycast_load_custom(int idx) {
     player.x = m->spawn_x; player.y = m->spawn_y; player.angle = m->spawn_angle;
 }
 
-/* Stamp the recurring EXIT door into the live map as a SURPRISE you have to
- * find: flood-fill the cells actually reachable from spawn, then drop the door
- * on the FARTHEST reachable wall face. Deep in the level, but always walkable-to
- * (never sealed off). procgen calls this so every generated level has a hidden
- * way out — which only ever opens into the next generated level. */
-void raycast_place_exit_door(void) {
+/* Stamp the recurring EXIT (door or ceiling hole) into the live map as a
+ * SURPRISE you have to find: flood-fill the cells actually reachable from
+ * spawn, then drop it on the FARTHEST reachable spot — a wall face for the
+ * door, any open cell for the hole. Deep in the level, but always walkable-to
+ * (never sealed off), and the spawn->exit corridor is recorded in
+ * exit_path_bits either way. Only ever opens into the next level. */
+static void exit_place_common(int want_hole) {
     const int SPAWN_CX = 16, SPAWN_CY = 28;   /* must match procgen.c */
-    static uint8_t  reach[MAP_H][MAP_W];
+    static uint8_t reach[MAP_H][MAP_W];
     static uint16_t queue[MAP_H * MAP_W];
-    static uint16_t parent[MAP_H * MAP_W];    /* BFS tree: cell -> came-from */
+    /* BFS tree as a DIRECTION byte (index into dxs/dys of the step that
+     * reached the cell) — half the RAM of a cell-index array; the link
+     * budget is tight enough that the uint16 version overflowed `ram'. */
+    static uint8_t parent_dir[MAP_H * MAP_W];
     for (int y = 0; y < MAP_H; y++) {
         exit_path_bits[y] = 0;
         for (int x = 0; x < MAP_W; x++) reach[y][x] = 0;
     }
     g_exit_wall_cx = g_exit_wall_cy = -1;
+    g_exit_hole_cx = g_exit_hole_cy = -1;
 
     /* BFS over open cells from the spawn (16,28 — cleared by the vestibule). */
     int head = 0, tail = 0;
     reach[SPAWN_CY][SPAWN_CX] = 1;
-    parent[SPAWN_CY * MAP_W + SPAWN_CX] = (uint16_t)(SPAWN_CY * MAP_W + SPAWN_CX);
     queue[tail++] = (uint16_t)(SPAWN_CY * MAP_W + SPAWN_CX);
     static const int dxs[4] = { 1, -1, 0, 0 }, dys[4] = { 0, 0, 1, -1 };
     while (head < tail) {
@@ -1881,12 +1914,13 @@ void raycast_place_exit_door(void) {
             if (nx < 0 || nx >= MAP_W || ny < 0 || ny >= MAP_H) continue;
             if (reach[ny][nx] || world_map[ny][nx] != 0) continue;
             reach[ny][nx] = 1;
-            parent[ny * MAP_W + nx] = (uint16_t)c;
+            parent_dir[ny * MAP_W + nx] = (uint8_t)k;
             queue[tail++] = (uint16_t)(ny * MAP_W + nx);
         }
     }
 
-    /* Farthest reachable open cell that has a wall face to mount the door on. */
+    /* Farthest reachable open cell with a wall face to mount the exit on —
+     * the hinged door and the climb-in hole share the same real estate. */
     int best_d2 = -1, best_axis = 0;
     int best_ox = -1, best_oy = -1, best_wx = -1, best_wy = -1;
     fx_t best_px = 0, best_py = 0;
@@ -1911,26 +1945,66 @@ void raycast_place_exit_door(void) {
         }
     }
 
-    if (best_d2 >= 0 && num_decals < (int)(sizeof decals / sizeof decals[0])) {
+    int committed = 0;
+    if (best_d2 >= 0 && want_hole) {
+        /* Hole: same wall face the door would take, but instead of a decal
+         * it's a carved-void render + climb trigger. Record the face. */
+        g_exit_hole_cx = best_wx;  g_exit_hole_cy = best_wy;
+        g_exit_hole_ax = best_ox;  g_exit_hole_ay = best_oy;
+        g_exit_hole_axis  = (uint8_t)best_axis;
+        g_exit_hole_plane = best_axis ? best_py : best_px;
+        g_exit_hole_c0    = best_axis ? best_px : best_py;
+        g_exit_hole_dir   = best_axis ? (best_wy - best_oy) : (best_wx - best_ox);
+        /* Wall cell joins the protected set: the crawl carver must not
+         * tunnel through the hole's cavity. */
+        exit_path_bits[best_wy] |= 1u << best_wx;
+        committed = 1;
+    } else if (best_d2 >= 0 && num_decals < (int)(sizeof decals / sizeof decals[0])) {
         decals[num_decals++] =
             (decal_t){ best_px, best_py, DECAL_DOOR_Z, (uint8_t)best_axis, 1 };
-        /* Mark the protected corridor: approach -> spawn via the BFS tree
-         * (each hop is the cell it was first reached from, so this is a
-         * shortest walkable path), plus the door's wall cell so the crawl
-         * carver can't tunnel through the cavity itself. */
+        /* The door's wall cell joins the protected set so the crawl carver
+         * can't tunnel through the cavity itself. */
         g_exit_wall_cx = best_wx; g_exit_wall_cy = best_wy;
         exit_path_bits[best_wy] |= 1u << best_wx;
+        committed = 1;
+    }
+    if (committed) {
+        /* Mark the protected corridor: approach -> spawn via the BFS tree
+         * (each hop is the cell it was first reached from, so this is a
+         * shortest walkable path). */
         int c = best_oy * MAP_W + best_ox;
         int spawn_c = SPAWN_CY * MAP_W + SPAWN_CX;
         for (int guard = 0; guard < MAP_W * MAP_H; guard++) {
             exit_path_bits[c / MAP_W] |= 1u << (c % MAP_W);
             if (c == spawn_c) break;
-            c = parent[c];
+            int k = parent_dir[c];            /* step that reached c: walk it back */
+            c -= dys[k] * MAP_W + dxs[k];
         }
     }
     g_door_open = g_door_target = 0;
     SHARED_UC->door_open = 0;
 }
+
+void raycast_place_exit_door(void) { exit_place_common(0); }
+void raycast_place_exit_hole(void) { exit_place_common(1); }
+
+/* Pull-up trigger: standing near the middle of the hole's APPROACH cell,
+ * facing the wall it's carved into ("walk up to it and climb"). The game
+ * loop turns this into the climb-out (freeze input, ramp eye+pitch, portal). */
+int raycast_exit_hole_check(void) {
+    if (g_exit_hole_cx < 0) return 0;
+    fx_t hx = ((fx_t)g_exit_hole_ax << FX_SHIFT) + FX(0.5);
+    fx_t hy = ((fx_t)g_exit_hole_ay << FX_SHIFT) + FX(0.5);
+    if (FX_ABS(player.x - hx) >= FX(0.25) || FX_ABS(player.y - hy) >= FX(0.25))
+        return 0;
+    /* Facing the face: approach->wall is cardinal; angle 0 = +x, 64 = +y. */
+    int dx = g_exit_hole_cx - g_exit_hole_ax;
+    int dy = g_exit_hole_cy - g_exit_hole_ay;
+    uint8_t want = (dx > 0) ? 0 : (dx < 0) ? 128 : (dy > 0) ? 64 : 192;
+    uint8_t diff = (uint8_t)(player.angle - want);
+    return diff < 40 || diff > 216;
+}
+
 
 /* Portal check: returns 1 when the EXIT door is open far enough AND the player
  * has stepped into its doorway — the cue for the game loop to fade through into
@@ -2160,6 +2234,15 @@ static uint8_t is_running  = 0;   /* moving AND holding A (sprint) — speeds fo
  * (look down) when held, eases back to 0 on release. Walking pitch bob
  * (±1 from SIN_FX(bob_phase)) is added on top each frame. */
 static int     pitch_smooth_y = 0;
+
+/* Climb-out camera: called by the game loop each pull-up frame with progress
+ * t/total. Drives the eased look-up through the same pitch channel the manual
+ * hold-C tilt uses (raycast_render publishes it), so every pass follows. */
+void raycast_exit_pullup(int t, int total) {
+    /* Mild glance-up: the hole is AHEAD at chest height, not overhead — the
+     * climb read comes from the eye_h rise the game loop drives alongside. */
+    pitch_smooth_y = -(t * 30) / (total > 0 ? total : 1);
+}
 
 /* Eye height (8.8 fraction of room height), eased toward STAND/CROUCH as
  * the player holds X. STAND_EYE/CROUCH_EYE are #defined up by raycast_init. */
@@ -4260,6 +4343,7 @@ RAMTEXT static void draw_lights(int col_start, int col_end) {
         ceil_quad_fill(a2x, a2y, tube_c, centerY, px, py, dirX, dirY,
                        planeX, planeY, inv_det, horizon_y, eye_h, col_start, col_end, fb);
     }
+
 }
 
 /* Combined sprite pass for a column range. The secondary calls this from its
@@ -4890,6 +4974,113 @@ RAMTEXT static void raycast_draw_ceil_caps(int col_start, int col_end, int slab_
     }
 }
 
+/* EXIT HOLE render: a carved void in the wall face, chest height, centered.
+ * Runs in the tail (walls committed, WALL_DIST final). Per column crossing
+ * the face within the opening's width, three bands from TRUE near/far plane
+ * projections give the cavity crawlspace-style depth:
+ *   head reveal — the opening's underside, in shadow
+ *   void        — the far opening, deepest shade (the exit reads as nothing)
+ *   sill ledge  — the top surface you pull up onto, lit
+ * Shallow rays clamp the far plane to the cavity's side wall so the interior
+ * never reads deeper than the hole is wide. */
+RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
+    if (g_exit_hole_cx < 0) return;
+    fx_t px = SHARED_UC->player.x;
+    fx_t py = SHARED_UC->player.y;
+    uint8_t angle = (uint8_t)SHARED_UC->player.angle;
+    fx_t dirX = COS_FX(angle), dirY = SIN_FX(angle);
+    fx_t planeX = FX_MUL(-dirY, FX(0.66)), planeY = FX_MUL(dirX, FX(0.66));
+    uint8_t *fb = fb_pixels();
+    int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
+    int eye = (int)SHARED_UC->eye_h;
+    const fx_t PAR = FX(0.01);
+
+    /* Column-clip: project the opening's two endpoints on the face plane. */
+    fx_t det = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
+    int bcA = col_start, bcB = col_end - 1;
+    if (det != 0) {
+        fx_t inv_det = fx_div_hw(FX_ONE, det);
+        int rmin = col_end, rmax = col_start - 1, behind = 0;
+        for (int e = 0; e < 2; e++) {
+            fx_t wx = g_exit_hole_axis ? (g_exit_hole_c0 + (e ? HOLE_HW : -HOLE_HW))
+                                       : g_exit_hole_plane;
+            fx_t wy = g_exit_hole_axis ? g_exit_hole_plane
+                                       : (g_exit_hole_c0 + (e ? HOLE_HW : -HOLE_HW));
+            fx_t rx = wx - px, ry = wy - py;
+            fx_t tY = FX_MUL(inv_det, FX_MUL(-planeY, rx) + FX_MUL(planeX, ry));
+            if (tY < FX(0.2)) { behind = 1; break; }
+            fx_t tX = FX_MUL(inv_det, FX_MUL(dirY, rx) - FX_MUL(dirX, ry));
+            int sc = (SCREEN_W >> 1)
+                   + (int)(((int64_t)(SCREEN_W >> 1) * fx_div_hw(tX, tY)) >> FX_SHIFT);
+            if (sc < rmin) rmin = sc;
+            if (sc > rmax) rmax = sc;
+        }
+        if (!behind) {
+            bcA = rmin - 1 < col_start ? col_start : rmin - 1;
+            bcB = rmax + 1 > col_end - 1 ? col_end - 1 : rmax + 1;
+        }
+    }
+    if (bcA > bcB) return;
+
+    for (int col = bcA; col <= bcB; col++) {
+        fx_t camX = ((fx_t)(2 * col - SCREEN_W) << FX_SHIFT) / SCREEN_W;
+        fx_t rdx = dirX + FX_MUL(planeX, camX);
+        fx_t rdy = dirY + FX_MUL(planeY, camX);
+        fx_t rdp = g_exit_hole_axis ? rdy : rdx;      /* toward the plane */
+        fx_t rda = g_exit_hole_axis ? rdx : rdy;      /* along the face   */
+        if (rdp < PAR && rdp > -PAR) continue;
+        fx_t pp = g_exit_hole_axis ? py : px;
+        fx_t pa = g_exit_hole_axis ? px : py;
+        fx_t t = fx_div_hw(g_exit_hole_plane - pp, rdp);
+        if (t <= PAR) continue;
+        fx_t off = pa + FX_MUL(t, rda) - g_exit_hole_c0;   /* across the face */
+        if (off < -HOLE_HW || off > HOLE_HW) continue;
+        if (t >= WALL_DIST(col) + FX(0.05)) continue;      /* face occluded */
+
+        /* Far plane (one cell deep), clamped to the cavity side the ray
+         * drifts into so shallow views don't tunnel past the hole's width. */
+        fx_t t2 = fx_div_hw(g_exit_hole_plane + g_exit_hole_dir * FX_ONE - pp, rdp);
+        if (rda > 64 || rda < -64) {
+            fx_t adrift = rda < 0 ? -rda : rda;
+            fx_t edge = (rda > 0) ? (HOLE_HW - off) : (off + HOLE_HW);
+            if (edge < 0) edge = 0;
+            fx_t ts = t + fx_div_hw(edge, adrift);
+            if (ts < t2) t2 = ts;
+        }
+
+        int lh_n = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)t);
+        int lh_f = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)t2);
+        int wb_n = horizon_y + ((lh_n * eye) >> 8);
+        int wb_f = horizon_y + ((lh_f * eye) >> 8);
+        int hn = wb_n - ((lh_n * HOLE_Z1) >> 8), hf = wb_f - ((lh_f * HOLE_Z1) >> 8);
+        int sn = wb_n - ((lh_n * HOLE_Z0) >> 8), sf = wb_f - ((lh_f * HOLE_Z0) >> 8);
+        int head_lo = hn < hf ? hn : hf, head_hi = hn < hf ? hf : hn;
+        int sill_lo = sn < sf ? sn : sf, sill_hi = sn < sf ? sf : sn;
+
+        int bsh;                                   /* fog shade from the face */
+        if (t < FX(2.5)) bsh = (int)((t * 2) / FX(2.5));
+        else { fx_t past = t - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
+               bsh = 2 + (int)((past * 13) / span); }
+        int shl = bsh + 1;  if (shl > SHADE_LEVELS - 1) shl = SHADE_LEVELS - 1;
+        int shd = bsh + 6;  if (shd > SHADE_LEVELS - 1) shd = SHADE_LEVELS - 1;
+        uint8_t c_ledge = (uint8_t)(WALL_BASE + shl);
+        uint8_t c_dark  = (uint8_t)(WALL_BASE + shd);
+        uint8_t c_void  = (uint8_t)(WALL_BASE + SHADE_LEVELS - 1);
+
+        uint8_t *base = fb + col;
+        int y0, y1;
+        y0 = head_lo < 0 ? 0 : head_lo;            /* head reveal (shadow) */
+        y1 = head_hi > SCREEN_H - 1 ? SCREEN_H - 1 : head_hi;
+        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_dark;
+        y0 = head_hi + 1 < 0 ? 0 : head_hi + 1;    /* the void */
+        y1 = sill_lo - 1 > SCREEN_H - 1 ? SCREEN_H - 1 : sill_lo - 1;
+        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_void;
+        y0 = sill_lo < 0 ? 0 : sill_lo;            /* sill ledge (lit) */
+        y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
+        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_ledge;
+    }
+}
+
 /* Crawlspace tail: the low-ceiling slab + its bulkhead caps for a column range.
  * Both passes z-test the combined WALL_DIST (filled by both halves' wall pass),
  * so this runs AFTER the wall barrier. Split across both SH-2s via CMD_TAIL —
@@ -4907,6 +5098,7 @@ void raycast_draw_tail(int col_start, int col_end) {
         raycast_draw_low_ceiling(col_start, col_end, h);
         raycast_draw_ceil_caps(col_start, col_end, h);
     }
+    draw_exit_hole(col_start, col_end);
 }
 
 /* Carpet wear pass — stamps dark "stains" across the floor (bottom

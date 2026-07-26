@@ -1509,6 +1509,25 @@ int m_main(void) {
         }
         metrics_mode_check(pad);
         if (!menu_is_active()) {
+            /* EXIT-HOLE pull-up: input frozen, the camera tilts up and the eye
+             * rises toward the dark opening over PULLUP_FRAMES rendered frames
+             * (the hole quad swells to fill the view), then the portal fires.
+             * Runs inside the normal loop so every frame still renders. */
+            #define PULLUP_FRAMES 28
+            static int g_pullup = 0;
+            if (g_pullup > 0) {
+                g_pullup--;
+                int t = PULLUP_FRAMES - g_pullup;
+                raycast_exit_pullup(t, PULLUP_FRAMES);
+                int eh = 128 + (t * 96) / PULLUP_FRAMES;   /* eye 128 -> 224 */
+                SHARED_UC->eye_h = (uint8_t)eh;
+                if (g_pullup == 0) {
+                    raycast_exit_pullup(0, 1);             /* reset the tilt */
+                    SHARED_UC->eye_h = 128;
+                    portal_to_procgen();                   /* holes are procgen-only */
+                    continue;
+                }
+            } else {
             /* MODE is a combo modifier: while held, UP/DOWN drive the automap
          * zoom, so they must not also walk the player. */
         player_update((pad & SEGA_CTRL_MODE)
@@ -1523,6 +1542,9 @@ int m_main(void) {
                 if (nx >= 0 && nx < custom_map_count) portal_to_custom(nx);
                 else                                  portal_to_procgen();
                 continue;
+            }
+            /* Standing centered under the EXIT HOLE: start the climb-out. */
+            if (raycast_exit_hole_check()) g_pullup = PULLUP_FRAMES;
             }
         }
         /* Tick the shared frame counter before render so both CPUs

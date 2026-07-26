@@ -75,6 +75,7 @@ extern int g_lowceil_active;
  * The first-class crawlspace data model: collision, forced-crouch, light
  * culling and the slab render all read this. Loaders/procgen author it. */
 extern uint8_t ceil_h[MAP_H][MAP_W];
+#define CEIL_H_FULL 255           /* sentinel: cell has the full-height ceiling */
 /* Named slab heights (ceil_h values; wall = 256). ONE primitive: any lowered
  * cell forces crouch-through; heights differ visually. Mirrors registry.json
  * crawl.h -- change there for maps, here for procgen/fixed callers. Each
@@ -138,6 +139,9 @@ void player_update(uint16_t pad);
 int  raycast_door_portal_check(void);
 /* Stamp the recurring exit door (behind spawn) into the live map. procgen calls it. */
 void raycast_place_exit_door(void);
+void raycast_place_exit_hole(void);   /* alternate exit: dark 1-cell ceiling hole */
+int  raycast_exit_hole_check(void);   /* 1 = standing centered under the hole */
+void raycast_exit_pullup(int t, int total);  /* climb-out camera, progress t/total */
 void raycast_shimmer(void);
 void raycast_draw_ceiling_grid(int col_start, int col_end);
 void raycast_draw_carpet(int col_start, int col_end);
