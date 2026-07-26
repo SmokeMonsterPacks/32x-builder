@@ -1509,20 +1509,17 @@ int m_main(void) {
         }
         metrics_mode_check(pad);
         if (!menu_is_active()) {
-            /* EXIT-HOLE pull-up: input frozen, the camera tilts up and the eye
-             * rises toward the dark opening over PULLUP_FRAMES rendered frames
-             * (the hole quad swells to fill the view), then the portal fires.
-             * Runs inside the normal loop so every frame still renders. */
-            #define PULLUP_FRAMES 28
+            /* EXIT-HOLE climb: input frozen while raycast_exit_pullup drives
+             * the three POV beats (glance up, pull to the belly, enter the
+             * aperture) over PULLUP_FRAMES rendered frames — it owns pitch,
+             * eye height AND position. Then the portal fade fires with the
+             * hole's walls surrounding the view. */
+            #define PULLUP_FRAMES 21
             static int g_pullup = 0;
             if (g_pullup > 0) {
                 g_pullup--;
-                int t = PULLUP_FRAMES - g_pullup;
-                raycast_exit_pullup(t, PULLUP_FRAMES);
-                int eh = 128 + (t * 96) / PULLUP_FRAMES;   /* eye 128 -> 224 */
-                SHARED_UC->eye_h = (uint8_t)eh;
+                raycast_exit_pullup(PULLUP_FRAMES - g_pullup, PULLUP_FRAMES);
                 if (g_pullup == 0) {
-                    raycast_exit_pullup(0, 1);             /* reset the tilt */
                     SHARED_UC->eye_h = 128;
                     portal_to_procgen();                   /* holes are procgen-only */
                     continue;

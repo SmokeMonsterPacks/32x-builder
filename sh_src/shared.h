@@ -81,6 +81,10 @@ typedef struct {
      * menu. 0..255, 128 = current half-amp baseline, 256 would be
      * full but capped at 255. Applied as a >> 8 scale in the pump. */
     volatile uint8_t step_volume;
+    /* ONE-SHOT slide/scrape SFX request (the exit-hole climb). Primary sets
+     * to 1; the secondary's pump latches it at the next buffer fill, plays
+     * amb_slide once, and writes 0 back. */
+    volatile uint8_t slide_sfx;
     /* Profile counter: secondary's own FRT ticks spent processing CMD_HALF.
      * Secondary initializes its FRT to match primary's prescaler (Φ/32) and
      * writes its render delta here at the end of each command. Primary

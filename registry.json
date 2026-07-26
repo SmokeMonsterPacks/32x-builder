@@ -121,6 +121,14 @@
     "color": "#8a5a3a",
     "standalone": true,
     "z": 0.19
+   },
+   {
+    "id": "exit_hole",
+    "kind": 4,
+    "z": 0.6,
+    "glyph": "▩",
+    "color": "#2a2418",
+    "label": "Exit hole (dark climb-in wall opening; pull up to exit)"
    }
   ]
  },

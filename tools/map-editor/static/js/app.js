@@ -409,7 +409,8 @@ function drawDecal(d) {
   ctx.beginPath(); ctx.arc(d.x * cs, d.y * cs, cs * 0.22, 0, 7); ctx.fill();
   ctx.fillStyle = '#000'; ctx.font = Math.round(cs * 0.42) + 'px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const g = d.kind === 'door' ? 'D' : d.kind === 'neanderthal' ? 'N' : '⊙';
+  const g = d.kind === 'door' ? 'D' : d.kind === 'neanderthal' ? 'N'
+          : d.kind === 'exit_hole' ? '▩' : '⊙';
   ctx.fillText(g, d.x * cs, d.y * cs);
 }
 function drawSpawn(s) {

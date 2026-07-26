@@ -4,6 +4,7 @@
 #include "amb_buzz.h"
 #include "amb_neon.h"
 #include "amb_hello.h"
+#include "amb_slide.h"
 #include "amb_step.h"
 
 /* Neanderthal sprite position (matches the entry in raycast.c::standups).
@@ -245,6 +246,14 @@ int amb_voice_speed_pct(void) {
  * loop resumes mid-stride on the next walking interval instead of
  * restarting from the beginning (sounds more natural). */
 static uint32_t step_pos_fx = 0;
+
+/* Exit-hole climb slide (cardboard slide + bang, 1.1 s) — a ONE-SHOT: the
+ * primary requests it via SHARED_UC->slide_sfx at the pull-up's first frame;
+ * the pump latches, plays the sample through once at native rate, then goes
+ * quiet. Baked 11 kHz/16-bit like the footsteps; mixes on the footstep
+ * channel's budget (which is silent during the climb — input is frozen). */
+static uint32_t slide_pos_fx = 0;
+static int      slide_active = 0;
 #define STEP_STEP_FX \
     ((uint32_t)(((uint64_t)AMB_STEP_SAMPLE_RATE << 16) / AMB_BUZZ_SAMPLE_RATE))
 
@@ -284,6 +293,13 @@ void amb_pump(void) {
      * per fill — the state only needs to be fresh per buffer, not per sample. */
     uint32_t step_adv = ((int)SHARED_UC->is_running)
                         ? (STEP_STEP_FX + (STEP_STEP_FX >> 1)) : STEP_STEP_FX;
+
+    /* Climb-slide one-shot request from the primary. */
+    if (SHARED_UC->slide_sfx) {
+        SHARED_UC->slide_sfx = 0;
+        slide_active = 1;
+        slide_pos_fx = 0;
+    }
 
     /* Neon sting trigger — rare, 1/512 ≈ avg 12 s. */
     if (!neon_active && (prng_next() & 0x1FF) == 0) {
@@ -413,6 +429,16 @@ void amb_pump(void) {
             step_delta = (step * step_vol) >> 9;
             step_pos_fx += step_adv;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
+        }
+        /* Climb slide one-shot — 8-bit source (like the hello, << 2 to the
+         * mix scale) read at its own rate against the 16 kHz output, one
+         * pass, a step louder than the carpet: it's the event. */
+        if (slide_active) {
+            int sl = (int)amb_slide_samples[slide_pos_fx >> 16] << 2;
+            step_delta += (sl * step_vol) >> 8;
+            slide_pos_fx += ((uint32_t)AMB_SLIDE_SAMPLE_RATE << 16)
+                            / AMB_BUZZ_SAMPLE_RATE;
+            if ((slide_pos_fx >> 16) >= AMB_SLIDE_SAMPLE_COUNT) slide_active = 0;
         }
 
         /* Overall gain on ambient sources; footstep added post-gain. */

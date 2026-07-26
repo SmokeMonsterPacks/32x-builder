@@ -1843,12 +1843,21 @@ void raycast_load_custom(int idx) {
                          m->crawls[i].dx, m->crawls[i].dy, m->crawls[i].len,
                          m->crawls[i].h ? m->crawls[i].h : CRAWL_CEIL_H);
 
-    /* Decals: explicit placements first, then optional auto-helpers. Kind 2 is
-     * a FREE-STANDING cutout, not a wall decal — it belongs in standups[]
-     * (drawn as a billboard, collides). Routing it into decals[] was why
-     * authored neanderthals neither showed nor blocked. */
+    /* Exit-path state is per-map: cleared here, and the BFS DOOR placement
+     * runs BEFORE the decal loop — exit_place_common clears both exit states
+     * on entry, so running it after would wipe an authored exit_hole decal
+     * (the testbed's hole vanished under its place_exit_door option). */
+    for (int i = 0; i < MAP_H; i++) exit_path_bits[i] = 0;
+    g_exit_wall_cx = g_exit_wall_cy = -1;
+    g_exit_hole_cx = g_exit_hole_cy = -1;
     num_decals = 0;
     standups_clear();
+    if (m->place_exit_door) raycast_place_exit_door();
+
+    /* Decals: explicit placements after the door (both append to decals[]).
+     * Kind 2 is a FREE-STANDING cutout, not a wall decal — it belongs in
+     * standups[] (drawn as a billboard, collides). Routing it into decals[]
+     * was why authored neanderthals neither showed nor blocked. */
     for (int i = 0; i < m->n_decals; i++) {
         /* Free-standing objects (neanderthal kind 2, chair kind 3) live in
          * standups[]: they billboard/render in world and collide. Everything
@@ -1862,18 +1871,35 @@ void raycast_load_custom(int idx) {
                 standups[num_standups].kind         = m->decals[i].kind;
                 num_standups++;
             }
+        } else if (m->decals[i].kind == 4) {
+            /* AUTHORED EXIT HOLE (registry kind 4): not a rendered decal —
+             * it programs the hole state directly. The wall side is derived
+             * from the live grid (the solid cell adjacent to the face plane),
+             * so authors just place it on a wall face like an outlet. */
+            int axis = m->decals[i].axis;
+            fx_t plane = axis ? m->decals[i].y : m->decals[i].x;
+            fx_t c0    = axis ? m->decals[i].x : m->decals[i].y;
+            int pi = FX_INT(plane), ci = FX_INT(c0);
+            int ax0 = axis ? ci : pi,     ay0 = axis ? pi : ci;      /* cell past the plane */
+            int ax1 = axis ? ci : pi - 1, ay1 = axis ? pi - 1 : ci;  /* cell before it */
+            if (ax0 >= 0 && ax0 < MAP_W && ay0 >= 0 && ay0 < MAP_H &&
+                ax1 >= 0 && ax1 < MAP_W && ay1 >= 0 && ay1 < MAP_H &&
+                (world_map[ay0][ax0] != 0) != (world_map[ay1][ax1] != 0)) {
+                int w_after = world_map[ay0][ax0] != 0;
+                g_exit_hole_cx = w_after ? ax0 : ax1;
+                g_exit_hole_cy = w_after ? ay0 : ay1;
+                g_exit_hole_ax = w_after ? ax1 : ax0;
+                g_exit_hole_ay = w_after ? ay1 : ay0;
+                g_exit_hole_axis  = (uint8_t)axis;
+                g_exit_hole_plane = plane;
+                g_exit_hole_c0    = c0;
+                g_exit_hole_dir   = w_after ? 1 : -1;
+            }
         } else if (num_decals < 16) {
             decals[num_decals++] = (decal_t){ m->decals[i].x, m->decals[i].y,
                 m->decals[i].z, m->decals[i].axis, m->decals[i].kind };
         }
     }
-    /* Exit-path state is per-map: clear it so a map that skips
-     * place_exit_door doesn't consult the previous map's door, and place the
-     * DOOR before the outlets so the plate scan can avoid its cell. */
-    for (int i = 0; i < MAP_H; i++) exit_path_bits[i] = 0;
-    g_exit_wall_cx = g_exit_wall_cy = -1;
-    g_exit_hole_cx = g_exit_hole_cy = -1;
-    if (m->place_exit_door) raycast_place_exit_door();
     if (m->place_outlets)   raycast_place_outlets(m->place_outlets);
     g_door_open = g_door_target = 0;
     SHARED_UC->door_open = 0;
@@ -2235,13 +2261,53 @@ static uint8_t is_running  = 0;   /* moving AND holding A (sprint) — speeds fo
  * (±1 from SIN_FX(bob_phase)) is added on top each frame. */
 static int     pitch_smooth_y = 0;
 
-/* Climb-out camera: called by the game loop each pull-up frame with progress
- * t/total. Drives the eased look-up through the same pitch channel the manual
- * hold-C tilt uses (raycast_render publishes it), so every pass follows. */
+/* CLIMB-INTO-THE-HOLE camera: called by the game loop each pull-up frame
+ * with progress t/total. Three POV beats, all through channels the renderer
+ * already follows (pitch_smooth_y, eye_h, player position — player_update is
+ * frozen during the climb so the writes stick):
+ *   A (first quarter)  glance UP a little at the opening
+ *   B (to 5/8)         the PULL — eye rises to belly-over-sill height while
+ *                      the body draws halfway to the aperture, the same
+ *                      easing family as standing up from a crouch
+ *   C (rest)           ENTER — the POV slides to just short of the face
+ *                      plane, so the hole's own walls surround the view;
+ *                      the glance settles level and the caller fades out. */
 void raycast_exit_pullup(int t, int total) {
-    /* Mild glance-up: the hole is AHEAD at chest height, not overhead — the
-     * climb read comes from the eye_h rise the game loop drives alongside. */
-    pitch_smooth_y = -(t * 30) / (total > 0 ? total : 1);
+    static fx_t sx, sy;
+    if (g_exit_hole_cx < 0 || total <= 0) { pitch_smooth_y = 0; return; }
+    if (t <= 1) {
+        sx = player.x; sy = player.y;
+        SHARED_UC->slide_sfx = 1;      /* the shift/scrape one-shot (amb_slide) */
+    }
+    /* No footsteps during the climb: player_update is frozen, so is_walking
+     * would hold whatever it was at the trigger — force it quiet. */
+    is_walking = 0; is_running = 0;
+    /* Aperture hover point: centered on the face, just outside the plane. */
+    fx_t tx = g_exit_hole_axis ? g_exit_hole_c0
+                               : (g_exit_hole_plane - g_exit_hole_dir * FX(0.12));
+    fx_t ty = g_exit_hole_axis ? (g_exit_hole_plane - g_exit_hole_dir * FX(0.12))
+                               : g_exit_hole_c0;
+    /* C (enter) is a fast SNAP — 4 frames — per feel: the pull is deliberate,
+     * the commitment into the mouth is quick. */
+    int a_end = total / 4, b_end = total - 4;
+    if (b_end <= a_end) b_end = a_end + 1;
+    if (t <= a_end) {                                   /* A: glance up */
+        pitch_smooth_y = -(t * 22) / (a_end ? a_end : 1);
+    } else if (t <= b_end) {                            /* B: the pull */
+        int f = ((t - a_end) << 8) / (b_end - a_end);   /* 0..256 */
+        pitch_smooth_y = -22 + ((16 * f) >> 8);         /* -22 -> -6 */
+        SHARED_UC->eye_h = (uint8_t)(128 + ((44 * f) >> 8));  /* belly 172 */
+        player.x = sx + (fx_t)(((int64_t)(tx - sx) * f) >> 9);  /* halfway in */
+        player.y = sy + (fx_t)(((int64_t)(ty - sy) * f) >> 9);
+    } else {                                            /* C: enter */
+        int f = ((t - b_end) << 8) / (total - b_end > 0 ? total - b_end : 1);
+        pitch_smooth_y = -6 + ((6 * f) >> 8);
+        SHARED_UC->eye_h = (uint8_t)(172 - ((12 * f) >> 8));  /* settle 160 */
+        fx_t mx = sx + ((tx - sx) >> 1), my = sy + ((ty - sy) >> 1);
+        player.x = mx + (fx_t)(((int64_t)(tx - mx) * f) >> 8);
+        player.y = my + (fx_t)(((int64_t)(ty - my) * f) >> 8);
+    }
+    if (t >= total) pitch_smooth_y = 0;
 }
 
 /* Eye height (8.8 fraction of room height), eased toward STAND/CROUCH as
@@ -5039,13 +5105,14 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
 
         /* Far plane (one cell deep), clamped to the cavity side the ray
          * drifts into so shallow views don't tunnel past the hole's width. */
+        int side_hit = 0;
         fx_t t2 = fx_div_hw(g_exit_hole_plane + g_exit_hole_dir * FX_ONE - pp, rdp);
         if (rda > 64 || rda < -64) {
             fx_t adrift = rda < 0 ? -rda : rda;
             fx_t edge = (rda > 0) ? (HOLE_HW - off) : (off + HOLE_HW);
             if (edge < 0) edge = 0;
             fx_t ts = t + fx_div_hw(edge, adrift);
-            if (ts < t2) t2 = ts;
+            if (ts < t2) { t2 = ts; side_hit = 1; }
         }
 
         int lh_n = (int)divu_u32((uint32_t)(SCREEN_H << FX_SHIFT), (uint32_t)t);
@@ -5061,23 +5128,84 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         if (t < FX(2.5)) bsh = (int)((t * 2) / FX(2.5));
         else { fx_t past = t - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
                bsh = 2 + (int)((past * 13) / span); }
-        int shl = bsh + 1;  if (shl > SHADE_LEVELS - 1) shl = SHADE_LEVELS - 1;
-        int shd = bsh + 6;  if (shd > SHADE_LEVELS - 1) shd = SHADE_LEVELS - 1;
-        uint8_t c_ledge = (uint8_t)(WALL_BASE + shl);
-        uint8_t c_dark  = (uint8_t)(WALL_BASE + shd);
-        uint8_t c_void  = (uint8_t)(WALL_BASE + SHADE_LEVELS - 1);
+        /* CORE shade from the ray's TRAVERSAL DEPTH (t2 - t), fading to the
+         * back wall's murk register — but ASYMMETRICALLY, per the film
+         * reference: room light enters the opening from one side, so the
+         * LIT side wall starts near wall-bright and holds readable for a
+         * full cell of depth, while the SHADOW side starts deep and hits
+         * murk within a third of a cell. Which interior side a column
+         * shows is the ray's drift direction (rda sign). 8.8 for dither. */
+        int murk = bsh + DARK_ROOM_SHADE + 2;
+        if (murk > SHADE_LEVELS - 2) murk = SHADE_LEVELS - 2;
+        fx_t depth_in = t2 - t; if (depth_in < 0) depth_in = 0;
+        int s_start, reach;                   /* reach: fade span, <<8-scaled */
+        if (side_hit && rda < 0) { s_start = bsh + 1; reach = 8; }  /* lit side */
+        else if (side_hit)       { s_start = bsh + 5; reach = 10; } /* shadow side */
+        else                     { s_start = bsh + 2; reach = 9; }  /* back run-in */
+        if (s_start > murk) s_start = murk;
+        int sv8 = (s_start << 8)
+                + (int)(((int64_t)depth_in * ((murk - s_start) << (reach - 8))
+                         << 8) >> FX_SHIFT);
+        if (sv8 > murk << 8) sv8 = murk << 8;
+        int sv = sv8 >> 8;
 
+        /* DITHERED fades, not band stacks: every gradient below resolves its
+         * 8.8 shade through a checker half-step ((y^col)&1) — the transition
+         * rows/columns interleave two adjacent ramp entries instead of
+         * stepping through them as visible stripes (the "rainbow" note). */
+        #define HOLE_DITH(acc8, y_) \
+            (uint8_t)(WALL_BASE + (((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8 > \
+                       SHADE_LEVELS - 1 ? SHADE_LEVELS - 1 : \
+                       ((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8))
         uint8_t *base = fb + col;
         int y0, y1;
-        y0 = head_lo < 0 ? 0 : head_lo;            /* head reveal (shadow) */
-        y1 = head_hi > SCREEN_H - 1 ? SCREEN_H - 1 : head_hi;
-        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_dark;
-        y0 = head_hi + 1 < 0 ? 0 : head_hi + 1;    /* the void */
+        /* Head underside: shadowed from the lip (film ref: the top reveal
+         * gets no room light), core-dark at depth. */
+        {
+            int s0 = bsh + 4; if (s0 > sv) s0 = sv;
+            int h = head_hi - head_lo;
+            int step = (h > 0)
+                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)h) : 0;
+            int acc = s0 << 8;
+            y0 = head_lo < 0 ? 0 : head_lo;
+            y1 = head_hi > SCREEN_H - 1 ? SCREEN_H - 1 : head_hi;
+            acc += step * (y0 - head_lo);          /* clamped-top catch-up */
+            for (int y = y0; y <= y1; y++) {
+                base[y * SCREEN_W] = HOLE_DITH(acc, y);
+                acc += step;
+            }
+        }
+        y0 = head_hi + 1 < 0 ? 0 : head_hi + 1;    /* the core */
         y1 = sill_lo - 1 > SCREEN_H - 1 ? SCREEN_H - 1 : sill_lo - 1;
-        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_void;
-        y0 = sill_lo < 0 ? 0 : sill_lo;            /* sill ledge (lit) */
-        y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
-        for (int y = y0; y <= y1; y++) base[y * SCREEN_W] = c_ledge;
+        if (!side_hit && y0 <= y1) {
+            /* BACK WALL: no wallpaper — MYSTERY. Flat deep yellow at the
+             * murk register (shared with the side fades' target), checker-
+             * dithered between two adjacent shades: textureless gloom. */
+            uint8_t ca = (uint8_t)(WALL_BASE + murk);
+            uint8_t cb = (uint8_t)(WALL_BASE + murk + 1);
+            for (int y = y0; y <= y1; y++)
+                base[y * SCREEN_W] = ((y ^ col) & 1) ? cb : ca;
+        } else {
+            int acc = sv8;
+            for (int y = y0; y <= y1; y++)
+                base[y * SCREEN_W] = HOLE_DITH(acc, y);
+        }
+        /* Sill: lit at the near lip (sill_hi), core-dark by sill_lo. */
+        {
+            int s0 = bsh + 1; if (s0 > sv) s0 = sv;
+            int h = sill_hi - sill_lo;
+            int step = (h > 0)
+                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)h) : 0;
+            int acc = sv8;                         /* core-dark at the top (far)... */
+            y0 = sill_lo < 0 ? 0 : sill_lo;
+            y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
+            acc -= step * (y0 - sill_lo);
+            for (int y = y0; y <= y1; y++) {       /* ...lit by the bottom (near) */
+                base[y * SCREEN_W] = HOLE_DITH(acc, y);
+                acc -= step;
+            }
+        }
+        #undef HOLE_DITH
     }
 }
 
