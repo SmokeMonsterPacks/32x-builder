@@ -51,6 +51,23 @@ static uint32_t g_procgen_seed = 0;
 /* Pause-menu MAPS tab -> warp request. -1 = none; else a custom_maps[] index.
  * The menu (menu.c) sets it; the main loop drains it into portal_to_custom. */
 volatile int g_warp_request = -1;
+/* GAME tab requests: whole-screen flows the main loop owns. VIEWER opens the
+ * asset viewer over the paused game; LOBBY breaks the game loop back to the
+ * start list (the "exit to main menu" that used to need a console reset). */
+volatile int g_viewer_request = 0, g_lobby_request = 0;
+
+/* GAME-tab automap hooks (menu.c): the same state the MODE+B combo and the
+ * MODE+UP/DOWN zoom drive, reachable without MODE -- full parity for
+ * 3-button pads and MODE+ABC hybrid layouts (gameplay itself never needed
+ * X/Y/Z: run/crawl/activate/look all live on A/B/C). */
+uint8_t m_main_automap_get(void) { return g_automap_on; }
+void m_main_automap_cycle(int dir) {
+    g_automap_on = (uint8_t)((g_automap_on + (dir < 0 ? 2 : 1)) % 3);
+}
+void m_main_automap_zoom(int dir) {
+    if (dir > 0) { am_s_tgt += am_s_tgt >> 3; if (am_s_tgt > (64 << 16)) am_s_tgt = 64 << 16; }
+    else         { am_s_tgt -= am_s_tgt >> 3; if (am_s_tgt < (2 << 16))  am_s_tgt = 2 << 16; }
+}
 /* ── Controller input tester (MODE+Z) ────────────────────────────────────
  * Shows the exact word the 68K bridge delivers: RAW = MARS_SYS_COMM8 read
  * right now, SNP = the frame's snapshot the game logic is using (a diff
@@ -1044,6 +1061,11 @@ int m_main(void) {
         swapBuffers();
     }
 
+    /* ---- SESSION loop: lobby start list -> level -> game; the GAME tab's
+     * EXIT TO LOBBY breaks the game loop and lands back here. The landing
+     * cinematic above plays once per power-on only. */
+    for (;;) {
+
     /* --- Lobby: frozen menu, then walk in ---------------------------- *
      * Phase A: the player is FROZEN at the photo vantage; only the text
      * menu is live (UP/DOWN pick the level, any button confirms and
@@ -1507,6 +1529,17 @@ int m_main(void) {
             portal_to_custom(t);
             continue;
         }
+        /* GAME tab: 3D viewer over the paused game (self-owned screen; it
+         * restores the gameplay palette on exit), or back to the lobby. */
+        if (g_viewer_request) {
+            g_viewer_request = 0;
+            asset_viewer_screen();
+            continue;
+        }
+        if (g_lobby_request) {
+            g_lobby_request = 0;
+            break;                     /* -> session loop's lobby return */
+        }
         metrics_mode_check(pad);
         if (!menu_is_active()) {
             /* EXIT-HOLE climb: input frozen while raycast_exit_pullup drives
@@ -1558,5 +1591,20 @@ int m_main(void) {
         if (g_padtest_on) pad_test_draw(fb_text, pad);
         swapBuffers();
     }
+
+    /* EXIT TO LOBBY: fade the level out, level the camera (stale hold-C
+     * tilt or climb pitch would survive), restore the lobby, fade up, and
+     * loop back to the start list. */
+    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+    raycast_exit_pullup(0, 1);        /* zero the pitch channel */
+    SHARED_UC->eye_h = 128;
+    SHARED_UC->pitch_y = 0;
+    g_custom_current = -1;
+    raycast_load_lobby();
+    raycast_init();
+    raycast_set_brightness(0);
+    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+
+    }   /* SESSION loop */
     return 0;
 }

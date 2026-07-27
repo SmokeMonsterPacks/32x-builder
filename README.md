@@ -158,27 +158,37 @@ ROM to a MiSTer without rebuilding.
 
 ## Controls
 
-Six-button Genesis controller (works with three-button too, minus the extra
-buttons). Built around hold-modifiers rather than toggles:
+Gameplay needs only A / B / C and START, so a **three-button pad has full
+parity** — everything else lives in the pause menu. Built around
+hold-modifiers rather than toggles:
 
 | Input | Action |
 |---|---|
 | **D-pad ↑ / ↓** | Walk forward / back |
 | **D-pad ← / →** | Turn left / right |
 | **A** | Sprint (hold) |
-| **X** | Crawl / crouch (hold) — eye drops to the floor, full crawl perspective |
+| **A** | Interact — open the EXIT door, shove a standee |
+| **A + B** | Crawl / crouch (hold both) — eye drops to the floor, full crawl perspective |
+| **B** | Strafe modifier (hold) — ← / → sidestep instead of turning |
 | **C** | Look mode (hold); ↑ / ↓ tilt the gaze up / down while held |
-| **A** | Interact — open the EXIT door when you're standing at it |
-| **START** | Settings menu (ambience / footstep volume, VISUALS tab) |
+| **START** | Pause menu — lands on the **GAME** tab |
 
-**MODE is a modifier** (held with a second button), so the debug tools stay out
-of the way by default:
+**The GAME tab** is the first thing START shows: **MAP** (off / full / local
+automap overlay), **ZOOM** (hold ← / → to glide the map scale), **3D VIEWER**
+(inspect the game's assets mid-run — returns right back to the game), and
+**EXIT → LOBBY** (leave the level for the start menu, no console reset).
+The other tabs cover audio, lighting, visuals, the live color lab, testing
+toggles, credits, and instant map warps.
+
+**MODE combos** (six-button pads) are optional shortcuts to the same tools,
+plus the debug extras — nothing down here is required knowledge:
 
 | Combo | Action |
 |---|---|
+| **MODE + B** | Cycle the automap overlay (same as GAME → MAP) |
+| **MODE + ↑ / ↓** | Automap zoom (same as GAME → ZOOM) |
 | **MODE + X** | Cycle wall resolution: FULL → HALF → AUTO → SERL (diagnostic) |
 | **MODE + Y** | Toggle the on-screen profiler (frame/render timers, per-pass ticks) |
-| **MODE + B** | Cycle the automap overlay |
 | **MODE + Z** | Controller-input tester (raw pad register — for diagnosing emulator key binds) |
 | **MODE + C** | Partition-diagnostic mode (HUD `J`): normal / legacy paths / gate-off pricing |
 | **MODE + A** | *(start menu)* Cycle the menu-exit transform — hinge-up / fall-forward / fly-through — with an instant slowed preview |

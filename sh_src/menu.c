@@ -26,6 +26,14 @@ extern void hud_genesis_blank(void);
 /* Owned by m_main.c — the MAPS tab writes the chosen custom-map index here and
  * the main loop drains it into the warp. -1 = no request. */
 extern volatile int g_warp_request;
+/* GAME tab plumbing (m_main.c): the automap lives there, and the viewer /
+ * exit-to-lobby are whole-screen flows the main loop owns. The menu just
+ * pokes state and posts requests -- Michael's "no memorizing" note: every
+ * utility reachable from START on any pad, MODE combos stay optional. */
+extern volatile int g_viewer_request, g_lobby_request;
+uint8_t m_main_automap_get(void);
+void    m_main_automap_cycle(int dir);
+void    m_main_automap_zoom(int dir);
 
 /* Two-tab pause menu. START opens/closes; tabs (AUDIO / LIGHTING) sit
  * on row 0 and LEFT/RIGHT switches between them when that row is
@@ -35,15 +43,17 @@ extern volatile int g_warp_request;
  * secondary's audio pump and the raycaster's effect gates see edits
  * immediately via cache-through. */
 
-#define TAB_AUDIO    0
-#define TAB_LIGHTING 1
-#define TAB_VISUALS  2
-#define TAB_COLOR    3
-#define TAB_TESTING  4
-#define TAB_CREDITS  5
-#define TAB_MAPS     6
-#define NUM_TABS     7
+#define TAB_GAME     0
+#define TAB_AUDIO    1
+#define TAB_LIGHTING 2
+#define TAB_VISUALS  3
+#define TAB_COLOR    4
+#define TAB_TESTING  5
+#define TAB_CREDITS  6
+#define TAB_MAPS     7
+#define NUM_TABS     8
 
+#define GAME_CONTENT_ROWS     4   /* MAP, ZOOM, 3D VIEWER, EXIT TO LOBBY */
 #define AUDIO_CONTENT_ROWS    4   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
@@ -56,7 +66,7 @@ extern volatile int g_warp_request;
 static int      menu_active = 0;
 static int      menu_dirty  = 1;   /* menu content changed -> rewrite tiles */
 static int      menu_redraw = 0;   /* this frame's gate (set from menu_dirty) */
-static int      menu_tab    = TAB_AUDIO;
+static int      menu_tab    = TAB_GAME;
 static int      menu_row    = 0;   /* 0 = tab row, 1..N = content row */
 static uint16_t menu_prev_pad = 0;
 static int      pal_sel     = 2;   /* COLOR tab: selected surface (0=WALL..3=LIGHT); default CEIL */
@@ -129,11 +139,13 @@ int menu_is_active(void) {
 static int menu_row_numeric(int tab, int row) {
     if (tab == TAB_COLOR) return row >= 2;                      /* R,G,B,WARMTH,SAT */
     if (tab == TAB_AUDIO) return row == 1 || row == 2 || row == 4;  /* volumes, voice */
+    if (tab == TAB_GAME)  return row == 2;                      /* ZOOM ramps while held */
     return 0;
 }
 
 static int content_rows_for(int tab) {
     switch (tab) {
+    case TAB_GAME:     return GAME_CONTENT_ROWS;
     case TAB_AUDIO:    return AUDIO_CONTENT_ROWS;
     case TAB_LIGHTING: return LIGHTING_CONTENT_ROWS;
     case TAB_VISUALS:  return VISUALS_CONTENT_ROWS;
@@ -164,6 +176,23 @@ void menu_update(uint16_t pad) {
     }
     if (pressed & SEGA_CTRL_DOWN) {
         menu_row = (menu_row + 1) % total_rows;
+    }
+
+    /* GAME tab: A commits the action rows. VIEWER and EXIT close the menu
+     * first (warp-close, like MAPS) -- both hand the screen to main-loop
+     * flows that draw over the whole frame. */
+    if (menu_tab == TAB_GAME && (pressed & SEGA_CTRL_A)) {
+        if (menu_row == 1) m_main_automap_cycle(+1);
+        else if (menu_row == 3) {
+            g_viewer_request = 1;
+            menu_active = 0;
+            menu_genesis_blank();
+        } else if (menu_row == 4) {
+            g_lobby_request = 1;
+            menu_active = 0;
+            menu_genesis_blank();
+        }
+        return;
     }
 
     /* MAPS tab: A on a map row warps there and closes the menu. */
@@ -204,6 +233,11 @@ void menu_update(uint16_t pad) {
         return;
     }
 
+    if (menu_tab == TAB_GAME) {
+        if (menu_row == 1) m_main_automap_cycle(dir);       /* OFF/FULL/LOCAL */
+        else if (menu_row == 2) m_main_automap_zoom(dir);   /* held: ramps */
+        return;
+    }
     if (menu_tab == TAB_AUDIO) {
         if (menu_row == 3) {
             /* BUFFER: underrun-fix A/B — 64MS fixed vs 16MS chop-prone
@@ -365,7 +399,8 @@ void menu_render(uint8_t *fb) {
      * as the focus marker; LEFT/RIGHT cycles tabs there. The active tab is
      * always leftmost, so it stays clear even with the cursor hidden. */
     static const char *const tab_names[NUM_TABS] = {
-        "AUDIO", "LIGHTING", "VISUALS", "COLOR", "TESTING", "CREDITS", "MAPS" };
+        "GAME", "AUDIO", "LIGHTING", "VISUALS", "COLOR", "TESTING", "CREDITS",
+        "MAPS" };
     int tab_sel  = (menu_row == 0);
     int next_tab = (menu_tab + 1) % NUM_TABS;
     char tab_text[24];
@@ -391,7 +426,13 @@ void menu_render(uint8_t *fb) {
 
     /* Content rows at y = 32, 40, 48. */
     char num[4];
-    if (menu_tab == TAB_AUDIO) {
+    if (menu_tab == TAB_GAME) {
+        static const char *const am_names[3] = { "  OFF", " FULL", "LOCAL" };
+        draw_row(fb, 32, menu_row == 1, "MAP", am_names[m_main_automap_get() % 3]);
+        draw_row(fb, 40, menu_row == 2, "ZOOM", "< >");
+        draw_row(fb, 48, menu_row == 3, "3D VIEWER", " OPEN");
+        draw_row(fb, 56, menu_row == 4, "EXIT", "LOBBY");
+    } else if (menu_tab == TAB_AUDIO) {
         fmt_pct(SHARED_UC->amb_volume, num);
         draw_row(fb, 32, menu_row == 1, "AMBIENCE",  num);
         fmt_pct(SHARED_UC->step_volume, num);
@@ -505,7 +546,8 @@ void menu_render(uint8_t *fb) {
 
     /* Hint row below all content (box is 112px, 6 rows). */
     const char *hint = "START TO CLOSE";
-    if      (menu_tab == TAB_MAPS)  hint = "A=GO  START=CLOSE";
+    if      (menu_tab == TAB_GAME)  hint = "A=SELECT START=CLOSE";
+    else if (menu_tab == TAB_MAPS)  hint = "A=GO  START=CLOSE";
     else if (menu_tab == TAB_COLOR) hint = "A=RESET  START=CLOSE";
     menu_puts_pad(TX(X + 8), 88, hint, 20);
 }
