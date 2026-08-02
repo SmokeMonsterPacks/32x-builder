@@ -1,31 +1,40 @@
 BACKROOMS 32X — wall texture hand-off
 =====================================
 
-WHAT'S HERE
-  SOURCE_walltile.jpg          the original photo the shipped wallpaper was
-  SOURCE_square_composite.jpg  baked from — edit THESE for a torn variant
-  wall_hi_64_ingame.png        the 64x64 texture exactly as the ROM shows it
-  wall_hi_64_ingame_4x.png       (4x nearest for easy viewing)
-  wall_hi_64_levels_4x.png     the raw 5 darkness levels as grays — this is
-                               what the engine actually stores
+MAKING A SPRITE INSTEAD? (a standee, a poster, a wall sign, a prop)
+  You don't need any of this. Open the map editor at
+  https://backrooms-32x-project.fly.dev/ — the "Add a sprite" panel walks
+  you through it: upload a transparent PNG, place it in a map, walk up to
+  it in first person, submit. Full guide: SPRITES.md in the repo root.
+
+  THIS folder is for editing the yellow WALLPAPER itself — the repeating
+  texture on every wall. Different beast, rules below.
+
+WHAT'S IN THIS FOLDER
+  SOURCE_walltile.jpg          the original photo the shipped wallpaper
+  SOURCE_square_composite.jpg  was made from — edit THESE for your variant
+  wall_hi_64_ingame.png        the 64x64 texture exactly as the game shows it
+  wall_hi_64_ingame_4x.png       (same thing, 4x bigger for easy viewing)
+  wall_hi_64_levels_4x.png     the 5 brightness steps the game actually
+                               stores, shown as grays
   wall_hi_64_tiled2x2_big.png  the tile repeated 2x2 — check your edit here
-  wall_lo_16_*                 the 16x16 far-wall version of the same
+  wall_lo_16_*                 the 16x16 far-away version of the same
 
-WHAT RESOLUTION TO WORK AT
-  Any square size you like — 512x512 is comfortable. The bake LANCZOS-resizes
-  down to 64x64 (near walls) and 16x16 (far walls), so:
-  - Detail smaller than ~1/64 of your canvas disappears. A "torn" edge needs
-    to be BOLD — think chunky ripped-paper shapes, not hairline cracks.
-  - The texture stores only 5 DARKNESS levels (no color!). The wall's yellow
-    comes from the palette; your image's luminance becomes shading. High
-    contrast survives; subtle gradients don't.
-  - It TILES 4x4 across every wall cell and continues cell to cell, so all
-    four edges must wrap seamlessly. Check against the tiled2x2 preview.
-    A torn patch will therefore repeat every quarter-wall — a single
-    dramatic tear reads as a pattern, so keep tears smallish/organic, or
-    we can bake a torn variant as a second wall style instead.
+THE THREE RULES
+  1. Work at any square size (512x512 is comfortable). Your image gets
+     shrunk to 64x64, so detail must be BOLD to survive — for a torn edge,
+     think chunky ripped-paper shapes, not hairline cracks.
+  2. The game keeps only 5 brightness steps and NO color — the yellow is
+     added separately. Your image's light-and-dark becomes the pattern.
+     Strong contrast survives; subtle gradients vanish.
+  3. The tile repeats 4 times across every wall, endlessly. All four edges
+     must wrap seamlessly (compare with the tiled2x2 preview), and anything
+     distinctive repeats every quarter-wall — one dramatic tear becomes
+     visible wallpaper-pattern. Keep tears small and organic, OR tell us
+     you want it as a separate "torn wall" style mappers can paint onto
+     specific walls — we can set that up.
 
-HOW IT GETS IN
-  Send the edited square image back (or PR it to images/); the bake is:
-    python3 tools/bake_wall.py 64 64 sh_src/wall_tex_hi.h --src your.png
-    python3 tools/bake_wall.py 16 16 sh_src/wall_tex.h    --src your.png
+SENDING IT BACK
+  Just send the edited square image (PNG preferred) back however you got
+  this folder — we'll take it from there. If you're comfortable with
+  GitHub, a pull request adding it to images/ works too.
