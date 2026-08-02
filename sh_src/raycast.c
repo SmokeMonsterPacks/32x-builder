@@ -185,15 +185,13 @@ uint8_t world_map[MAP_H][MAP_W];
                              * baked stipple dots, a soft almost-imperceptible dapple */
 #define HANDLE_BASE   113   /* 4 entries: warm gold/brass for the door handle hardware
                              * (dark, mid, light, highlight) so it reads as metal not tan */
-#define COMM_BASE     144   /* 16 entries: the COMMUNITY sprite ramps — each a
-                             * 16-shade sweep, bright -> near-black, that
-                             * contributor-baked art quantizes to (pick one at
-                             * bake time). Shared ramps = zero per-sprite CRAM
-                             * cost; three tints give art some range while the
-                             * cast stays unified. tools/bake_sprite.py TINTS
-                             * mirrors these EXACT values; keep in sync. */
-#define COMM_SEPIA_BASE 160 /* 16: cardboard sepia (neanderthal-family) */
-#define COMM_OLIVE_BASE 176 /* 16: olive (spotted-partition-family) */
+#define COMM_BASE     144   /* start of the COMMUNITY CRAM ARENA (144..255):
+                             * each contributor sprite owns an 8-slot block
+                             * holding ITS OWN median-cut palette (base+1..
+                             * base+7, darkest->brightest; base+0 spare), the
+                             * same model as the door/outlet/neanderthal.
+                             * Allocated by tools/bake_sprite.py, painted from
+                             * the generated comm_pal.h below — 14 sprites fit. */
 #define SIGN_GREEN_BASE 132 /* 4 entries: EXIT-sign green letters, near->fog */
 #define SIGN_WHITE_BASE 136  /* 4 entries: EXIT-sign white plate, near->fog */
 #define WOODTOP_BASE  124   /* 8 entries: countertop wood, jamb-brown fading into
@@ -209,6 +207,7 @@ uint8_t world_map[MAP_H][MAP_W];
  * world size and flags so renderers read DATA instead of per-kind #defines.
  * Included here — after the *_BASE macros it references. */
 #include "sprite_defs.h"
+#include "comm_pal.h"     /* community CRAM arena (generated) */
 #include "chair3d.h"
 #include "chair_model.h"    /* baked GLB tri-mesh for the live 3D asset viewer */
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
@@ -1484,23 +1483,11 @@ static void build_palette(void) {
                         (18 * (7 - i) + FOG_R * i) / 7,
                         (16 * (7 - i) + FOG_G * i) / 7,
                         (13 * (7 - i) + FOG_B * i) / 7);
-    /* Community sprite ramps (see COMM_BASE): three 16-shade tints, each
-     * bright -> near-black. bake_sprite.py TINTS mirrors these exactly. */
-    for (int i = 0; i < 16; i++)
-        Hw32xSetBGColor(COMM_BASE + i,
-                        (28 * (15 - i) + 2 * i) / 15,
-                        (27 * (15 - i) + 2 * i) / 15,
-                        (25 * (15 - i) + 2 * i) / 15);
-    for (int i = 0; i < 16; i++)
-        Hw32xSetBGColor(COMM_SEPIA_BASE + i,
-                        (29 * (15 - i) + 3 * i) / 15,
-                        (25 * (15 - i) + 2 * i) / 15,
-                        (18 * (15 - i) + 1 * i) / 15);
-    for (int i = 0; i < 16; i++)
-        Hw32xSetBGColor(COMM_OLIVE_BASE + i,
-                        (24 * (15 - i) + 2 * i) / 15,
-                        (26 * (15 - i) + 3 * i) / 15,
-                        (16 * (15 - i) + 1 * i) / 15);
+    /* Community sprite palettes: every contributor sprite's own quantized
+     * colors, generated into comm_pal.h by gen_assets from the registry. */
+    for (int i = 0; i < COMM_PAL_COUNT; i++)
+        Hw32xSetBGColor(comm_pal[i].idx,
+                        comm_pal[i].r, comm_pal[i].g, comm_pal[i].b);
     /* Walls / carpet / ceiling / fluorescent panels all come from the tunable
      * palette engine (COLOR tab) — anchors default to the shipped look, warmth 0,
      * sat 100. Edit anchors there live; bake settled values into g_anchor[]. */
@@ -7053,12 +7040,13 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     if ((unsigned)oty < (unsigned)dth) {
                         int tv = col_base[oty * col_step];
                         if (sd) {
-                            /* Community wall sprite: 0 transparent; the ramp
-                             * runs bright->dark, so the wall-shade fold ADDS
-                             * (the outlet's dark->bright ramp subtracts). */
+                            /* Community wall sprite: 0 transparent; its own
+                             * palette runs base+1(dark)..base+7(bright), so
+                             * the wall-shade fold SUBTRACTS toward dark,
+                             * exactly like the outlet's. */
                             if (tv) {
-                                int ob = tv - 1 + oshade;
-                                if (ob > 15) ob = 15;
+                                int ob = tv - oshade;
+                                if (ob < 1) ob = 1;
                                 uint8_t oc8 = (uint8_t)(sd->base + ob);
                                 if (hr >= 2) *(uint32_t *)po = LDUP(oc8); else if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
                             }

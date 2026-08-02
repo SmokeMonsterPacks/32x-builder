@@ -1050,7 +1050,6 @@ init();
     fd.append('z', ($s('spr-z').value / 100).toFixed(2));
     fd.append('rotate', String(sprRot));
     fd.append('mirror', sprMir ? '1' : '0');
-    fd.append('tint', $s('spr-tint').value);
     fd.append('hi', $s('spr-hi').checked ? '1' : '0');
     $s('spr-msg').textContent = 'baking…';
     const r = await fetch('/bake_sprite', { method: 'POST', body: fd });
@@ -1063,7 +1062,7 @@ init();
       '<div style="font-size:11px">' + j.id + ' — ' + j.w + 'x' + j.h +
       ' texels, kind ' + j.kind + ' (' +
       (j.mount === 'wall' ? 'wall decal' : 'standee') +
-      ', ' + j.tint + (j.hi ? ', +hi-res' : '') + ')</div>';
+      ', ' + j.pal8.length + ' colors' + (j.hi ? ', +hi-res' : '') + ')</div>';
     $s('spr-actions').style.display = '';
     $s('spr-msg').textContent = 'baked \u2014 now try it in the map (step 6)';
   });
@@ -1082,11 +1081,14 @@ init();
     }
     const A = window.ME.assets;
     if (A && !A.sprites[bundle.id]) {
+      /* The sprite's own palette isn't in the exported CRAM yet (it ships
+       * with the PR), so patch its 7 entries into the session palette at
+       * the allocated arena base, then index texels against them. */
+      for (let i = 0; i < bundle.pal8.length; i++)
+        A.palette[bundle.base + 1 + i] = bundle.pal8[i];
       const px = new Array(bundle.w * bundle.h);
-      const base = (A.bases && A.bases[bundle.base_name]) ||
-                   (A.bases && A.bases.COMM_BASE) || 144;
       for (let i = 0; i < bundle.texels.length; i++)
-        px[i] = bundle.texels[i] === 0 ? -1 : base + bundle.texels[i] - 1;
+        px[i] = bundle.texels[i] === 0 ? -1 : bundle.base + bundle.texels[i];
       A.sprites[bundle.id] = { w: bundle.w, h: bundle.h, px,
         world_h: bundle.world_h, world_hw: bundle.world_hw,
         wall: bundle.mount === 'wall' };

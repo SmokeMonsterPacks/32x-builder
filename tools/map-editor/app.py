@@ -223,9 +223,6 @@ def bake_sprite_route():
     mount = request.form.get("mount") or "billboard"
     if mount not in ("billboard", "wall"):
         mount = "billboard"
-    tint = request.form.get("tint") or "gray"
-    if tint not in bake_sprite.TINTS:
-        tint = "gray"
     want_hi = (request.form.get("hi") or "") == "1" and mount == "billboard"
     try:
         wall_z = float(request.form.get("z") or 0.5)
@@ -254,37 +251,37 @@ def bake_sprite_route():
     except Exception:
         return jsonify({"error": "not a readable image"}), 400
     img = bake_sprite.orient(img, rot if rot in (90, 180, 270) else 0, mirror)
-    rows, W, H = bake_sprite.bake_image(img, 48)
+    rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, 48)
     if W * H > bake_sprite.MAX_TEXELS:
-        rows, W, H = bake_sprite.bake_image(img, 32)
-    base_name = bake_sprite.TINTS[tint][0]
-    texh = bake_sprite.emit_header(sprite_id, rows, W, H, base_name)
+        rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, 32)
+    sprite, kindent = bake_sprite.registry_entries(reg, sprite_id, W, H,
+                                                  world_h, pal31, author,
+                                                  mount, wall_z, want_hi)
+    texh = bake_sprite.emit_header(sprite_id, rows, W, H, sprite["base"])
     texh_hi = None
     if want_hi:
-        rows_hi, W_hi, H_hi = bake_sprite.bake_image(
-            img, W * 2, max_h=bake_sprite.MAX_H * 2)
+        rows_hi, W_hi, H_hi, _p, _p8 = bake_sprite.bake_image(
+            img, W * 2, max_h=bake_sprite.MAX_H * 2, pal8=pal8)
         texh_hi = bake_sprite.emit_header(sprite_id, rows_hi, W_hi, H_hi,
-                                          base_name, hi=True)
-    sprite, kindent = bake_sprite.registry_entries(reg, sprite_id, W, H,
-                                                  world_h, author, mount,
-                                                  wall_z, tint, want_hi)
+                                          sprite["base"], hi=True)
     reg["assets"]["sprites"].append(sprite)
     reg["decals"]["kinds"].append(kindent)
     reg_text = json.dumps(reg, indent=1, ensure_ascii=False) + "\n"
-    # Preview: texels through the exact COMM ramp, 3x nearest.
+    # Preview: texels through the sprite's OWN quantized palette, 3x nearest.
     pv = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     px = pv.load()
     for y in range(H):
         for x in range(W):
             v = rows[y][x]
             if v:
-                px[x, y] = bake_sprite.ramp_rgb(v - 1, tint) + (255,)
+                px[x, y] = tuple(pal8[v - 1]) + (255,)
     pv = pv.resize((W * 3, H * 3), Image.NEAREST)
     buf = io.BytesIO(); pv.save(buf, "PNG")
     return jsonify({
         "ok": True, "id": sprite_id, "w": W, "h": H, "kind": sprite["kind"],
-        "mount": mount, "z": kindent["z"], "tint": tint,
-        "base_name": base_name, "hi": bool(texh_hi),
+        "mount": mount, "z": kindent["z"],
+        "base": sprite["base"], "pal8": [list(c) for c in pal8],
+        "hi": bool(texh_hi),
         "world_h": world_h, "world_hw": sprite["world_hw"],
         "preview_png": base64.b64encode(buf.getvalue()).decode(),
         "texels": [v for row in rows for v in row],

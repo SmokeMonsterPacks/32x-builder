@@ -18,7 +18,7 @@ ROOT = os.path.dirname(HERE)
 WANT_BASES = ["WALL_BASE", "FLOOR_BASE", "CEIL_BASE", "LIGHT_BASE", "NEANDER_BASE",
               "OUTLET_BASE", "PARTITION_BASE", "DOOR_BASE", "DOOR_DARK_BASE",
               "STIPPLE_BASE", "HANDLE_BASE", "FRAME_BASE", "WOODTOP_BASE",
-              "COMM_BASE", "COMM_SEPIA_BASE", "COMM_OLIVE_BASE",
+              "COMM_BASE",
               "LOWCEIL_COLOR",
               "LOWCEIL_SEAM", "SHADE_LEVELS", "CEIL_GRID_DENSITY",
               "LIGHT_BOOST_MAX", "CRAWL_CEIL_H", "CEIL_H_FULL"]
@@ -91,7 +91,7 @@ def _mood_ramps(src, d, pal, SL, FOG):
             pal[lbase + i] = [lr * rat // 100, lg * rat // 100, lb * rat // 100]
 
 
-def build_palette(src):
+def build_palette(src, SRC_PATH_HACK=''):
     """Reproduce build_palette()'s 256-entry palette as 8-bit [[r,g,b],...]."""
     d = _defines(src)
     SL = d.get("SHADE_LEVELS", 16)
@@ -163,6 +163,16 @@ def build_palette(src):
         for i in range(n + 1):
             if 0 <= base + i < 256:
                 pal[base + i] = [(a[c] * (n - i) + b[c] * i) // n for c in range(3)]
+
+    # Community sprite palettes: the generated comm_pal.h rows (idx, r, g, b)
+    # painted verbatim by build_palette — parse them the same way.
+    cp = os.path.join(os.path.dirname(SRC_PATH_HACK), "comm_pal.h")
+    if os.path.exists(cp):
+        for mm in re.finditer(r'\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*\}',
+                              open(cp).read()):
+            idx = int(mm.group(1))
+            if 0 < idx < 256:
+                pal[idx] = [int(mm.group(2)), int(mm.group(3)), int(mm.group(4))]
 
     # 32X CRAM is 5-bit/channel -> scale to 8-bit
     return [[min(255, c * 255 // 31) for c in rgb] for rgb in pal]
@@ -241,20 +251,23 @@ def build_assets(repo_root=ROOT):
             sid = s["id"]
             if sid in ("outlet", "door", "neanderthal", "chair") or sid in sprites:
                 continue
-            base = d.get(s.get("base", ""))
+            base = s.get("base")
+            if not isinstance(base, int):
+                base = d.get(base or "")
             if base is None or s.get("decode") != "offset":
                 continue
             p = os.path.join(sh, s["tex"])
             if not os.path.exists(p):
                 continue
+            off = 0 if isinstance(s.get("base"), int) else -1   # arena: base+v
             spr = decode_sprite(p, "HW",
-                                lambda v, b=base: -1 if v == 0 else b + v - 1)
+                                lambda v, b=base, o=off: -1 if v == 0 else b + v + o)
             spr["world_h"]  = s.get("world_h", 1.0)
             spr["world_hw"] = s.get("world_hw", 0.25)
             sprites[sid] = spr
 
     return {
-        "palette": build_palette(src),
+        "palette": build_palette(src, os.path.join(sh, "raycast.c")),
         "bases": {k: d[k] for k in WANT_BASES if k in d},
         "textures": textures,
         "sprites": sprites,
