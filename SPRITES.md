@@ -51,13 +51,11 @@ files in your PR.
 
 - Crops to your image's transparent bounding box, scales to ≤64×96 texels
   (4096-texel ROM budget per sprite — about 4 KB).
-- Quantizes to one of three shared 16-shade **community tint ramps** —
-  warm gray (neutral), sepia (cardboard, the neanderthal's family), or
-  olive (the spotted wallpaper's family) — bright → near-black,
-  Bayer-dithered. Shared ramps are what keep community art free: the 32X
-  has one 256-color palette for everything on screen, so sprites pick a
-  color *family* instead of bringing their own colors. Think cardboard
-  standee, not full-color decal — high-contrast silhouettes read best.
+- Reduces your image to up to **7 of its own colors** (median-cut, like a
+  small-palette GIF), so your art keeps its hues — greens stay green. Each
+  sprite gets its own slot block in the console's palette; about 14 color
+  sprites fit, which is comfortably above the engine's other limits.
+  Strong distinct colors survive best; subtle gradients merge.
 - **Hi-res close-up (optional, standees only)**: bakes a second texture at
   double resolution that the engine swaps in within 3 cells — the same LOD
   trick the neanderthal uses. About 5× the ROM cost, so save it for hero

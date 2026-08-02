@@ -47,21 +47,19 @@ SPRITES (standees, posters, signs, props — via the web editor)
                    feathered/anti-aliased fringes will halo. Keep your
                    cutout hard-edged (GIMP: Layer > Transparency >
                    Threshold Alpha; PS: harden the mask).
-  Color:           luminance only, mapped onto ONE of three fixed
-                   16-shade color ramps you pick at upload — warm gray,
-                   cardboard sepia, or olive — with an ordered dither.
-                   The console has a single 256-color palette for the
-                   whole screen, so sprites choose a color family
-                   rather than carrying their own palette.
-                   Preview: Desaturate -> Posterize 16 -> Gradient Map
-                   to the tint of your choice.
+  Color:           your image is reduced to up to 7 of its own colors
+                   (like a GIF with a tiny palette), picked automatically
+                   to match your art. Greens stay green, reds stay red.
+                   Strong distinct colors survive best; subtle gradients
+                   between similar shades will merge.
+                   Preview in PS/GIMP: Image > Mode > Indexed, 7 colors.
   What survives:   strong silhouettes, high contrast, chunky midtones.
                    What doesn't: hue detail, subtle gradients, thin
                    linework, soft glows.
 
 SIZE CHEAT SHEET (what ships in the ROM)
   wall texture     64x64 near + 16x16 far, 5 luminance levels, tiles 4x
-  sprite (standee) up to 64x96, 16 levels + tint, optional 128x192 hi-res
+  sprite (standee) up to 64x96, 7 colors of its own, optional 128x192 hi-res
   wall decal       same as standee, painted flat on a wall at set height
   neanderthal      32x64 + 128x256 hi-res (the reference standee)
 
