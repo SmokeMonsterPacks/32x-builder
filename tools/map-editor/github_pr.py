@@ -86,18 +86,25 @@ def whoami(token):
 # ---------------- fork -> branch -> file -> PR ----------------
 
 def open_map_pr(token, login, upstream, base_branch, path, text, title, body):
-    """The whole submission dance, idempotent where possible.
+    """Single-file wrapper (the map flow) over open_files_pr."""
+    slug = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return open_files_pr(token, login, upstream, base_branch,
+                         [(path, text)], title, body, "map-" + slug)
+
+
+def open_files_pr(token, login, upstream, base_branch, files, title, body, branch):
+    """The whole submission dance for ONE OR MORE text files (a map, or a
+    community sprite's tex.h + registry.json), idempotent where possible.
     Returns {"url", "number", "existing": bool}."""
-    if not (text and text.strip()):
-        raise GitHubError("refusing to commit an empty map file — the editor "
-                          "sent no content. Reload the editor and resubmit.")
+    for _p, text in files:
+        if not (text and text.strip()):
+            raise GitHubError("refusing to commit an empty file — the editor "
+                              "sent no content. Reload the editor and resubmit.")
     owner_repo = upstream.split("/")
     if len(owner_repo) != 2:
         raise GitHubError("bad upstream repo %r" % upstream)
     up_owner, repo_name = owner_repo
     fork = "%s/%s" % (login, repo_name)
-    slug = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    branch = "map-" + slug
 
     if login == up_owner:
         fork = upstream          # the maintainer submitting to their own repo
@@ -127,19 +134,19 @@ def open_map_pr(token, login, upstream, base_branch, path, text, title, body):
     if status not in (201, 422):       # 422 = branch already exists (resubmit)
         raise GitHubError("branch create failed: %s" % j.get("message", status), status)
 
-    # 3. Create/update the .map file on that branch (contents API needs the
+    # 3. Create/update each file on that branch (contents API needs the
     #    existing blob sha for updates — resubmits amend the same PR).
     import base64
-    put = {"message": "Add community map %s\n\nSubmitted from the hosted map editor." % slug,
-           "content": base64.b64encode(text.encode()).decode(),
-           "branch": branch}
-    status, j = _req("GET", API + "/repos/%s/contents/%s?ref=%s" % (fork, path, branch), token)
-    if status == 200 and "sha" in j:
-        put["sha"] = j["sha"]
-        put["message"] = "Update community map %s" % slug
-    status, j = _req("PUT", API + "/repos/%s/contents/%s" % (fork, path), token, body=put)
-    if status not in (200, 201):
-        raise GitHubError("file commit failed: %s" % j.get("message", status), status)
+    for path, text in files:
+        put = {"message": "%s: %s\n\nSubmitted from the hosted editor." % (branch, path),
+               "content": base64.b64encode(text.encode()).decode(),
+               "branch": branch}
+        status, j = _req("GET", API + "/repos/%s/contents/%s?ref=%s" % (fork, path, branch), token)
+        if status == 200 and "sha" in j:
+            put["sha"] = j["sha"]
+        status, j = _req("PUT", API + "/repos/%s/contents/%s" % (fork, path), token, body=put)
+        if status not in (200, 201):
+            raise GitHubError("file commit failed (%s): %s" % (path, j.get("message", status)), status)
 
     # 4. The PR itself (or find the one already open for this branch).
     head = branch if fork == upstream else "%s:%s" % (login, branch)

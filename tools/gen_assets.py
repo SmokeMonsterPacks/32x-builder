@@ -67,7 +67,16 @@ def emit(sprites):
           '/* Indexed by decal/standup kind (registry decals.kinds). */',
           'static const sprite_def_t sprite_defs[] = {']
 
+    next_k = 0
     for s in sorted(sprites, key=lambda s: s["kind"]):
+        # sprite_defs is INDEXED BY KIND, so kinds that exist only as decal
+        # kinds (e.g. exit_hole: engine feature, no texture) get a zero row —
+        # without the padding every later kind reads the wrong sprite.
+        while next_k < s["kind"]:
+            L.append('    /* (no sprite)  k%d */ '
+                     '{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },' % next_k)
+            next_k += 1
+        next_k = s["kind"] + 1
         sym, pfx = s["sym"], s["sym"].upper()
         if s.get("tex_hi"):
             symhi = s["sym_hi"]; phi = symhi.upper()

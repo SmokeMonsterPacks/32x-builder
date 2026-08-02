@@ -978,3 +978,153 @@ async function init() {
   setInterval(saveWip, 4000);                      // periodic safety net while editing
 }
 init();
+
+
+/* ---------- community sprite upload (Add a sprite panel) ----------
+ * POSTs the image to /bake_sprite; the server bakes it against the shared
+ * COMM ramp and returns the full submission bundle. The baked standee is
+ * immediately PLACEABLE in this session (registry + assets patched
+ * client-side) so authors can walk their map with it before the PR merges. */
+(function () {
+  const $s = id => document.getElementById(id);
+  if (!$s('spr-bake')) return;
+  let bundle = null;
+  const mountVal = () =>
+    (document.querySelector('input[name="spr-mount"]:checked') || {}).value || 'billboard';
+  const RULES = {
+    billboard: 'Free-standing: it will stand on the floor and block ' +
+               'movement, like the neanderthal.',
+    wall: 'Wall decal: painted flat on a wall face at the height you ' +
+          'set, like the outlet.'
+  };
+  /* Steps 1+2 gate the bake button; the button itself says what is missing. */
+  const readiness = () => {
+    const f = $s('spr-file').files[0];
+    const name = $s('spr-name').value.trim();
+    const nameOk = /^[a-z][a-z0-9_]{1,15}$/.test(name);
+    $s('spr-name-hint').textContent =
+      name === '' ? '' :
+      nameOk ? '\u2713 ' + name : 'lowercase a-z 0-9 _ only, 2-16 chars, letter first';
+    const btn = $s('spr-bake');
+    btn.disabled = !(f && nameOk);
+    btn.title = !f ? 'Step 1: pick an image first'
+              : !nameOk ? 'Step 2: give it a valid name'
+              : 'Bake it \u2014 the preview shows exactly what ships';
+  };
+  let sprRot = 0, sprMir = false;
+  const thumbCss = () => {
+    $s('spr-thumb').style.transform =
+      'rotate(' + sprRot + 'deg) scaleX(' + (sprMir ? -1 : 1) + ')';
+  };
+  $s('spr-file').addEventListener('change', () => {
+    const f = $s('spr-file').files[0];
+    sprRot = 0; sprMir = false; thumbCss();
+    if (f) {
+      $s('spr-thumb').src = URL.createObjectURL(f);
+      $s('spr-orient').style.display = '';
+    } else $s('spr-orient').style.display = 'none';
+    readiness();
+  });
+  $s('spr-rot').addEventListener('click', () => { sprRot = (sprRot + 90) % 360; thumbCss(); });
+  $s('spr-mir').addEventListener('click', () => { sprMir = !sprMir; thumbCss(); });
+  $s('spr-name').addEventListener('input', readiness);
+  for (const r of document.querySelectorAll('input[name="spr-mount"]'))
+    r.addEventListener('change', () => {
+      const m = mountVal();
+      $s('spr-rules').innerHTML = RULES[m];
+      $s('spr-z-label').style.display = (m === 'wall') ? '' : 'none';
+      $s('spr-h-label').firstChild.textContent = (m === 'wall') ? 'size ' : 'size ';
+    });
+  $s('spr-h').addEventListener('input', () =>
+    $s('spr-h-val').textContent = ($s('spr-h').value / 100).toFixed(2));
+  $s('spr-z').addEventListener('input', () =>
+    $s('spr-z-val').textContent = ($s('spr-z').value / 100).toFixed(2));
+  $s('spr-bake').addEventListener('click', async () => {
+    const f = $s('spr-file').files[0];
+    if (!f) { $s('spr-msg').textContent = 'step 1: pick an image first'; return; }
+    const fd = new FormData();
+    fd.append('image', f);
+    fd.append('id', $s('spr-name').value.trim());
+    fd.append('height', ($s('spr-h').value / 100).toFixed(2));
+    fd.append('mount', mountVal());
+    fd.append('z', ($s('spr-z').value / 100).toFixed(2));
+    fd.append('rotate', String(sprRot));
+    fd.append('mirror', sprMir ? '1' : '0');
+    fd.append('tint', $s('spr-tint').value);
+    fd.append('hi', $s('spr-hi').checked ? '1' : '0');
+    $s('spr-msg').textContent = 'baking…';
+    const r = await fetch('/bake_sprite', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!j.ok) { $s('spr-msg').textContent = j.error || 'bake failed'; return; }
+    bundle = j;
+    $s('spr-preview').innerHTML =
+      '<img alt="preview" style="image-rendering:pixelated;background:#333" ' +
+      'src="data:image/png;base64,' + j.preview_png + '">' +
+      '<div style="font-size:11px">' + j.id + ' — ' + j.w + 'x' + j.h +
+      ' texels, kind ' + j.kind + ' (' +
+      (j.mount === 'wall' ? 'wall decal' : 'standee') +
+      ', ' + j.tint + (j.hi ? ', +hi-res' : '') + ')</div>';
+    $s('spr-actions').style.display = '';
+    $s('spr-msg').textContent = 'baked \u2014 now try it in the map (step 6)';
+  });
+  $s('spr-try').addEventListener('click', () => {
+    if (!bundle) return;
+    /* Session-local registration: palette button, grid glyph, walkthrough
+     * billboard. The .map will reference the kind by ID — it builds only
+     * after the sprite PR merges, and lint says so. */
+    if (!ME.reg.decals.kinds.find(k => k.id === bundle.id)) {
+      const ent = { id: bundle.id, kind: bundle.kind, z: bundle.z,
+        glyph: '⧉', color: '#b8b0a4',
+        label: bundle.id + ' (community ' +
+               (bundle.mount === 'wall' ? 'wall decal' : 'standee') + ')' };
+      if (bundle.mount !== 'wall') ent.standalone = true;
+      ME.reg.decals.kinds.push(ent);
+    }
+    const A = window.ME.assets;
+    if (A && !A.sprites[bundle.id]) {
+      const px = new Array(bundle.w * bundle.h);
+      const base = (A.bases && A.bases[bundle.base_name]) ||
+                   (A.bases && A.bases.COMM_BASE) || 144;
+      for (let i = 0; i < bundle.texels.length; i++)
+        px[i] = bundle.texels[i] === 0 ? -1 : base + bundle.texels[i] - 1;
+      A.sprites[bundle.id] = { w: bundle.w, h: bundle.h, px,
+        world_h: bundle.world_h, world_hw: bundle.world_hw,
+        wall: bundle.mount === 'wall' };
+    }
+    ME.layer = 'decals'; ME.decalKind = bundle.id;
+    buildPalette();
+    status(bundle.mount === 'wall'
+      ? 'wall decal armed — click a wall EDGE to mount it (ships after the PR merges)'
+      : 'standee armed — click a cell to place it (ships after the PR merges)');
+  });
+  $s('spr-download').addEventListener('click', () => {
+    if (!bundle) return;
+    const dl = (name, text) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+      a.download = name; a.click(); URL.revokeObjectURL(a.href);
+    };
+    dl('spr_' + bundle.id + '_tex.h', bundle.tex_h);
+    if (bundle.tex_h_hi) dl('spr_' + bundle.id + '_tex_hi.h', bundle.tex_h_hi);
+    dl('registry.json', bundle.registry);
+    status('bundle downloaded — see SPRITES.md for the PR steps');
+  });
+  $s('spr-submit').addEventListener('click', async () => {
+    if (!bundle) return;
+    $s('spr-msg').textContent = 'opening PR…';
+    const r = await fetch('/submit_sprite_pr', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: bundle.id, tex_h: bundle.tex_h,
+                             tex_h_hi: bundle.tex_h_hi || '',
+                             registry: bundle.registry }) });
+    const j = await r.json();
+    if (j.ok) {
+      $s('spr-msg').innerHTML = '<a href="' + j.pr_url + '" target="_blank">PR #'
+        + j.pr_number + ' opened ↗</a>';
+    } else if (r.status === 401) {
+      $s('spr-msg').textContent = 'sign in (top right) or use ⬇ Bundle';
+    } else {
+      $s('spr-msg').textContent = (j.errors || [j.error || 'failed']).join('; ');
+    }
+  });
+})();

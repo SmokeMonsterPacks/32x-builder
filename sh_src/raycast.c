@@ -185,6 +185,15 @@ uint8_t world_map[MAP_H][MAP_W];
                              * baked stipple dots, a soft almost-imperceptible dapple */
 #define HANDLE_BASE   113   /* 4 entries: warm gold/brass for the door handle hardware
                              * (dark, mid, light, highlight) so it reads as metal not tan */
+#define COMM_BASE     144   /* 16 entries: the COMMUNITY sprite ramps — each a
+                             * 16-shade sweep, bright -> near-black, that
+                             * contributor-baked art quantizes to (pick one at
+                             * bake time). Shared ramps = zero per-sprite CRAM
+                             * cost; three tints give art some range while the
+                             * cast stays unified. tools/bake_sprite.py TINTS
+                             * mirrors these EXACT values; keep in sync. */
+#define COMM_SEPIA_BASE 160 /* 16: cardboard sepia (neanderthal-family) */
+#define COMM_OLIVE_BASE 176 /* 16: olive (spotted-partition-family) */
 #define SIGN_GREEN_BASE 132 /* 4 entries: EXIT-sign green letters, near->fog */
 #define SIGN_WHITE_BASE 136  /* 4 entries: EXIT-sign white plate, near->fog */
 #define WOODTOP_BASE  124   /* 8 entries: countertop wood, jamb-brown fading into
@@ -1475,6 +1484,23 @@ static void build_palette(void) {
                         (18 * (7 - i) + FOG_R * i) / 7,
                         (16 * (7 - i) + FOG_G * i) / 7,
                         (13 * (7 - i) + FOG_B * i) / 7);
+    /* Community sprite ramps (see COMM_BASE): three 16-shade tints, each
+     * bright -> near-black. bake_sprite.py TINTS mirrors these exactly. */
+    for (int i = 0; i < 16; i++)
+        Hw32xSetBGColor(COMM_BASE + i,
+                        (28 * (15 - i) + 2 * i) / 15,
+                        (27 * (15 - i) + 2 * i) / 15,
+                        (25 * (15 - i) + 2 * i) / 15);
+    for (int i = 0; i < 16; i++)
+        Hw32xSetBGColor(COMM_SEPIA_BASE + i,
+                        (29 * (15 - i) + 3 * i) / 15,
+                        (25 * (15 - i) + 2 * i) / 15,
+                        (18 * (15 - i) + 1 * i) / 15);
+    for (int i = 0; i < 16; i++)
+        Hw32xSetBGColor(COMM_OLIVE_BASE + i,
+                        (24 * (15 - i) + 2 * i) / 15,
+                        (26 * (15 - i) + 3 * i) / 15,
+                        (16 * (15 - i) + 1 * i) / 15);
     /* Walls / carpet / ceiling / fluorescent panels all come from the tunable
      * palette engine (COLOR tab) — anchors default to the shipped look, warmth 0,
      * sat 100. Edit anchors there live; bake settled values into g_anchor[]. */
@@ -1859,10 +1885,15 @@ void raycast_load_custom(int idx) {
      * standups[] (drawn as a billboard, collides). Routing it into decals[]
      * was why authored neanderthals neither showed nor blocked. */
     for (int i = 0; i < m->n_decals; i++) {
-        /* Free-standing objects (neanderthal kind 2, chair kind 3) live in
-         * standups[]: they billboard/render in world and collide. Everything
-         * else is a wall-anchored decal. */
-        if (m->decals[i].kind == 2 || m->decals[i].kind == CHAIR_SPRITE_KIND) {
+        /* Free-standing objects live in standups[]: they billboard/render in
+         * world and collide. Everything else is a wall-anchored decal. The
+         * test is the registry's own STANDALONE flag (via sprite_defs), so a
+         * community-submitted standee spawns with zero loader edits — the
+         * old hardcoded kind==2||3 silently dropped any new kind. */
+        int knd = m->decals[i].kind;
+        int standalone = knd >= 0 && knd < SPRITE_DEF_COUNT &&
+                         (sprite_defs[knd].flags & SPRITE_F_STANDALONE);
+        if (standalone) {
             if (num_standups < MAX_STANDUPS) {
                 standups[num_standups].x            = m->decals[i].x;
                 standups[num_standups].y            = m->decals[i].y;
@@ -6963,16 +6994,24 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             for (int ai = 0; ai < n_active; ai++) {
                 int d = active_decal[ai];
                 /* 0 = small outlet plate (opaque fill, shaded with the wall),
-                 * 1 = the full-height fire DOOR (own texture; index 0 is
-                 * transparent so the wall shows around the EXIT sign). */
+                 * 1 = the full-height fire DOOR (drawn as the wall, skipped),
+                 * others = GENERIC wall-mounted sprites from sprite_defs —
+                 * community wall decals (bake_sprite.py --mount wall) render
+                 * through the outlet's machinery: offset decode against the
+                 * sprite's ramp, texel 0 transparent, wall-shade fold. */
                 int dk = decals[d].kind;
                 if (dk == 1) continue;   /* door drawn as the wall, not an overlay */
-                fx_t dhw = dk ? DECAL_DOOR_HW : DECAL_OUTLET_HW;
-                fx_t dH  = dk ? DECAL_DOOR_H  : DECAL_OUTLET_H;
-                int dtw  = dk ? DOOR_TEX_WIDTH  : OUTLET_TEX_WIDTH;
-                int dth  = dk ? DOOR_TEX_HEIGHT : OUTLET_TEX_HEIGHT;
-                const uint8_t *dtex = dk ? (const uint8_t *)door_tex_ram
-                                         : (const uint8_t *)outlet_tex;
+                const sprite_def_t *sd = 0;
+                if (dk != 0) {
+                    if (dk >= SPRITE_DEF_COUNT) continue;
+                    sd = &sprite_defs[dk];
+                    if (!sd->tex || sd->mount != SPRITE_MOUNT_WALL) continue;
+                }
+                fx_t dhw = sd ? sd->world_hw : DECAL_OUTLET_HW;
+                fx_t dH  = sd ? sd->world_h  : DECAL_OUTLET_H;
+                int dtw  = sd ? sd->w : OUTLET_TEX_WIDTH;
+                int dth  = sd ? sd->h : OUTLET_TEX_HEIGHT;
+                const uint8_t *dtex = sd ? sd->tex : (const uint8_t *)outlet_tex;
 
                 fx_t along;
                 if (decals[d].axis) {                 /* wall plane = Y, spans X */
@@ -6986,10 +7025,10 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 int otx = (int)(((int64_t)along * dtw) / (2 * dhw));
                 if (otx < 0) otx = 0;
                 else if (otx >= dtw) otx = dtw - 1;
-                /* Door texture is COLUMN-MAJOR (cache-friendly down a column):
-                 * this column is contiguous bytes, step 1. Outlet is row-major. */
-                const uint8_t *col_base = dk ? (dtex + otx * dth) : (dtex + otx);
-                int col_step = dk ? 1 : dtw;
+                /* Outlet + community wall sprites are ROW-major (the door,
+                 * the one column-major texture, never reaches this overlay). */
+                const uint8_t *col_base = dtex + otx;
+                int col_step = dtw;
 
                 /* Vertical band: centre at height fraction z, height dH, through
                  * lineHeight. wall_bot is the floor line; up the wall subtracts. */
@@ -7013,9 +7052,14 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                     int oty = (int)(oty_fx >> FX_SHIFT);
                     if ((unsigned)oty < (unsigned)dth) {
                         int tv = col_base[oty * col_step];
-                        if (dk) {
-                            if (tv) {           /* 0 = transparent: keep the wall */
-                                uint8_t oc8 = (uint8_t)(DOOR_BASE + tv - 1);
+                        if (sd) {
+                            /* Community wall sprite: 0 transparent; the ramp
+                             * runs bright->dark, so the wall-shade fold ADDS
+                             * (the outlet's dark->bright ramp subtracts). */
+                            if (tv) {
+                                int ob = tv - 1 + oshade;
+                                if (ob > 15) ob = 15;
+                                uint8_t oc8 = (uint8_t)(sd->base + ob);
                                 if (hr >= 2) *(uint32_t *)po = LDUP(oc8); else if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;
                             }
                         } else {

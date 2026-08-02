@@ -18,6 +18,7 @@ ROOT = os.path.dirname(HERE)
 WANT_BASES = ["WALL_BASE", "FLOOR_BASE", "CEIL_BASE", "LIGHT_BASE", "NEANDER_BASE",
               "OUTLET_BASE", "PARTITION_BASE", "DOOR_BASE", "DOOR_DARK_BASE",
               "STIPPLE_BASE", "HANDLE_BASE", "FRAME_BASE", "WOODTOP_BASE",
+              "COMM_BASE", "COMM_SEPIA_BASE", "COMM_OLIVE_BASE",
               "LOWCEIL_COLOR",
               "LOWCEIL_SEAM", "SHADE_LEVELS", "CEIL_GRID_DENSITY",
               "LIGHT_BOOST_MAX", "CRAWL_CEIL_H", "CEIL_H_FULL"]
@@ -145,6 +146,24 @@ def build_palette(src):
                               (wg * (7 - i) + FOG[1] * i) // 7,
                               (wb * (7 - i) + FOG[2] * i) // 7]
 
+    # GENERIC linear ramp loops: Hw32xSetBGColor(BASE + i, (A*(N-i)+B*i)/N, ...)
+    # with numeric endpoints — the COMM_BASE community ramp and any future
+    # bright->dark sweep. (The WOODTOP/FOG blend keeps its own matcher above.)
+    for mm in re.finditer(
+            r'Hw32xSetBGColor\(\s*(\w+)\s*\+\s*i,\s*'
+            r'\((\d+)\s*\*\s*\((\d+)\s*-\s*i\)\s*\+\s*(\d+)\s*\*\s*i\)\s*/\s*\d+,\s*'
+            r'\((\d+)\s*\*\s*\(\d+\s*-\s*i\)\s*\+\s*(\d+)\s*\*\s*i\)\s*/\s*\d+,\s*'
+            r'\((\d+)\s*\*\s*\(\d+\s*-\s*i\)\s*\+\s*(\d+)\s*\*\s*i\)\s*/\s*\d+\)', body):
+        base = d.get(mm.group(1))
+        if base is None:
+            continue
+        n = int(mm.group(3))
+        a = (int(mm.group(2)), int(mm.group(5)), int(mm.group(7)))
+        b = (int(mm.group(4)), int(mm.group(6)), int(mm.group(8)))
+        for i in range(n + 1):
+            if 0 <= base + i < 256:
+                pal[base + i] = [(a[c] * (n - i) + b[c] * i) // n for c in range(3)]
+
     # 32X CRAM is 5-bit/channel -> scale to 8-bit
     return [[min(255, c * 255 // 31) for c in rgb] for rgb in pal]
 
@@ -210,6 +229,29 @@ def build_assets(repo_root=ROOT):
         p = os.path.join(sh, fname)
         if os.path.exists(p):
             sprites[key] = decode_sprite(p, order, fn)
+
+    # COMMUNITY sprites: registry-driven, so bake_sprite.py additions export
+    # with no edits here (the hardcoded specs above are the four originals).
+    # Offset decode against the sprite's ramp base; world dims ride along so
+    # the editor walkthrough can billboard them at true scale.
+    reg_p = os.path.join(repo_root, "registry.json")
+    if os.path.exists(reg_p):
+        reg = json.load(open(reg_p))
+        for s in reg.get("assets", {}).get("sprites", []):
+            sid = s["id"]
+            if sid in ("outlet", "door", "neanderthal", "chair") or sid in sprites:
+                continue
+            base = d.get(s.get("base", ""))
+            if base is None or s.get("decode") != "offset":
+                continue
+            p = os.path.join(sh, s["tex"])
+            if not os.path.exists(p):
+                continue
+            spr = decode_sprite(p, "HW",
+                                lambda v, b=base: -1 if v == 0 else b + v - 1)
+            spr["world_h"]  = s.get("world_h", 1.0)
+            spr["world_hw"] = s.get("world_hw", 0.25)
+            sprites[sid] = spr
 
     return {
         "palette": build_palette(src),

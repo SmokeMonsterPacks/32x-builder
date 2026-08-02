@@ -1,0 +1,74 @@
+# Community sprites: put your own standee in the Backrooms
+
+Any transparent PNG can become a free-standing cardboard-style standee that
+ships in the ROM and is placeable in any map — same pipeline as community
+maps: bake → PR → CI builds → next release has it.
+
+## The easy way: the hosted editor
+
+1. Open the [map editor](https://backrooms-32x-project.fly.dev/) and find
+   **Add a sprite** in the sidebar.
+2. Pick an image (PNG with transparency works best), name it
+   (`a-z 0-9 _`, 2–16 chars), and choose the **mount** — this is the big
+   decision:
+   - **Free-standing (standee)** — stands on the floor facing the camera,
+     players collide with it. The neanderthal is one. For props, figures,
+     furniture.
+   - **Wall decal** — painted flat onto a wall face, foreshortens with the
+     wall, mounts at any height. The electrical outlet is one. For posters,
+     signs, stains, fixtures.
+
+   Set its world size (1.0 = floor to ceiling), and for wall decals the
+   height on the wall. Hit **Bake sprite** — the preview is pixel-exact
+   through the real 32X palette.
+3. **Place in this map** arms it as a decal: standees drop on an open
+   cell, wall decals mount on a wall *edge*. Then **▶ Walk** the map and
+   judge your import in first person — before it even ships.
+4. **🚀 Submit sprite PR** (signed in with GitHub) opens a two-file pull
+   request under your name: the baked texture and its registry entries.
+   Or **⬇ Bundle** downloads both files for a manual PR.
+
+Once the PR merges, the next `build-N` release renders your standee in-game,
+and every mapper can place it.
+
+## The CLI way
+
+```sh
+# a free-standing standee (like the neanderthal):
+python3 tools/bake_sprite.py --id traffic_cone --src cone.png \
+        --height 0.55 --author yourname
+# a wall decal (like the outlet), centred 60% up the wall:
+python3 tools/bake_sprite.py --id warning_sign --src sign.png \
+        --mount wall --height 0.3 --z 0.6 --author yourname
+make        # regenerates sprite_defs.h; the sprite is now placeable
+```
+
+One command writes `sh_src/spr_<id>_tex.h` and registers the sprite in
+`registry.json` (both `assets.sprites` and `decals.kinds`). Commit those two
+files in your PR.
+
+## What the bake does (and its limits)
+
+- Crops to your image's transparent bounding box, scales to ≤64×96 texels
+  (4096-texel ROM budget per sprite — about 4 KB).
+- Quantizes to one of three shared 16-shade **community tint ramps** —
+  warm gray (neutral), sepia (cardboard, the neanderthal's family), or
+  olive (the spotted wallpaper's family) — bright → near-black,
+  Bayer-dithered. Shared ramps are what keep community art free: the 32X
+  has one 256-color palette for everything on screen, so sprites pick a
+  color *family* instead of bringing their own colors. Think cardboard
+  standee, not full-color decal — high-contrast silhouettes read best.
+- **Hi-res close-up (optional, standees only)**: bakes a second texture at
+  double resolution that the engine swaps in within 3 cells — the same LOD
+  trick the neanderthal uses. About 5× the ROM cost, so save it for hero
+  pieces (`--hi` on the CLI, the checkbox in the editor).
+- The standee renders as a camera-facing billboard with distance fog, is
+  solid to walk into, and fully participates in the engine's occlusion.
+
+## Rules of thumb
+
+- Strong silhouette + clear midtones survive 16 shades; subtle color
+  gradients won't.
+- Keep it in the spirit of the place. Maintainers review PRs before merge.
+- Kind numbers are assigned automatically; if two sprite PRs race, the
+  second just rebases (re-run the bake or bump the `kind` by one).

@@ -14,6 +14,7 @@ import json, os, re, sys
 import config
 sys.path.insert(0, config.TOOLS_DIR)
 import mapfmt          # noqa: E402  (shared .map syntax — single source of truth)
+import bake_sprite     # noqa: E402  (community standee bake — shared with the CLI)
 import export_assets   # noqa: E402  (palette + textures from the ROM source)
 import lint_maps       # noqa: E402  (the same gate CI runs — lint before submit)
 
@@ -197,6 +198,130 @@ def submit_pr():
                   "[hosted map editor](https://backrooms-32x-project.fly.dev/).\n\n"
                   "CI lints it and builds the ROM; once merged it ships in the "
                   "next `build-N` release automatically." % (model["name"], login)))
+    except github_pr.GitHubError as e:
+        return jsonify({"ok": False, "errors": [str(e)]}), 502
+    return jsonify({"ok": True, "pr_url": pr["url"], "pr_number": pr["number"],
+                    "existing": pr["existing"]})
+
+
+@app.route("/bake_sprite", methods=["POST"])
+def bake_sprite_route():
+    """Community sprite upload: bake the image against the shared COMM ramp
+    and return everything a submission needs — a preview PNG (through the
+    REAL palette), the generated tex.h, and the registry with the new
+    entries appended. Stateless: nothing is written server-side; the bundle
+    goes back out via download or the signed-in PR route below."""
+    import base64, io
+    from PIL import Image
+    f = request.files.get("image")
+    sprite_id = re.sub(r"[^a-z0-9_]", "", (request.form.get("id") or "").lower())[:16]
+    try:
+        world_h = float(request.form.get("height") or 1.0)
+    except ValueError:
+        world_h = 1.0
+    author = (request.form.get("author") or "")[:24]
+    mount = request.form.get("mount") or "billboard"
+    if mount not in ("billboard", "wall"):
+        mount = "billboard"
+    tint = request.form.get("tint") or "gray"
+    if tint not in bake_sprite.TINTS:
+        tint = "gray"
+    want_hi = (request.form.get("hi") or "") == "1" and mount == "billboard"
+    try:
+        wall_z = float(request.form.get("z") or 0.5)
+    except ValueError:
+        wall_z = 0.5
+    wall_z = min(0.95, max(0.05, wall_z))
+    if not f:
+        return jsonify({"error": "no image uploaded"}), 400
+    if not re.match(r"^[a-z][a-z0-9_]{1,15}$", sprite_id):
+        return jsonify({"error": "name must be 2-16 chars a-z 0-9 _ "
+                                 "starting with a letter"}), 400
+    if not (0.1 <= world_h <= 1.0):
+        return jsonify({"error": "height must be 0.1-1.0 cells"}), 400
+    reg = json.load(open(config.REGISTRY))
+    ids = ([sp["id"] for sp in reg["assets"]["sprites"]] +
+           [k["id"] for k in reg["decals"]["kinds"]])
+    if sprite_id in ids:
+        return jsonify({"error": "name %r is taken" % sprite_id}), 400
+    try:
+        rot = int(request.form.get("rotate") or 0)
+    except ValueError:
+        rot = 0
+    mirror = (request.form.get("mirror") or "") == "1"
+    try:
+        img = Image.open(f.stream)
+    except Exception:
+        return jsonify({"error": "not a readable image"}), 400
+    img = bake_sprite.orient(img, rot if rot in (90, 180, 270) else 0, mirror)
+    rows, W, H = bake_sprite.bake_image(img, 48)
+    if W * H > bake_sprite.MAX_TEXELS:
+        rows, W, H = bake_sprite.bake_image(img, 32)
+    base_name = bake_sprite.TINTS[tint][0]
+    texh = bake_sprite.emit_header(sprite_id, rows, W, H, base_name)
+    texh_hi = None
+    if want_hi:
+        rows_hi, W_hi, H_hi = bake_sprite.bake_image(
+            img, W * 2, max_h=bake_sprite.MAX_H * 2)
+        texh_hi = bake_sprite.emit_header(sprite_id, rows_hi, W_hi, H_hi,
+                                          base_name, hi=True)
+    sprite, kindent = bake_sprite.registry_entries(reg, sprite_id, W, H,
+                                                  world_h, author, mount,
+                                                  wall_z, tint, want_hi)
+    reg["assets"]["sprites"].append(sprite)
+    reg["decals"]["kinds"].append(kindent)
+    reg_text = json.dumps(reg, indent=1, ensure_ascii=False) + "\n"
+    # Preview: texels through the exact COMM ramp, 3x nearest.
+    pv = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    px = pv.load()
+    for y in range(H):
+        for x in range(W):
+            v = rows[y][x]
+            if v:
+                px[x, y] = bake_sprite.ramp_rgb(v - 1, tint) + (255,)
+    pv = pv.resize((W * 3, H * 3), Image.NEAREST)
+    buf = io.BytesIO(); pv.save(buf, "PNG")
+    return jsonify({
+        "ok": True, "id": sprite_id, "w": W, "h": H, "kind": sprite["kind"],
+        "mount": mount, "z": kindent["z"], "tint": tint,
+        "base_name": base_name, "hi": bool(texh_hi),
+        "world_h": world_h, "world_hw": sprite["world_hw"],
+        "preview_png": base64.b64encode(buf.getvalue()).decode(),
+        "texels": [v for row in rows for v in row],
+        "tex_h": texh, "tex_path": "sh_src/spr_%s_tex.h" % sprite_id,
+        "tex_h_hi": texh_hi,
+        "registry": reg_text,
+    })
+
+
+@app.route("/submit_sprite_pr", methods=["POST"])
+def submit_sprite_pr():
+    """Signed-in sprite submit: commits the baked tex.h AND the updated
+    registry.json on one branch, opens the PR as the user."""
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    j = request.get_json(force=True, silent=True) or {}
+    sprite_id = re.sub(r"[^a-z0-9_]", "", (j.get("id") or ""))[:16]
+    texh, reg_text = j.get("tex_h") or "", j.get("registry") or ""
+    texh_hi = j.get("tex_h_hi") or ""
+    if not (sprite_id and texh and reg_text):
+        return jsonify({"error": "incomplete bundle — re-bake and retry"}), 400
+    files = [("sh_src/spr_%s_tex.h" % sprite_id, texh)]
+    if texh_hi:
+        files.append(("sh_src/spr_%s_tex_hi.h" % sprite_id, texh_hi))
+    files.append(("registry.json", reg_text))
+    try:
+        pr = github_pr.open_files_pr(
+            token, login, config.GITHUB_REPO, config.GITHUB_BRANCH,
+            files,
+            title="Community sprite: %s" % sprite_id,
+            body=("New community standee **%s** by @%s, baked and submitted "
+                  "from the [hosted editor](https://backrooms-32x-project.fly.dev/). "
+                  "Two files: the palette-indexed texture and its registry "
+                  "entries. CI regenerates sprite_defs.h; once merged the "
+                  "standee is placeable in maps." % (sprite_id, login)),
+            branch="sprite-" + sprite_id)
     except github_pr.GitHubError as e:
         return jsonify({"ok": False, "errors": [str(e)]}), 502
     return jsonify({"ok": True, "pr_url": pr["url"], "pr_number": pr["number"],

@@ -470,17 +470,39 @@ window.RC = (function () {
       if (dec.kind === 'outlet' && spr.outlet) drawWallDecal(data, zbuf, dec, spr.outlet, 0.031, dec.z != null ? dec.z : 0.20, 0.098);
       else if (dec.kind === 'door' && spr.door) drawWallDecal(data, zbuf, dec, spr.door, 0.24, 0.49, 0.98);
       else if (dec.kind === 'exit_hole') drawExitHole(data, zbuf, dec);
+      else if (spr[dec.kind] && spr[dec.kind].wall) {
+        /* Community WALL decal (bake_sprite --mount wall): same flat-on-the-
+         * wall draw as the outlet, at its registry size + placed height. */
+        const cs = spr[dec.kind];
+        const kz = ((window.ME.reg.decals.kinds.find(k => k.id === dec.kind) || {}).z);
+        drawWallDecal(data, zbuf, dec, cs, cs.world_hw,
+                      dec.z != null ? dec.z : (kz != null ? kz : 0.5), cs.world_h);
+      }
     }
     if (spr.outlet) for (const o of procOut)   // engine's auto-placed outlets
       drawWallDecal(data, zbuf, o, spr.outlet, 0.031, 0.20, 0.098);
-    /* FREE-STANDING billboards — the neanderthal standup, far -> near. */
+    /* FREE-STANDING billboards, far -> near: the neanderthal standup plus
+     * every registry-standalone community standee (bake_sprite.py) — the
+     * export carries each one's world dims, so new sprites render at true
+     * scale with no edits here. */
     const bills = [];
-    for (const dec of window.ME.model.decals)
+    for (const dec of window.ME.model.decals) {
+      if (dec.kind === 'chair') continue;                 /* live-3D below */
+      let sp = null, hw = 0, h = 0;
       if (dec.kind === 'neanderthal' && spr.neander) {
-        const ddx = dec.x - px, ddy = dec.y - py; bills.push({ d2: ddx * ddx + ddy * ddy, dec });
+        sp = spr.neander; hw = 0.45, h = 0.90;
+      } else if (spr[dec.kind] && spr[dec.kind].world_h && !spr[dec.kind].wall) {
+        sp = spr[dec.kind];
+        h = sp.world_h * 0.9;                             /* standee scale, like the neander */
+        hw = sp.world_hw * 0.9;
       }
+      if (!sp) continue;
+      const ddx = dec.x - px, ddy = dec.y - py;
+      bills.push({ d2: ddx * ddx + ddy * ddy, dec, sp, hw, h });
+    }
     bills.sort((a, b) => b.d2 - a.d2);
-    for (const it of bills) drawSprite(data, zbuf, it.dec.x, it.dec.y, spr.neander, 0.45, 0.90, 0.45);
+    for (const it of bills)
+      drawSprite(data, zbuf, it.dec.x, it.dec.y, it.sp, it.hw, it.h, it.h / 2);
 
     /* Live-3D chairs — projected geometry, far -> near. */
     const chairs = [];
