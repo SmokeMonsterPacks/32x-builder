@@ -362,7 +362,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * 1 textured. Face a rendered chair and toggle: watch H jump. */
     {
         extern volatile uint16_t prof_pass_chair;
-        char t5[32];
+        char t5[48];   /* H/TX/P6/AU + E + FQ — 38 cols of the 40-col layer */
         int pos = 0;
         t5[pos++] = 'H';
         t5[pos++] = ':';
@@ -392,6 +392,22 @@ static void prof_sample_and_draw(uint8_t *fb) {
             uint16_t u = amb_get_underruns();
             for (int d = 4; d >= 0; d--) { t5[pos + d] = '0' + (u % 10); u /= 10; }
             pos += 5;
+        }
+        /* E: eye height above the floor (SHARED_UC->eye_h, 128 = standing,
+         * 40 = fully crouched, anything between = mid-ease).
+         *
+         * X/Y/A alone do not pin down a screenshot: eye height is exactly what
+         * changes between a standing and a crouching shot, and without it a
+         * reported render bug cannot be reproduced on the host — it has to be
+         * guessed at from pixel positions in a photo, which is unreliable
+         * enough to have sent this desk investigation down two dead ends.
+         * X/Y/A + E is a replayable camera. */
+        t5[pos++] = ' ';
+        t5[pos++] = 'E'; t5[pos++] = ':';
+        {
+            uint16_t e = SHARED_UC->eye_h;
+            for (int d = 2; d >= 0; d--) { t5[pos + d] = '0' + (e % 10); e /= 10; }
+            pos += 3;
         }
         t5[pos] = 0;
         HwMdPuts(t5, HUD_TILE_COLOR, 0, 23);   /* H + TX, GENESIS layer */
@@ -882,8 +898,21 @@ static void asset_viewer_screen(void) {
         if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
         if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
         if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
-        int mesh_shown = (sel == 3 && variant < 2);
-        if (pressed & SEGA_CTRL_A) sel = (sel + 1) % raycast_asset_count();
+        /* Assets that own real 3D geometry: the chair (hand-authored boxes +
+         * a baked hero mesh) and the DESK (imported GLB -> 3 boxes via
+         * tools/bake_boxes.py). Everything else is sprite-only. */
+        int model_id = (sel == CHAIR_ASSET_KIND) ? MODEL_CHAIR
+                     : (sel == DESK_ASSET_KIND)  ? MODEL_DESK : -1;
+        int mesh_shown = (model_id >= 0 && variant < 2);
+        if (pressed & SEGA_CTRL_A) {
+            /* sprite_defs[] is kind-indexed and sparse — step over the null
+             * padding rows or the viewer lands on an empty asset. */
+            int n = raycast_asset_count();
+            for (int t = 0; t < n; t++) {
+                sel = (sel + 1) % n;
+                if (raycast_asset_valid(sel)) break;
+            }
+        }
         if (pressed & SEGA_CTRL_B) {
             if (mesh_shown) zoom = (zoom >= 5) ? 2 : zoom + 1;
         }
@@ -906,7 +935,7 @@ static void asset_viewer_screen(void) {
             for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
         }
         if (mesh_shown)
-            raycast_model_view(fb, rotY, rotX, 60 + zoom * 22, variant, wire);
+            raycast_model_view(fb, rotY, rotX, 60 + zoom * 22, variant, wire, model_id);
         else
             raycast_asset_preview(fb, sel, rotY, adist);
 
@@ -941,11 +970,30 @@ static void asset_viewer_screen(void) {
         }
         line[p]=0;
         font_draw_string(fb, 8, 36, line, 49);
-        if (sel == 3) {
-            static const char *const vnames[3] = { "MESH", "GAME", "SPRITE" };
-            font_draw_string(fb, 8, 50, vnames[variant], 49);
+        if (model_id >= 0) {
+            /* An imported model has no hero tri-mesh, so variants 0/1 both show
+             * its boxes — label them BOXES rather than lying about a MESH. */
+            static const char *const vnames[3]  = { "MESH",  "GAME", "SPRITE" };
+            static const char *const vimport[3] = { "BOXES", "BOXES", "SPRITE" };
+            const char *const *vn = (model_id == MODEL_CHAIR) ? vnames : vimport;
+            font_draw_string(fb, 8, 50, vn[variant], 49);
             if (variant < 2)
                 font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", 49);
+        }
+        /* SPRITE view of a directional asset: report which baked frame the
+         * bearing picker landed on, so rotating can be checked to reach every
+         * one of them rather than assumed to. */
+        if (!mesh_shown) {
+            int nv = 0, dv = raycast_asset_dir_view(sel, rotY, &nv);
+            if (nv > 0) {
+                char t[16]; int q = 0;
+                t[q++]='V'; t[q++]=':';
+                t[q++]=(char)('0' + (dv + 1) / 10); t[q++]=(char)('0' + (dv + 1) % 10);
+                t[q++]='/';
+                t[q++]=(char)('0' + nv / 10); t[q++]=(char)('0' + nv % 10);
+                t[q]=0;
+                font_draw_string(fb, 8, 50, t, 49);
+            }
         }
         font_draw_string(fb, 8, SCREEN_H - 24, "DPAD ROTATE  A ASSET  B ZOOM  C RESET", 49);
         font_draw_string(fb, 8, SCREEN_H - 12, "X VARIANT  Z WIRE  MODE+START BACK", 49);

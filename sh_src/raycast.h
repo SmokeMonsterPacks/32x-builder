@@ -129,11 +129,30 @@ void        raycast_asset_dims(int sel, int *w, int *h);
 /* Sprite assets preview as a WORLD QUAD (the neanderthal's tex_tri path):
  * yaw spins it, dist is continuous — smooth scaling via the real rasterizer. */
 void        raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist);
-/* Live 3D mesh viewer: rotate (rotY/rotX 0..255) + project + flat-fill a chair
- * mesh into fb at zoom_px screen-pixels per world unit. variant 0 = the hero
- * GLB mesh, 1 = the in-game 7-box model (same scale, honest comparison).
- * Caller clears the background. */
-void        raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire);
+/* Live 3D mesh viewer: rotate (rotY/rotX 0..255) + project + flat-fill a model
+ * into fb at zoom_px screen-pixels per world unit. variant 0 = the hero GLB
+ * mesh, 1 = the in-game box model (same scale, so the comparison is exact).
+ * `model` is a MODEL_* id; imported models have boxes only, so they ignore
+ * variant and always draw boxes. Caller clears the background. */
+#define MODEL_CHAIR 0
+#define MODEL_DESK  1
+/* sprite_defs[] is indexed BY KIND and is sparse — retired kinds leave null
+ * padding rows. Must match registry.json assets.sprites[].kind. */
+/* The ONLY topple-able asset. Everything else is furniture or scenery and
+ * stays put: the topple pipeline is billboard/flat-bitmap only, so a fallen
+ * box model cannot even render, and a toppled object is deliberately
+ * walk-through -- which is how the desk was losing its collision. A whitelist
+ * on purpose, so a future imported billboard does not inherit toppling. */
+#define NEANDER_ASSET_KIND 2
+#define CHAIR_ASSET_KIND 3
+#define DESK_ASSET_KIND  5
+/* 0 for a padding row (no texture): the viewer skips these when cycling. */
+int         raycast_asset_valid(int sel);
+/* Directional billboard set: which baked view `yaw` resolves to, and how many
+ * views exist. -1 / *nviews = 0 when the asset has no set. */
+int         raycast_asset_dir_view(int sel, uint8_t yaw, int *nviews);
+void        raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
+                               int model);
 void player_update(uint16_t pad);
 /* 1 when the player has stepped into the open EXIT door — fire the procgen portal. */
 int  raycast_door_portal_check(void);

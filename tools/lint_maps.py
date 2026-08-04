@@ -165,6 +165,31 @@ def lint_model(m, base, folder, reg, seen_names, errs):
           "billboards and only the nearest 3 render true-3D — the cap now "
           "tracks the engine's standup table, not per-chair render cost)"
           % (n_chairs, lim["max_chairs"]))
+    # Desks get their own budget alongside chairs. A desk is CHEAPER to draw than
+    # a chair (3 boxes / 18 faces vs 9 / 54) but it is physically much bigger, so
+    # the cost that matters is screen fill, and its directional billboard set is
+    # the widest asset in ROM — it alone eats 3280 of the 4096-byte shared decode
+    # scratch. The cap is deliberately below what the frame could take so the
+    # budget stays: 8 desks + 21 chairs + 3 neanderthals = 32, leaving 4 of
+    # max_standups 36 spare for the next imported asset.
+    n_desks = sum(1 for d in m["decals"] if d.get("kind") == "desk")
+    if "max_desks" in lim and n_desks > lim["max_desks"]:
+        e("%d desks exceed max_desks %d (desks share the engine's %d-slot "
+          "standup table with chairs and neanderthals; the budget leaves 4 "
+          "slots spare for the next imported asset)"
+          % (n_desks, lim["max_desks"], lim.get("max_standups", 36)))
+    # EVERY free-standing object shares one engine array (raycast.c MAX_STANDUPS),
+    # and the loader fills it in decal order then silently drops the rest. The
+    # testbed lost all 7 of its desks that way: 3 neanderthals + 21 chairs filled
+    # the old 24 slots exactly, so the tail vanished with no error anywhere. Count
+    # the standalone kinds against the engine cap, not just chairs.
+    standalone_ids = {k["id"] for k in reg["decals"]["kinds"] if k.get("standalone")}
+    n_standup = sum(1 for d in m["decals"] if d.get("kind") in standalone_ids)
+    if "max_standups" in lim and n_standup > lim["max_standups"]:
+        e("%d free-standing objects exceed max_standups %d — the engine's "
+          "standup table is a hard cap and the loader DROPS the overflow "
+          "silently (raise MAX_STANDUPS in raycast.c and this limit together)"
+          % (n_standup, lim["max_standups"]))
     edge_total = sum(int(abs(p["x2"] - p["x1"]) + abs(p["y2"] - p["y1"]))
                      for p in m["partitions"])
     # A void exit is a MISSING WALL cell on the border: an opening you walk out

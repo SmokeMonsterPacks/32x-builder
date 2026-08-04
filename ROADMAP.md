@@ -442,6 +442,36 @@ auto-sizes to any `--height`.
 
 ## Tools / infra
 
+### GLB import polish — make an imported model "just work" end to end
+The desk was the first GLB import (build-205). The pipeline ships, but four
+things still need a human to notice them, and each one bit during that import.
+
+- **Accurate sizing on rebake.** `world_hw` is hand-entered in registry.json and
+  was simply wrong for the desk: 0.310, copied from `world_h` by the standee
+  pipeline, when the model measures 0.333. The bakers should emit measured world
+  dimensions, and lint should FAIL when registry disagrees with the baked model
+  rather than letting the editor quietly draw the wrong size.
+- **One ramp per asset across the LOD swap.** The near 3D model rides
+  `CHAIR_BASE` (4-deep shared wood ramp) while the far billboard fogs into the
+  asset's own `COMM_BASE` block (7 steps, its own median-cut palette). Both are
+  fogged, so nothing floats bright in the distance, but they are quantized
+  differently out of different palettes, so the swap has no reason to be
+  colour-continuous. The chair dodges this by being special-cased into
+  CHAIR_BASE in BOTH paths — an imported asset should get that for free.
+- **Editor previews box models as flat billboards.** The walk preview hardcodes
+  the chair's box list (`CHAIR_BOXES`/`CHAIR_H` in raycast.js) and draws
+  everything else as a standee, so the editor and the game disagree about what
+  a desk looks like.
+- **`box_model` flag set by the importer.** registry decals.kinds[].box_model
+  exists now and drives preview scale; the import tool should set it so render
+  path and scale follow the asset with no hand edits.
+
+Related trap worth keeping: `drawSprite` in the editor takes FULL width, but the
+caller passed `world_hw` (a half-extent), so every generic sprite previewed at
+exactly half width for as long as that path has existed. The neanderthal hid it
+by hardcoding already-full dimensions.
+
+
 ### `make deploy` to MiSTer
 ✅ done — auto-scp's the .32x to `root@mister.office.local`.
 

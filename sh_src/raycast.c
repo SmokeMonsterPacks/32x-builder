@@ -210,7 +210,9 @@ uint8_t world_map[MAP_H][MAP_W];
 #include "comm_pal.h"     /* community CRAM arena (generated) */
 #include "chair3d.h"
 #include "chair_model.h"    /* baked GLB tri-mesh for the live 3D asset viewer */
+#include "desk3d.h"         /* tools/bake_boxes.py output — imported GLB as boxes */
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
+#include "desk_dir_tex.h"      /* same, for the imported desk (tools/bake_dir_sprites.py) */
 #include "chair_shadow_tex.h"  /* plan-silhouette floor-shadow stencils, feet-anchored */
 
 
@@ -361,7 +363,14 @@ typedef struct {
  * which only draws things pinned to a wall plane and never collides. So maps
  * showed a cutout nobody placed and ignored the ones they did. Now populated
  * per-map by the loaders, like lights. */
-#define MAX_STANDUPS 24
+/* Free-standing objects a map may spawn. This is a HARD cap the loader
+ * silently clips against (first-come by decal order), so a map whose standalone
+ * decals exceed it loses the tail — the testbed's 7 desks vanished behind 3
+ * neanderthals + 21 chairs at the old 24. tools/lint_maps.py enforces the same
+ * number via registry limits.max_standups so that failure is caught at build
+ * time now, not by squinting at the map. Costs ~10 B of .bss and ~14 B of
+ * render stack per slot (order[]/d2[] are stack arrays in the hot path). */
+#define MAX_STANDUPS 36
 static standup_t standups[MAX_STANDUPS];
 static int       num_standups = 0;
 /* The fixed map's original cutout, installed by raycast_load_fixed only. */
@@ -2178,6 +2187,12 @@ static int cell_passable(int x, int y) {
 #define STANDUP_HALF_WIDTH FX(0.08)   /* slim: was 0.20 (+0.25 player radius = 0.9-wide
                                        * blocker, filled a corridor). A person's core,
                                        * not their shoulders — bump face-on, slip the edge. */
+/* Box models are declared further down (they need cbox_t + the model headers);
+ * collision needs them here. */
+typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; } boxmodel_t;
+static const boxmodel_t *boxmodel_for_kind(int kind);
+static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
+
 /* Index of the solid cutout containing (px,py), or -1. */
 static int standup_blocker(fx_t px, fx_t py) {
     for (int i = 0; i < NUM_STANDUPS; i++) {
@@ -2191,6 +2206,24 @@ static int standup_blocker(fx_t px, fx_t py) {
             const fx_t m = FX(0.20);
             fx_t cdx = px - standups[i].x, cdy = py - standups[i].y;
             if (cdx > -m && cdx < m && cdy > -m && cdy < m) return i;
+            continue;
+        }
+        if (boxmodel_for_kind(standups[i].kind)) {
+            /* Any OTHER box model blocks over its real footprint. Without this
+             * an imported model inherited the flat-cutout slab below, so you
+             * could walk into a desk that is nearly a cell wide — and standing
+             * inside it put vertices behind the near clip, which drops whole
+             * faces and makes the model look hollow from the inside out.
+             * Footprint comes from the box list itself, so it can never drift
+             * from the geometry being drawn. */
+            fx_t hx, hz;
+            boxmodel_footprint(standups[i].kind, &hx, &hz);
+            /* facing: E0 S64 W128 N192 — N/S facers present width along X. */
+            int ns = (standups[i].facing_angle == 64 || standups[i].facing_angle == 192);
+            fx_t mx = (ns ? hx : hz) + FX(0.10);
+            fx_t my = (ns ? hz : hx) + FX(0.10);
+            fx_t cdx = px - standups[i].x, cdy = py - standups[i].y;
+            if (cdx > -mx && cdx < mx && cdy > -my && cdy < my) return i;
             continue;
         }
         /* facing: E0 S64 W128 N192 — N/S facers present their face along Y. */
@@ -2499,7 +2532,13 @@ void player_update(uint16_t pad) {
             int64_t bestd2 = (int64_t)FX(1.3) * FX(1.3);
             int pfxc = FX_INT(player.x), pfyc = FX_INT(player.y);
             for (int si = 0; si < NUM_STANDUPS; si++) {
-                if (standups[si].kind == CHAIR_SPRITE_KIND || standup_down[si]) continue;
+                /* BOX MODELS are solid furniture: they block and never topple.
+                 * Gating on the chair alone let the desk be shoved over, and a
+                 * toppled object is deliberately walk-through -- so the desk lost
+                 * its collision the moment you pushed into it. The topple pipeline
+                 * is billboard/flat-bitmap only anyway, so a fallen desk could not
+                 * render either. */
+                if (standups[si].kind != NEANDER_ASSET_KIND || standup_down[si]) continue;
                 /* Don't topple THROUGH a partition: if a flagged slab edge sits
                  * between the player's cell and the cutout's, you can't actually
                  * reach it (the same pedge_w/pedge_n test the movement collision
@@ -2519,9 +2558,11 @@ void player_update(uint16_t pad) {
                 if (d2 < bestd2) { bestd2 = d2; shove = si; }
             }
         }
-        if (shove >= 0 && standups[shove].kind == CHAIR_SPRITE_KIND) {
-            /* The true-3D chair is solid furniture — it blocks but doesn't
-             * topple (the topple pipeline is billboard/flat-bitmap only). */
+        if (shove >= 0 && standups[shove].kind != NEANDER_ASSET_KIND) {
+            /* Only the neanderthal topples. Everything else blocks and stays
+             * put. This gate was chair-only, so the desk could be shoved over —
+             * and a toppled object is walk-through, which is exactly how the
+             * desk lost its collision in procgen. */
         } else if (shove >= 0) {
             if (a_trigger || (standup_armed[shove] && fresh_push)) {
                 a_latch = 0;                                   /* consume: one tap, one topple */
@@ -2937,6 +2978,150 @@ static void chair_tri_fill(int x0, int y0, int x1, int y1, int x2, int y2,
     }
 }
 
+/* ---- Directional billboard sets -------------------------------------
+ * A model baked by tools/bake_dir_sprites.py ships N views around the half
+ * circle plus sector tables that map a bearing to (view, mirror). The chair
+ * and the imported desk emit structurally identical tables under different
+ * prefixes, so wrap them in one descriptor and the picker stops caring which
+ * asset it is drawing. Adding a set is one row here plus the include. */
+typedef struct { const uint8_t *tex; uint8_t w; } dirview_t;
+typedef struct {
+    const dirview_t *views;
+    const uint8_t   *sect_v, *sect_view, *sect_mirror;
+    uint16_t         nsect, h, wmax;
+} dirset_t;
+
+static const dirset_t dirsets[] = {
+    { (const dirview_t *)chair_dir_views, chair_dir_sect_v, chair_dir_sect_view,
+      chair_dir_sect_mirror, CHAIR_DIR_SECTORS, CHAIR_DIR_H, CHAIR_DIR_WMAX },
+    { (const dirview_t *)desk_dir_views,  desk_dir_sect_v,  desk_dir_sect_view,
+      desk_dir_sect_mirror,  DESK_DIR_SECTORS,  DESK_DIR_H,  DESK_DIR_WMAX  },
+};
+static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND };
+#define DIRSET_COUNT (int)(sizeof dirsets / sizeof dirsets[0])
+
+/* Decode scratch is shared, so it must fit the WIDEST view of ANY set — the
+ * desk's 114 dwarfs the chair's 40, and sizing off the chair would have run
+ * the desk's decode off the end of the buffer. */
+#define DIRSET_PV_A (CHAIR_DIR_WMAX * CHAIR_DIR_H)
+#define DIRSET_PV_B (DESK_DIR_WMAX  * DESK_DIR_H)
+#define DIRSET_PV_MAX (DIRSET_PV_A > DIRSET_PV_B ? DIRSET_PV_A : DIRSET_PV_B)
+/* This scratch is .bss and RAM here is nearly full — the desk's first bake at
+ * --height 56 made it 6,384 B and overflowed the ram region by 2,336. Re-baking
+ * the set shorter is the fix (a wide, short object needs rows, not height), so
+ * fail HERE with a number rather than in the linker with a region name. */
+_Static_assert(DIRSET_PV_MAX <= 4096,
+               "directional decode scratch too big — re-bake the set at a "
+               "smaller --height (see tools/bake_dir_sprites.py)");
+
+static const dirset_t *dirset_for_kind(int kind) {
+    for (int i = 0; i < DIRSET_COUNT; i++)
+        if (dirset_kind[i] == kind) return &dirsets[i];
+    return 0;
+}
+
+/* ---- Box models -----------------------------------------------------
+ * A kind that owns real 3D geometry: the hand-authored chair and anything
+ * imported through tools/bake_boxes.py. The render path keys off THIS rather
+ * than a hardcoded CHAIR_SPRITE_KIND test, so a new import draws in true 3D
+ * with no renderer edits. World height comes from sprite_defs[kind].world_h,
+ * so the box model and its billboard can never disagree about scale. */
+/* Largest box count of any model in ROM. Sizes both the viewer's bx_* mesh
+ * arrays and draw_chair_3d's per-call face buffer, so EVERY model that can
+ * reach either path must be counted here — otherwise an oversized import runs
+ * off the end of a stack array in the hot render loop. */
+#define BX_MAXBOXES CHAIR_NBOXES
+_Static_assert(DESK_NBOXES <= BX_MAXBOXES,
+               "imported box model exceeds the box-render arrays — raise BX_MAXBOXES");
+
+static const boxmodel_t boxmodels[] = {
+    { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND },
+    { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND  },
+};
+#define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
+
+static const boxmodel_t *boxmodel_for_kind(int kind) {
+    for (int i = 0; i < BOXMODEL_COUNT; i++)
+        if (boxmodels[i].kind == kind) return &boxmodels[i];
+    return 0;
+}
+
+/* World-space half-extents of a box model's footprint, straight from its box
+ * list (model units are 8.8 with height 1.0, scaled by the sprite's world_h).
+ * Collision reads this so the blocker always matches the geometry drawn. */
+static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz) {
+    *hx = *hz = 0;
+    const boxmodel_t *bm = boxmodel_for_kind(kind);
+    if (!bm) return;
+    int x0 = 32767, x1 = -32768, z0 = 32767, z1 = -32768;
+    for (int b = 0; b < bm->nboxes; b++) {
+        const cbox_t *q = &bm->boxes[b];
+        if (q->x0 < x0) x0 = q->x0;   if (q->x1 > x1) x1 = q->x1;
+        if (q->z0 < z0) z0 = q->z0;   if (q->z1 > z1) z1 = q->z1;
+    }
+    fx_t wh = sprite_defs[kind].world_h;
+    *hx = (fx_t)((((int32_t)(x1 - x0) / 2) * wh) >> 8);
+    *hz = (fx_t)((((int32_t)(z1 - z0) / 2) * wh) >> 8);
+}
+
+/* BOX PAINT ORDER, exact.
+ *
+ * Two DISJOINT axis-aligned boxes always have an axis on which their intervals
+ * do not overlap. That gap is a separating plane, and the box on the same side
+ * of it as the eye is unambiguously the nearer one — paint it last. No
+ * centroid, no tie, and it works in HEIGHT, which is the whole point:
+ * faces[].depth is horizontal distance and never sees height at all.
+ *
+ * That blind spot is the desk. Its tabletop spans the entire footprint, so its
+ * centroid depth reads "middle of the desk" — the same as the pedestals'. From
+ * a crouch the tabletop is ABOVE the eye and the pedestals are BESIDE it, but a
+ * horizontal-only key cannot tell those apart, so the tabletop's underside won
+ * the sort and painted over the pedestal faces you should see through the knee
+ * hole. Pixel diff against a ray-cast of the same camera: 944 wrong pixels on
+ * the centroid order, 282 on this one, and the entire tabletop-over-pedestal
+ * class is gone (the rest is single-pixel silhouette edging in the test
+ * rasteriser). The chair never showed it because none of its boxes spans
+ * another the way the tabletop spans both pedestals.
+ *
+ * Faces WITHIN a box need no sort at all: a convex box's visible faces meet
+ * only at edges and can never overlap. Verified pixel-identical with and
+ * without, which is what pays for this function's space in .ramtext.
+ *
+ * e[] is the eye in model units (x, y=height above floor, z). */
+static int box_nearer(const cbox_t *mb, int ia, int ib, const int32_t *e) {
+    const cbox_t *A = &mb[ia], *B = &mb[ib];
+    const int16_t alo[3] = { A->x0, A->y0, A->z0 }, ahi[3] = { A->x1, A->y1, A->z1 };
+    const int16_t blo[3] = { B->x0, B->y0, B->z0 }, bhi[3] = { B->x1, B->y1, B->z1 };
+    for (int k = 0; k < 3; k++) {
+        if (ahi[k] <= blo[k]) return (e[k] < (int32_t)ahi[k]) ?  1 : -1;
+        if (bhi[k] <= alo[k]) return (e[k] < (int32_t)bhi[k]) ? -1 :  1;
+    }
+    return 0;                    /* touching on every axis: order is a no-op */
+}
+
+__attribute__((noinline))
+static void boxmodel_order(const cbox_t *mb, int n, fx_t eox, fx_t eoy,
+                           fx_t fc, fx_t fs, fx_t world_h, uint8_t eye_h,
+                           uint8_t *ord) {
+    /* Eye into model space: un-rotate about the object centre by the facing
+     * (inverse of the per-vertex rx/rz rotation), then scale to model units.
+     * Height comes from eye_h, the same value that drives `focal`. */
+    fx_t inv_wh = fx_div_hw(FX_ONE, world_h);
+    int32_t e[3];
+    e[0] = FX_MUL(FX_MUL(eox, fc) - FX_MUL(eoy, fs), inv_wh) >> 8;
+    e[1] = FX_MUL((fx_t)eye_h << 8, inv_wh) >> 8;
+    e[2] = FX_MUL(FX_MUL(eox, fs) + FX_MUL(eoy, fc), inv_wh) >> 8;
+    for (int i = 0; i < n; i++) ord[i] = (uint8_t)i;
+    for (int i = 1; i < n; i++) {              /* insertion sort, far -> near */
+        uint8_t v = ord[i];
+        int j = i;
+        while (j > 0 && box_nearer(mb, ord[j - 1], v, e) > 0) {
+            ord[j] = ord[j - 1]; j--;
+        }
+        ord[j] = v;
+    }
+}
+
 /* Forward decl: tex_tri is defined just below draw_chair_3d, but the
  * MODE+A textured-chair A/B path calls it from inside the chair face loop. */
 static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
@@ -2947,7 +3132,8 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
 
 static void draw_chair_3d(int i, int col_start, int col_end,
         fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
-        fx_t inv_det, int horizon_y, uint8_t *fb) {
+        fx_t inv_det, int horizon_y, uint8_t *fb,
+        const cbox_t *mboxes, int mnboxes, fx_t world_h) {
     fx_t cx = standups[i].x, cy = standups[i].y;
     uint8_t facing = standups[i].facing_angle;
     /* Rotate so the model's FRONT (-z, the open seat side) points along the
@@ -2971,20 +3157,28 @@ static void draw_chair_3d(int i, int col_start, int col_end,
      * ~864 B off the deep render stack (the high-water probe found the Master
      * OVER budget in crawlspace scenes). */
     typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
-    cface_t faces[CHAIR_NBOXES * 6];
+    cface_t faces[BX_MAXBOXES * 6];
     int nf = 0;
 
-    for (int b = 0; b < CHAIR_NBOXES; b++) {
-        const cbox_t *bx = &chair_boxes[b];
+    /* Exact far->near box order (separating axis, height included). Faces are
+     * then appended box by box and NOT re-sorted: a convex box's visible faces
+     * cannot overlap each other. See boxmodel_order. */
+    uint8_t border[BX_MAXBOXES];
+    boxmodel_order(mboxes, mnboxes, px - cx, py - cy, fc, fs, world_h,
+                   SHARED_UC->eye_h, border);
+
+    for (int bo = 0; bo < mnboxes; bo++) {
+        int b = border[bo];
+        const cbox_t *bx = &mboxes[b];
         int csx[8], csy[8], cclip[8];
         fx_t cdep[8];
         for (int v = 0; v < 8; v++) {
             int32_t mx = (v & 1) ? bx->x1 : bx->x0;    /* 8.8 model */
             int32_t my = (v & 2) ? bx->y1 : bx->y0;
             int32_t mz = (v & 4) ? bx->z1 : bx->z0;
-            fx_t wx = (fx_t)((mx * CHAIR_WORLD_H_FX) >> 8);   /* model -> world fx */
-            fx_t wy = (fx_t)((my * CHAIR_WORLD_H_FX) >> 8);   /* height above floor */
-            fx_t wz = (fx_t)((mz * CHAIR_WORLD_H_FX) >> 8);
+            fx_t wx = (fx_t)((mx * world_h) >> 8);            /* model -> world fx */
+            fx_t wy = (fx_t)((my * world_h) >> 8);            /* height above floor */
+            fx_t wz = (fx_t)((mz * world_h) >> 8);
             fx_t rx = FX_MUL(wx, fc) + FX_MUL(wz, fs);        /* rotate by facing */
             fx_t rz = -FX_MUL(wx, fs) + FX_MUL(wz, fc);
             fx_t ddx = (cx + rx) - px, ddy = (cy + rz) - py;
@@ -3013,7 +3207,12 @@ static void draw_chair_3d(int i, int col_start, int col_end,
              * faces — every box rendered inside-out. The silhouette was
              * identical (closed box), but each shade came from the OPPOSITE
              * face: seat top wore the bottom's darkest shade in-game while
-             * the (cull-free) viewer showed it lit. */
+             * the (cull-free) viewer showed it lit.
+             *
+             * Re-verified against a model-space plane-side test (is the eye
+             * outside this face's plane) over 9216 poses of the real desk:
+             * agreement on every single face, zero disagreements. This cull is
+             * NOT the desk bug — that is the seam test on the next line. */
             if (ax * by - ay * bx2 >= 0) continue;
             faces[nf].depth = (cdep[vi[0]]+cdep[vi[1]]+cdep[vi[2]]+cdep[vi[3]]) >> 2;
             faces[nf].shade = chair_face_shade(f, fc, fs);
@@ -3021,11 +3220,11 @@ static void draw_chair_3d(int i, int col_start, int col_end,
             nf++;
         }
     }
-    for (int a = 1; a < nf; a++)                              /* painter far->near */
-        for (int j = a; j > 0 && faces[j].depth > faces[j-1].depth; j--) {
-            cface_t tq = faces[j];
-            faces[j] = faces[j-1]; faces[j-1] = tq;
-        }
+    /* No face sort here on purpose. faces[] is already in exact paint order:
+     * boxes far->near from boxmodel_order, and faces within a box in any order
+     * because a convex box's visible faces never overlap. The centroid-depth
+     * sort this replaces was the desk bug — it ranked a full-footprint tabletop
+     * against the pedestals it spans using horizontal distance alone. */
     /* Occlusion pre-check: if the chair's FARTHEST face is nearer than every
      * wall across its column span, no pixel can be occluded — the fills skip
      * the per-pixel WALL_DIST read entirely (the common open-room case). */
@@ -3421,6 +3620,66 @@ static void draw_chair_shadow(int i, int col_start, int col_end,
             csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
 }
 
+/* Generic box-model floor shadow: the model's OWN footprint, taken from its box
+ * list, rotated by its facing and slid a little along the cast direction.
+ *
+ * The chair has a baked plan-silhouette; nothing else does, and stamping the
+ * chair's stencil under a desk would put a chair-shaped shadow on the floor. A
+ * footprint quad needs no bake, no ROM, and no per-asset art, so every future
+ * GLB import gets a shadow of the right SHAPE for free — it just can't show
+ * detail between the legs. Cheap enough to be unconditional: 4 corners, two
+ * dithered triangles.
+ *
+ * noinline and not RAMTEXT on purpose — draw_standups is RAMTEXT and this is
+ * once-per-object setup, not per-pixel work. */
+__attribute__((noinline))
+static void draw_boxmodel_shadow(int i, int col_start, int col_end,
+        fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
+        fx_t inv_det, int horizon_y, uint8_t *fb) {
+    fx_t bx = standups[i].x, by = standups[i].y;
+    int focal = (SCREEN_H * (int)SHARED_UC->eye_h) >> 8;
+    uint8_t fa = standups[i].facing_angle;
+    fx_t fc = COS_FX((uint8_t)(fa + 64)), fs = -SIN_FX((uint8_t)(fa + 64));
+    fx_t hx, hz;
+    boxmodel_footprint(standups[i].kind, &hx, &hz);
+    /* Same cast direction and flicker seed the chair shadow uses, so a desk and
+     * a chair under one fixture agree on where the light is and pulse together. */
+    fx_t sdx, sdy; int dom = -1;
+    light_field_dir(bx, by, -COS_FX(fa), -SIN_FX(fa), &sdx, &sdy, &dom);
+    uint8_t shadow_c = STANDUP_SHADOW_COLOR;
+    if ((SHARED_UC->lighting_flags & LIGHTING_FLICKER) && dom >= 0) {
+        uint32_t r = SHARED_UC->frame_count * 1103515245u + (uint32_t)dom * 12347u;
+        int roll = (int)((r >> 24) & 0x1F);
+        if      (roll < 2) shadow_c = (uint8_t)(STANDUP_SHADOW_COLOR - 3);
+        else if (roll < 5) shadow_c = (uint8_t)(STANDUP_SHADOW_COLOR - 1);
+        if (shadow_c < FLOOR_BASE) shadow_c = FLOOR_BASE;
+    }
+    static const int8_t SGN[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+    const fx_t OFF = FX(0.05);                 /* slide off the contact line */
+    int csx[4], csy[4]; fx_t cdep[4];
+    for (int c = 0; c < 4; c++) {
+        fx_t mx = SGN[c][0] > 0 ? hx : -hx;
+        fx_t mz = SGN[c][1] > 0 ? hz : -hz;
+        fx_t rx =  FX_MUL(mx, fc) + FX_MUL(mz, fs);   /* rotate by facing */
+        fx_t rz = -FX_MUL(mx, fs) + FX_MUL(mz, fc);
+        fx_t wx = bx + rx + FX_MUL(sdx, OFF);
+        fx_t wy = by + rz + FX_MUL(sdy, OFF);
+        fx_t ddx = wx - px, ddy = wy - py;
+        fx_t depth = FX_MUL(inv_det, -FX_MUL(planeY, ddx) + FX_MUL(planeX, ddy));
+        if (depth < FX(0.25)) depth = FX(0.25);
+        cdep[c] = depth;
+        fx_t inv = fx_div_hw(FX_ONE, depth);
+        fx_t lat = FX_MUL(inv_det, FX_MUL(dirY, ddx) - FX_MUL(dirX, ddy));
+        csx[c] = (SCREEN_W >> 1)
+               + (int)(((int32_t)(SCREEN_W >> 1) * FX_MUL(lat, inv)) >> FX_SHIFT);
+        csy[c] = horizon_y + (int)(((int64_t)focal * inv) >> FX_SHIFT);   /* floor */
+    }
+    chair_tri_fill(csx[0],csy[0], csx[1],csy[1], csx[2],csy[2],
+                   shadow_c, cdep[0], 1, 1, col_start, col_end, fb);
+    chair_tri_fill(csx[0],csy[0], csx[2],csy[2], csx[3],csy[3],
+                   shadow_c, cdep[0], 1, 1, col_start, col_end, fb);
+}
+
 static void draw_standup_shadow(int i, int col_start, int col_end,
         fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
         fx_t inv_det, int horizon_y, uint8_t *fb) {
@@ -3543,7 +3802,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         int seen = 0;
         for (int oi2 = on - 1; oi2 >= 0 && seen < CHAIR_RENDER_MAX; oi2--) {
             int j = order[oi2];
-            if (standups[j].kind != CHAIR_SPRITE_KIND) continue;
+            if (!boxmodel_for_kind(standups[j].kind)) continue;
             if (d2[j] > CHAIR_CULL_D2) continue;
             chair_render[j] = 1; seen++;
         }
@@ -3560,7 +3819,10 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         int seen = 0;
         for (int oi2 = on - 1; oi2 >= 0 && seen < CHAIR_SHADOW_MAX; oi2--) {
             int j = order[oi2];
-            if (standups[j].kind != CHAIR_SPRITE_KIND) continue;
+            /* Any BOX MODEL casts. The chair uses its baked silhouette; every
+             * other import gets the generic footprint shadow, which is derived
+             * from its own box list and so can never be the wrong shape. */
+            if (!boxmodel_for_kind(standups[j].kind)) continue;
             if (d2[j] >= CHAIR_SHADOW_D2) continue;
             chair_shadow_ok[j] = 1; seen++;
         }
@@ -3574,7 +3836,8 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
     uint16_t chair_ticks = 0;
     for (int oi = 0; oi < on; oi++) {
         int i = order[oi];
-        if (standups[i].kind == CHAIR_SPRITE_KIND) {   /* near = true 3D, far = billboard */
+        const boxmodel_t *bm = boxmodel_for_kind(standups[i].kind);
+        if (bm) {                                     /* near = true 3D, far = billboard */
             /* Floor shadow FIRST so the chair overpaints its near edge — cast
              * in BOTH tiers from the same fixed 3/4 silhouette, so the shadow
              * is identical across the 4-cell LOD swap (no shadow pop). Gated:
@@ -3603,15 +3866,24 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 if (stY >= FX(0.2)) {
                     int sX = (SCREEN_W >> 1)
                            + (int)(((int32_t)(SCREEN_W >> 1) * FX_DIV(stX, stY)) >> FX_SHIFT);
-                    if (sX > -(SCREEN_W >> 1) && sX < SCREEN_W + (SCREEN_W >> 1))
-                        draw_chair_shadow(i, col_start, col_end, px, py, dirX, dirY,
-                                          planeX, planeY, inv_det, horizon_y, fb);
+                    if (sX > -(SCREEN_W >> 1) && sX < SCREEN_W + (SCREEN_W >> 1)) {
+                        /* Chair has a baked silhouette; every other box model
+                         * casts its own footprint (see draw_boxmodel_shadow). */
+                        if (standups[i].kind == CHAIR_SPRITE_KIND)
+                            draw_chair_shadow(i, col_start, col_end, px, py, dirX, dirY,
+                                              planeX, planeY, inv_det, horizon_y, fb);
+                        else
+                            draw_boxmodel_shadow(i, col_start, col_end, px, py, dirX, dirY,
+                                                 planeX, planeY, inv_det, horizon_y, fb);
+                    }
                 }
             }
             if (chair_render[i]) {
                 uint16_t _cf0 = prof_frt_read();
                 draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
-                              planeX, planeY, inv_det, horizon_y, fb);
+                              planeX, planeY, inv_det, horizon_y, fb,
+                              bm->boxes, bm->nboxes,
+                              sprite_defs[standups[i].kind].world_h);
                 chair_ticks = (uint16_t)(chair_ticks + (prof_frt_read() - _cf0));
                 continue;
             }
@@ -3686,7 +3958,8 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * row, top spriteHeight above. */
         int spriteHeight, spriteWidth;
         int chair_view = -1, mirror = 0;
-        if (standups[i].kind == CHAIR_SPRITE_KIND) {
+        const dirset_t *fds = dirset_for_kind(standups[i].kind);
+        if (fds) {
             /* DIRECTIONAL billboard: pick the baked view whose relative bearing
              * (chair->player direction vs the chair's facing) is nearest, so a
              * far chair HOLDS its parked orientation as you circle it instead of
@@ -3698,20 +3971,22 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
              * and spacing are data, so re-bakes with different pose sets need
              * no engine edits. */
             int best = 0; fx_t bestd = 0; int first = 1;
-            for (int k = 0; k < CHAIR_DIR_SECTORS; k++) {
+            for (int k = 0; k < fds->nsect; k++) {
                 /* +128: sector centers are OPPOSITE the view yaw — a player
                  * standing along the chair's facing (in FRONT of it) must get
                  * the FRONT view (yaw 128), not the back. Verified in sim. */
-                uint8_t a = (uint8_t)(standups[i].facing_angle + 128 + chair_dir_sect_v[k]);
+                uint8_t a = (uint8_t)(standups[i].facing_angle + 128 + fds->sect_v[k]);
                 /* chair->player = -(sx,sy): sx,sy are standup - player above. */
                 fx_t d = FX_MUL(-sx, COS_FX(a)) + FX_MUL(-sy, SIN_FX(a));
                 if (first || d > bestd) { best = k; bestd = d; first = 0; }
             }
-            chair_view = chair_dir_sect_view[best]; mirror = chair_dir_sect_mirror[best];
-            /* CHAIR_WORLD_H_FX tall (matches the near 3D chair), width from the
+            chair_view = fds->sect_view[best]; mirror = fds->sect_mirror[best];
+            /* Height from sprite_defs so the far billboard matches the near 3D
+             * model exactly (the LOD swap must not change size); width from the
              * chosen view's own aspect. */
-            spriteHeight = (int)(((int64_t)SCREEN_H * CHAIR_WORLD_H_FX) / transformY);
-            spriteWidth  = spriteHeight * chair_dir_views[chair_view].w / CHAIR_DIR_H;
+            spriteHeight = (int)(((int64_t)SCREEN_H * sprite_defs[standups[i].kind].world_h)
+                                 / transformY);
+            spriteWidth  = spriteHeight * fds->views[chair_view].w / fds->h;
         } else {
             spriteHeight = (int)((((int32_t)SCREEN_H * 2) << FX_SHIFT) / (transformY * 3));
             spriteWidth  = spriteHeight >> 1;
@@ -3798,10 +4073,10 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * column-major (sequential), tex_w for row-major (strided). */
         const uint8_t *tex;
         int tex_w, tex_h, col_step;
-        if (chair_view >= 0) {            /* directional chair view, row-major */
-            tex      = chair_dir_views[chair_view].tex;
-            tex_w    = chair_dir_views[chair_view].w;
-            tex_h    = CHAIR_DIR_H;
+        if (chair_view >= 0) {            /* directional view (any set), row-major */
+            tex      = fds->views[chair_view].tex;
+            tex_w    = fds->views[chair_view].w;
+            tex_h    = fds->h;
             col_step = tex_w;
         } else if (transformY < FX(3) && sd->tex_hi) {
             tex      = sd->tex_hi;
@@ -3947,10 +4222,37 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
  * they're wired into a scene. Decodes offset sprites as base+(v-1); the door's
  * multi-ramp is approximated the same way (preview only). Lives here because
  * sprite_defs[] and the *_BASE palette macros are in this translation unit. */
+/* Which directional view a given yaw resolves to, and how many the set has —
+ * the viewer HUD reports this so you can confirm every baked frame is
+ * reachable by rotating. Returns 0 when the asset has no directional set. */
+int raycast_asset_dir_view(int sel, uint8_t yaw, int *nviews) {
+    const dirset_t *ds = dirset_for_kind(sel);
+    if (!ds) { if (nviews) *nviews = 0; return -1; }
+    int best = 0; fx_t bestd = 0; int first = 1;
+    for (int k = 0; k < ds->nsect; k++) {
+        uint8_t a = (uint8_t)(yaw + 128 + ds->sect_v[k]);
+        fx_t dd = SIN_FX(a);
+        if (first || dd > bestd) { best = k; bestd = dd; first = 0; }
+    }
+    if (nviews) {
+        int mx = 0;
+        for (int k = 0; k < ds->nsect; k++)
+            if (ds->sect_view[k] > mx) mx = ds->sect_view[k];
+        *nviews = mx + 1;
+    }
+    return ds->sect_view[best];
+}
+
 int raycast_asset_count(void) { return SPRITE_DEF_COUNT; }
 
+int raycast_asset_valid(int sel) {
+    if (sel < 0 || sel >= SPRITE_DEF_COUNT) return 0;
+    return sprite_defs[sel].tex != 0;      /* padding rows carry no texture */
+}
+
 const char *raycast_asset_name(int sel) {
-    static const char *const names[] = { "OUTLET", "DOOR", "NEANDERTHAL", "CHAIR" };
+    static const char *const names[] = { "OUTLET", "DOOR", "NEANDERTHAL", "CHAIR",
+                                         "", "DESK" };
     if (sel < 0 || sel >= (int)(sizeof names / sizeof names[0])) return "ASSET";
     return names[sel];
 }
@@ -4030,26 +4332,27 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
      * game uses (chair facing = yaw, camera fixed in front -> chair->player is a
      * constant, so the dot reduces to sin), decode into a scratch buffer, and
      * render it FLAT (front-facing quad) so only the frame changes. */
-    static uint8_t chair_pv[CHAIR_DIR_WMAX * CHAIR_DIR_H];
+    static uint8_t chair_pv[DIRSET_PV_MAX];
     int chair_flat = 0, chair_mir = 0;
-    if (sel == CHAIR_SPRITE_KIND) {
+    const dirset_t *ds = dirset_for_kind(sel);
+    if (ds) {
         int best = 0; fx_t bestd = 0; int first = 1;
-        for (int k = 0; k < CHAIR_DIR_SECTORS; k++) {
-            uint8_t a = (uint8_t)(yaw + 128 + chair_dir_sect_v[k]);
-            fx_t dd = SIN_FX(a);                     /* chair->player=(0,1): dot=sin(a) */
+        for (int k = 0; k < ds->nsect; k++) {
+            uint8_t a = (uint8_t)(yaw + 128 + ds->sect_v[k]);
+            fx_t dd = SIN_FX(a);                     /* model->player=(0,1): dot=sin(a) */
             if (first || dd > bestd) { best = k; bestd = dd; first = 0; }
         }
-        int view = chair_dir_sect_view[best];
-        chair_mir = chair_dir_sect_mirror[best];
-        const uint8_t *vt = chair_dir_views[view].tex;
-        int vw = chair_dir_views[view].w;
-        for (int yy = 0; yy < CHAIR_DIR_H; yy++)
+        int view = ds->sect_view[best];
+        chair_mir = ds->sect_mirror[best];
+        const uint8_t *vt = ds->views[view].tex;
+        int vw = ds->views[view].w;
+        for (int yy = 0; yy < ds->h; yy++)
             for (int xx = 0; xx < vw; xx++) {
                 uint8_t v = vt[yy * vw + xx];
                 int sh = (int)v - 1; if (sh > 3) sh = 3;
                 chair_pv[yy * vw + xx] = v ? (uint8_t)(CHAIR_BASE + sh) : 0;
             }
-        tex = chair_pv; tw = vw; th = CHAIR_DIR_H; col_major = 0; fbase = 0;
+        tex = chair_pv; tw = vw; th = ds->h; col_major = 0; fbase = 0;
         chair_flat = 1;
     }
     if (dist < FX(0.4)) dist = FX(0.4);
@@ -4122,20 +4425,26 @@ static fx_t     mv_dep[CHAIRM_NTRIS];
  * Same 8.8 y-up model space as chairm_verts (chair height 1.0 = 256), so the
  * two variants render at identical scale and the comparison is honest. Shades
  * follow chair_face_shade's fixed axis mapping (top bright, bottom dark). */
-#define BXV (CHAIR_NBOXES * 8)
-#define BXT (CHAIR_NBOXES * 12)
+/* Sized for the LARGEST box model in ROM. Every model that build_box_mesh can
+ * be handed MUST be counted here — an imported model with more boxes than the
+ * chair silently overflows bx_verts into neighbouring .bss otherwise (caught
+ * exactly that way in the host sim, with a 12-box desk against 9-box arrays).
+ * The static assert makes the next import fail the BUILD instead. */
+#define BXV (BX_MAXBOXES * 8)
+#define BXT (BX_MAXBOXES * 12)
 static int16_t  bx_verts[BXV][3];
 static uint16_t bx_tri[BXT][3];
 static uint8_t  bx_shade[BXT];
-static int      bx_built = 0;
-static void build_box_mesh(void) {
+static int      bx_nv = 0, bx_nt = 0;
+static int      bx_built_for = -1;      /* which model the arrays currently hold */
+static void build_box_mesh(const cbox_t *boxes, int nboxes) {
     /* bx_shade stores the FACE AXIS (0..5), not a shade: the GAME variant is
      * shaded live through chair_face_shade at render time, fed the viewer's
      * own yaw — so spinning the chair sweeps exactly the in-game shades
      * (fixed world light), instead of a static per-axis approximation. */
     int nt = 0;
-    for (int b = 0; b < CHAIR_NBOXES; b++) {
-        const cbox_t *bx = &chair_boxes[b];
+    for (int b = 0; b < nboxes; b++) {
+        const cbox_t *bx = &boxes[b];
         for (int v = 0; v < 8; v++) {
             bx_verts[b*8+v][0] = (int16_t)((v & 1) ? bx->x1 : bx->x0);
             bx_verts[b*8+v][1] = (int16_t)((v & 2) ? bx->y1 : bx->y0);
@@ -4149,7 +4458,8 @@ static void build_box_mesh(void) {
             bx_tri[nt][2]=(uint16_t)(b*8+vi[3]); bx_shade[nt++] = (uint8_t)f;
         }
     }
-    bx_built = 1;
+    bx_nv = nboxes * 8;
+    bx_nt = nt;
 }
 
 /* Clipped Bresenham for the wireframe view — writes are bounds-checked per
@@ -4169,14 +4479,21 @@ static void mv_line(uint8_t *fb, int x0, int y0, int x1, int y1, uint8_t c) {
     }
 }
 
-void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire) {
+void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
+                        int model) {
     const int16_t  (*mverts)[3] = chairm_verts; int nv = CHAIRM_NVERTS;
     const uint16_t (*mtris)[3]  = chairm_tri;   int ntr = CHAIRM_NTRIS;
     const uint8_t   *msh        = chairm_shade;
-    if (variant == 1) {                          /* GAME: the in-game 7-box model */
-        if (!bx_built) build_box_mesh();
-        mverts = (const int16_t(*)[3])bx_verts; nv = BXV;
-        mtris  = (const uint16_t(*)[3])bx_tri;  ntr = BXT;
+    /* An IMPORTED model (bake_boxes.py) ships only a box list — there is no
+     * baked hero tri-mesh for it — so both mesh variants show its boxes. The
+     * chair keeps its MESH/GAME split because it has both. */
+    int use_boxes = (variant == 1) || (model != MODEL_CHAIR);
+    if (use_boxes) {
+        const cbox_t *boxes = chair_boxes; int nb = CHAIR_NBOXES;
+        if (model == MODEL_DESK) { boxes = desk_boxes; nb = DESK_NBOXES; }
+        if (bx_built_for != model) { build_box_mesh(boxes, nb); bx_built_for = model; }
+        mverts = (const int16_t(*)[3])bx_verts; nv = bx_nv;
+        mtris  = (const uint16_t(*)[3])bx_tri;  ntr = bx_nt;
         msh    = bx_shade;
     }
     fx_t cyy = COS_FX(rotY), syy = SIN_FX(rotY);

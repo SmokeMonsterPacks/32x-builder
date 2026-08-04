@@ -214,7 +214,13 @@ def registry_entries(reg, sprite_id, W, H, world_h, pal31, author="",
     noun = "standee" if mount == "billboard" else "wall decal"
     kindent = {
         "id": sprite_id, "kind": kind,
-        "z": (z if mount == "wall" else 0.45), "glyph": "⧉",
+        # A billboard's decal z is its CENTRE height, so it must track the
+        # sprite's own world height — every first-party asset sits at h/2 (door
+        # 0.49 of 0.98, chair 0.19 of 0.375). The old flat 0.45 was the
+        # neanderthal's value hardcoded, which floated any standee shorter than
+        # a person: the 0.31-high desk hovered nearly its own height off the
+        # floor. Wall mounts still take the caller's plate height.
+        "z": (z if mount == "wall" else round(height / 2.0, 4)), "glyph": "⧉",
         "color": "#b8b0a4",
         "label": "%s (community %s)" % (sprite_id.replace("_", " "), noun),
     }

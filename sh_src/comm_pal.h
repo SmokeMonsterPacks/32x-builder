@@ -6,8 +6,11 @@
 
 typedef struct { unsigned char idx, r, g, b; } comm_pal_t;
 static const comm_pal_t comm_pal[] = {
-    { 0, 0, 0, 0 },   /* placeholder: keeps the array legal */
+    { 145, 17, 14, 10 },   /* desk [0] */
+    { 146, 18, 15, 11 },   /* desk [1] */
+    { 147, 21, 17, 13 },   /* desk [2] */
+    { 148, 23, 19, 14 },   /* desk [3] */
 };
-#define COMM_PAL_COUNT 0
+#define COMM_PAL_COUNT 4
 
 #endif

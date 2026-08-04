@@ -106,6 +106,22 @@ chair 21.5,21.5 face=W
 chair 21.5,23.0 face=S
 chair 18.5,23.5 face=N
 
+# DESK (first GLB import: tools/bake_boxes.py -> 3 disjoint boxes, 18 faces).
+# Cardinal row for circling, same idea as the chair row above — walk around each
+# and the 12 baked directional views should swap without the silhouette jumping.
+# Kept clear of the x14..18 crawl tunnels (rows 10..24).
+desk 5.5,16.5 face=N
+desk 9.5,16.5 face=E
+desk 21.5,16.5 face=S
+desk 25.5,16.5 face=W
+# Dead ahead of the N-facing spawn (16.5,27.5): first thing you see on load,
+# and the pair at different depths shows the near/far read side by side.
+desk 16.5,26.0 face=S
+desk 19.5,25.0 face=W
+# Against the chair row, for a scale check: a desk should read taller-topped and
+# much wider than the chair beside it.
+desk 24.5,20.5 face=N
+
 [dark]
 2,13 -> 8,19
 

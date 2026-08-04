@@ -493,8 +493,21 @@ window.RC = (function () {
         sp = spr.neander; hw = 0.45, h = 0.90;
       } else if (spr[dec.kind] && spr[dec.kind].world_h && !spr[dec.kind].wall) {
         sp = spr[dec.kind];
-        h = sp.world_h * 0.9;                             /* standee scale, like the neander */
-        hw = sp.world_hw * 0.9;
+        /* The 0.9 is a STANDEE fudge borrowed from the neanderthal: a printed
+         * cutout reads slightly smaller than its nominal size. A box model is
+         * real geometry with real dimensions, so shrinking it just makes the
+         * preview lie about scale -- the desk showed up looking like a side
+         * table. registry decals.kinds[].box_model says which is which, so the
+         * import tool can set it and this stays data-driven. */
+        const kd = (window.ME.reg.decals.kinds || []).find(k => k.id === dec.kind);
+        const scale = (kd && kd.box_model) ? 1.0 : 0.9;
+        h = sp.world_h * scale;
+        /* drawSprite's width argument is the FULL width, not a half-extent --
+         * the neanderthal branch above passes 0.45/0.90, which are already full
+         * dimensions. Passing world_hw straight through drew every generic
+         * sprite at exactly HALF its proper width; the desk showed up looking
+         * like a side table. */
+        hw = sp.world_hw * 2 * scale;
       }
       if (!sp) continue;
       const ddx = dec.x - px, ddy = dec.y - py;
@@ -612,7 +625,9 @@ window.RC = (function () {
     }
   }
 
-  function drawSprite(data, zbuf, wx, wy, sprite, sw, sh, zc) {
+  /* sw/sh are FULL world width and height (not half-extents) -- spw/sph below are
+ * used as the total on-screen span. */
+function drawSprite(data, zbuf, wx, wy, sprite, sw, sh, zc) {
     const dirX = Math.cos(pa), dirY = Math.sin(pa);
     const planeX = -dirY * 0.66, planeY = dirX * 0.66;
     const dx = wx - px, dy = wy - py;

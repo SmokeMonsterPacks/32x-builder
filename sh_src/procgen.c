@@ -231,6 +231,56 @@ static void place_chairs(int count) {
     }
 }
 
+/* Scatter desks, each with a chance of a COMPANION pulled up to it.
+ *
+ * kind 5 = DESK. A desk is only 3 boxes / 18 faces (cheaper than the chair's 9 /
+ * 54) but it is physically much bigger, and registry limits.max_desks caps
+ * authored maps at 8; procgen stays well under that so a generated level still
+ * reads as sparse office rather than a showroom.
+ *
+ * PAIRING. The desk's model front is -z, which maps to these world cell steps
+ * for the four cardinal facings (E0 S64 W128 N192) — derived from the same
+ * fc/fs rotation draw_chair_3d uses, not guessed:
+ *     E -> (+1, 0)   S -> (0, +1)   W -> (-1, 0)   N -> (0, -1)
+ * A companion goes in that neighbouring cell, turned back toward the desk, which
+ * keeps the one-asset-per-cell rule intact and reads as a workstation.
+ *
+ * SURFACE props (a CRT sitting ON the tabletop) are the obvious next companion
+ * and are NOT possible yet: standup_t has no base height, so every free-standing
+ * object's feet are pinned to the floor. Adding a base-height field is the one
+ * engine change that unlocks them; the slot table below is where they'd hang. */
+#define DESK_KIND  5
+#define CHAIR_KIND 3
+static const int8_t DESK_FRONT_DX[4] = {  1,  0, -1,  0 };   /* E, S, W, N */
+static const int8_t DESK_FRONT_DY[4] = {  0,  1,  0, -1 };
+
+static void place_desks(int count) {
+    int placed = 0, attempts = count * 16;
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;
+        if (raycast_exit_path_cell(x, y)) continue;   /* never block the way out */
+        int q = xs32_range(0, 3);
+        uint8_t facing = (uint8_t)(q * 64);
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, DESK_KIND);
+        placed++;
+        /* Companion at the knee, most of the time — a desk with nothing at it
+         * reads as stock, and an office is chairs pushed up to desks. */
+        if (!prob(PROCGEN_MAX_W * 3 / 4)) continue;
+        int cxp = x + DESK_FRONT_DX[q], cyp = y + DESK_FRONT_DY[q];
+        if (cxp < 1 || cyp < 1 || cxp >= MAP_W - 1 || cyp >= MAP_H - 1) continue;
+        if (!footprint_clear(cxp, cyp, 1, 1)) continue;
+        if (raycast_standup_in_cell(cxp, cyp)) continue;
+        if (raycast_exit_path_cell(cxp, cyp)) continue;
+        raycast_add_standup(((fx_t)cxp << FX_SHIFT) + FX(0.5),
+                            ((fx_t)cyp << FX_SHIFT) + FX(0.5),
+                            (uint8_t)(facing + 128), CHAIR_KIND);  /* turned to face it */
+    }
+}
+
 /* Build a wall-enclosed room and mark its interior DARK. Stamps its own
  * perimeter + one doorway (rather than needing a pre-clear rect that a dense
  * map rarely has), so it's a guaranteed "dark room surrounded by walls".
@@ -585,6 +635,12 @@ void procgen_run(uint32_t seed) {
     /* 6-9 chairs: the directional-billboard LOD made count nearly free (far
      * chairs are small sprites; only the nearest 3 render true-3D), stress-
      * verified at 21 chairs with no frame drops. Furnished, not spammed. */
+    /* Desks BEFORE chairs: each desk may pull a chair up to it, and the
+     * one-asset-per-cell guard is first-come. Placing loose chairs first would
+     * let them squat the knee cells and starve the pairings. 2-4 keeps a
+     * generated floor sparse (authored maps may go to max_desks 8) and leaves
+     * room in the 36-slot standup table for the chairs below. */
+    place_desks(2 + xs32_range(0, 2));
     place_chairs(6 + xs32_range(0, 3));
     /* Structure exists now, so a walled corridor can be found: a stretch of
      * unlit hallway cells. */
