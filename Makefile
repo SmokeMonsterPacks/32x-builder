@@ -85,6 +85,15 @@ SHOBJS += $(SHCPPS:.cpp=.o)
 # Override on command line: make deploy MISTER=root@othermister.local
 # Both targets probe usb0 then usb1 over ssh before scp'ing, so USB
 # drive renumber doesn't break the push.
+#
+# The probe checks /proc/mounts as well as the directory. /media/usbN stays
+# behind as an EMPTY directory after a drive ejects, so a bare `[ -d ]` test
+# passes on a dead mount and the ROM copies into nothing -- silently, with a
+# success exit code. Seen for real on the TV MiSTer: the drive threw I/O errors
+# mid-write ("[EXFAT] unmounted with media errors"), a 1.6 MB scp crawled to
+# 2m49s against a failing link, and the target directory then vanished.
+# /proc/mounts is used rather than the `mountpoint` binary so this does not
+# depend on what a given MiSTer image ships.
 MISTER     ?= root@mister.office.local
 MISTER_TV  ?= root@mister.tv.local
 
@@ -96,7 +105,7 @@ release: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
 
 # Office MiSTer: probe usb0 then usb1 for the S32X dir.
 deploy: release
-	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; grep -q " /media/usb$$n " /proc/mounts && [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
 		echo "==> Copying $(TARGET).32x to $(MISTER):$$DIR/" && \
 		scp $(TARGET).32x $(MISTER):$$DIR/backrooms.32x
 
@@ -104,7 +113,7 @@ deploy: release
 # back to usb1 if the drives renumbered. Avoids the manual `find` dance
 # the office target's comment describes.
 deploy-tv: release
-	@DIR=$$(ssh $(MISTER_TV) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+	@DIR=$$(ssh $(MISTER_TV) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; grep -q " /media/usb$$n " /proc/mounts && [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
 		echo "==> Copying $(TARGET).32x to $(MISTER_TV):$$DIR/" && \
 		scp $(TARGET).32x $(MISTER_TV):$$DIR/backrooms.32x
 
@@ -117,7 +126,7 @@ deploy-tv: release
 deploy-rom:
 	@test -n "$(ROM)" || { echo "usage: make deploy-rom ROM=<path to .32x> [MISTER=host]"; exit 1; }
 	@test -f "$(ROM)" || { echo "error: $(ROM) not found"; exit 1; }
-	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
+	@DIR=$$(ssh $(MISTER) 'for n in 0 1; do d=/media/usb$$n/Games/S32X; grep -q " /media/usb$$n " /proc/mounts && [ -d "$$d" ] && echo "$$d" && exit 0; done; exit 1') && \
 		echo "==> Copying $(ROM) to $(MISTER):$$DIR/" && \
 		scp "$(ROM)" $(MISTER):$$DIR/backrooms.32x
 
