@@ -28,7 +28,12 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MAX_W, MAX_H = 64, 96          # texel caps: a standee, not a wall texture
+MAX_W, MAX_H = 64, 96          # texel caps for a STANDEE (tall, camera-facing)
+# A wall decal is the other shape: wide and short, sampled one texel per screen
+# pixel exactly like the standee, so a wider cap costs no render time -- only
+# ROM, which the same 4 KB budget already bounds. At 64 the tester's torn
+# wallpaper spent 2112 of its 4096 texels and threw away the rest of its detail.
+MAX_W_WALL   = 96
 MAX_TEXELS   = 4096            # ROM budget per community sprite (4 KB)
 RAMP_N       = 16              # COMM_BASE ramp length (raycast.c)
 
@@ -206,14 +211,29 @@ def bake_image(img, out_w, dither=True, max_h=MAX_H, pal8=None):
     box = img.split()[3].getbbox()
     if box:
         img = img.crop(box)
+    full = img                     # keep the ORIGINAL for palette selection
     w0, h0 = img.size
     out_h = max(1, round(h0 * out_w / max(1, w0)))
     if out_h > max_h:
         out_h = max_h
         out_w = max(1, round(w0 * out_h / max(1, h0)))
-    img = img.resize((out_w, out_h), Image.LANCZOS)
+    # BOX (area average) rather than LANCZOS: for fine stipple, an averaging
+    # filter gives an honest mid-tone the dither below can reconstruct, where
+    # LANCZOS ringing invents halos around every speck.
+    img = img.resize((out_w, out_h), Image.BOX)
     if pal8 is None:
-        pal31, pal8 = quantize_palette(img)
+        # Quantize from the FULL-RES art, not the downscaled copy. A stippled
+        # texture is two tones interleaved; averaging it first hands the
+        # quantizer one blurred mid-tone, and the palette comes back as seven
+        # near-identical shades — the tester's torn wallpaper baked to a 5/31
+        # spread of cream, which renders as a flat blob with none of his
+        # speckle. Sampling the original keeps both real tones.
+        sample = full
+        if max(w0, h0) > 400:      # cap the quantizer's input, not its range
+            s = 400.0 / max(w0, h0)
+            sample = full.resize((max(1, int(w0 * s)), max(1, int(h0 * s))),
+                                 Image.NEAREST)     # NEAREST preserves extremes
+        pal31, pal8 = quantize_palette(sample)
     else:
         pal31 = [(r * 31 // 255, g * 31 // 255, b * 31 // 255)
                  for r, g, b in pal8]
@@ -226,11 +246,34 @@ def bake_image(img, out_w, dither=True, max_h=MAX_H, pal8=None):
             if a < 128:
                 row.append(0)
                 continue
-            best, bd = 1, 1 << 30
+            # Two nearest palette entries...
+            b0 = b1 = 0
+            d0 = d1 = 1 << 30
             for i, (pr, pg, pb) in enumerate(pal8):
                 d = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (b - pb) * (b - pb)
-                if d < bd:
-                    bd, best = d, i + 1
+                if d < d0:
+                    d1, b1 = d0, b0
+                    d0, b0 = d, i
+                elif d < d1:
+                    d1, b1 = d, i
+            best = b0 + 1
+            if dither and d0 > 0 and b1 != b0:
+                # ...and ORDERED-DITHER between them. Without this the mapping
+                # is pure nearest-colour, so an averaged mid-tone snaps to one
+                # entry and a 50/50 mottle ships as a single flat shade. `t` is
+                # the pixel's position along the segment between the two
+                # candidates; the Bayer threshold turns it into a checker.
+                p0, p1 = pal8[b0], pal8[b1]
+                vx, vy, vz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+                den = vx * vx + vy * vy + vz * vz
+                if den:
+                    t = ((r - p0[0]) * vx + (g - p0[1]) * vy + (b - p0[2]) * vz) / float(den)
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                    if t > (BAYER4[y & 3][x & 3] + 0.5) / 16.0:
+                        best = b1 + 1
             row.append(best)
         rows.append(row)
     return rows, out_w, out_h, pal31, pal8
@@ -374,8 +417,9 @@ def main():
         sys.exit("--id must be 2-16 chars of [a-z0-9_], starting with a letter")
     if not (0.1 <= args.height <= 1.0):
         sys.exit("--height must be 0.1..1.0 cells (the room is 1.0 tall)")
-    if args.width and not (8 <= args.width <= MAX_W):
-        sys.exit("--width must be 8..%d texels" % MAX_W)
+    _cap = MAX_W_WALL if args.mount == "wall" else MAX_W
+    if args.width and not (8 <= args.width <= _cap):
+        sys.exit("--width must be 8..%d texels for a %s" % (_cap, args.mount))
 
     reg_path = os.path.join(ROOT, "registry.json")
     reg = json.load(open(reg_path))
@@ -400,7 +444,8 @@ def main():
             "--mark 1 .. --mark %d.\n" % (args.src, len(marks), len(marks)))
     # Width defaults to the widest the per-sprite texel budget allows, so a
     # landscape decal is not quietly baked at half the detail it could have.
-    out_w = args.width or fit_width(src_img)
+    out_w = args.width or fit_width(
+        src_img, max_w=(MAX_W_WALL if args.mount == "wall" else MAX_W))
     rows, W, H, pal31, pal8 = bake_image(src_img, out_w,
                                          dither=not args.no_dither)
     if W * H > MAX_TEXELS:
