@@ -9,7 +9,26 @@ MDBIN    = $(MARSDEV)/m68k-elf/bin
 SHBIN    = $(MARSDEV)/sh-elf/bin
 
 ROMDIR  := rom
-TARGET  ?= $(ROMDIR)/backrooms
+
+# ---- Build profile: which tier of content compiles into this ROM ------------
+# One repo, three ROMs (see registry.json "roles" and MAPPING.md):
+#   core        the flagship          maps/core + maps/test + maps/curated,
+#                                     first-party assets      -> backrooms.32x
+#   community   everything            + maps/community + community assets
+#                                                        -> backrooms-community.32x
+#   author:<h>  a contributor's own   flagship + that author's community maps
+#                                                        -> backrooms-<h>.32x
+# Usage:  make                      (flagship)
+#         make community
+#         make author AUTHOR=doublek
+# The profile is stamped into $(ROMDIR)/.profile, so switching profiles
+# regenerates the two codegen'd files instead of silently reusing the last
+# build's map table.
+PROFILE ?= core
+PROFILE_TAG := $(subst author:,,$(PROFILE))
+PROFILE_STAMP := $(ROMDIR)/.profile
+
+TARGET  ?= $(ROMDIR)/backrooms$(if $(filter core,$(PROFILE)),,-$(PROFILE_TAG))
 MDTARGET = $(ROMDIR)/md_start
 
 # m68k GCC and Binutils
@@ -80,7 +99,7 @@ SHOBJS += $(SHCS:.c=.o)
 SHOBJS += sh_src/custom_maps.o
 SHOBJS += $(SHCPPS:.cpp=.o)
 
-.PHONY: all release debug deploy deploy-tv publish lint
+.PHONY: all release debug deploy deploy-tv publish lint community author FORCE
 
 # Override on command line: make deploy MISTER=root@othermister.local
 # Both targets probe usb0 then usb1 over ssh before scp'ing, so USB
@@ -102,6 +121,15 @@ all: release
 release: MDEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
 release: SHEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
 release: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
+
+# The community ROM (everything contributors have sent in) and a single
+# contributor's personal ROM. Both re-enter make with a different PROFILE, so
+# the codegen + ROM name follow automatically.
+community:
+	@$(MAKE) --no-print-directory PROFILE=community release
+author:
+	@test -n "$(AUTHOR)" || { echo "usage: make author AUTHOR=<handle>   (the map's author:, folded through registry author_aliases)"; exit 1; }
+	@$(MAKE) --no-print-directory PROFILE=author:$(AUTHOR) release
 
 # Office MiSTer: probe usb0 then usb1 for the S32X dir.
 deploy: release
@@ -237,18 +265,30 @@ sh_src/menu.o sh_src/m_main.o: sh_src/version.h
 # changes; the sh_src/*.c wildcard then compiles it like any source. Tracked
 # (unlike version.h) so the parse-time wildcard sees it on a clean checkout; the
 # generator only rewrites the file when its contents actually change.
-# Maps live in role folders (maps/core/, maps/community/); gen_maps globs them
-# recursively and lints maps+assets before emitting (a bad map fails the build).
-sh_src/custom_maps.c: $(wildcard maps/*.map maps/core/*.map maps/community/*.map) \
-                      registry.json tools/gen_maps.py tools/mapfmt.py tools/lint_maps.py
-	@python3 tools/gen_maps.py
+# Maps live in TIER folders (maps/core/, maps/test/, maps/curated/,
+# maps/community/); gen_maps globs them recursively, keeps the ones this
+# PROFILE ships, and lints maps+assets before emitting (a bad map fails the
+# build).
+sh_src/custom_maps.c: $(wildcard maps/*.map maps/core/*.map maps/test/*.map \
+                                 maps/curated/*.map maps/community/*.map) \
+                      registry.json tools/gen_maps.py tools/mapfmt.py tools/lint_maps.py \
+                      $(PROFILE_STAMP)
+	@python3 tools/gen_maps.py --profile $(PROFILE)
+
+# Remembers which profile the generated files were built for: rewritten (and so
+# newer than the codegen output) only when you ask for a DIFFERENT profile, so
+# `make community` after `make` regenerates, and a plain rebuild does not.
+$(PROFILE_STAMP): FORCE | $(ROMDIR)
+	@[ "$$(cat $@ 2>/dev/null)" = "$(PROFILE)" ] || printf '%s' "$(PROFILE)" > $@
+FORCE:
 
 # sh_src/sprite_defs.h — the data-driven sprite table, codegen'd from
 # registry.json "assets" + the referenced _tex.h (tools/gen_assets.py). raycast.c
 # includes it; generated + gitignored, so the explicit raycast.o dep below makes a
 # clean build emit it first (same pattern as md_start.bin).
-sh_src/sprite_defs.h: registry.json tools/gen_assets.py $(wildcard sh_src/*_tex.h)
-	@python3 tools/gen_assets.py
+sh_src/sprite_defs.h: registry.json tools/gen_assets.py $(wildcard sh_src/*_tex.h) \
+                      $(PROFILE_STAMP)
+	@python3 tools/gen_assets.py --profile $(PROFILE)
 sh_src/raycast.o: sh_src/sprite_defs.h
 
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
@@ -274,3 +314,4 @@ clean:
 	rm -f sh_src/md_start.bin
 	rm -f sh_src/sprite_defs.h
 	rm -f sh_src/version.h sh_src/version.h.tmp
+	rm -f $(PROFILE_STAMP)

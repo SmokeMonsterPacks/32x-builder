@@ -2,7 +2,7 @@
 name: SUBFLOOR 988,793
 size: 32x32
 spawn: 0.5, 31.5 facing=N
-role: community
+role: curated
 author: SmokeMonsterPacks
 next: ALOHA COMPLEX
 

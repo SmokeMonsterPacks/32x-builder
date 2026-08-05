@@ -2,7 +2,7 @@
 name: CH1DUCTS
 size: 32x32
 spawn: 16.5, 28.5 facing=N
-role: community
+role: curated
 author: mike
 next: CH2DEPTHS
 

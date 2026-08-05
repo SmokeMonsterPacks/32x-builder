@@ -102,10 +102,30 @@ This compiles both CPUs and produces:
 
 | Command | Purpose |
 |---|---|
-| `make` / `make release` | Optimized build (`-Ofast -flto` SH-2, `-O2 -flto` 68000). |
+| `make` / `make release` | Optimized build (`-Ofast -flto` SH-2, `-O2 -flto` 68000) → `rom/backrooms.32x`. |
+| `make community` | Same engine, plus every community map + community asset → `rom/backrooms-community.32x`. |
+| `make author AUTHOR=<handle>` | The flagship plus one contributor's own maps → `rom/backrooms-<handle>.32x`. |
 | `make debug` | `-Og -g` build with `DEBUG`/`KDEBUG` for GDB tracing (Gens-KMod, BlastEm, UMDK). |
 | `make clean` | Remove objects, deps, ELFs, and the built ROM. |
 | `make deploy` | Build + `scp` the ROM to a MiSTer (see below). |
+
+### Content tiers — what's in which ROM
+
+Maps and sprites carry a **tier**, and the tier decides which ROM compiles them
+in. It's a curation decision, not an identity one: a contributor's map moves
+into the main game by moving the file to `maps/curated/` and changing one word.
+
+| tier | lives in | ships in |
+|---|---|---|
+| `core` | `maps/core/`, `maps/test/` | every ROM |
+| `curated` | `maps/curated/` — the project's own maps + promoted community work | every ROM |
+| `community` | `maps/community/`, sprites baked with `tier: community` | `backrooms-community.32x` and that author's `backrooms-<handle>.32x` |
+
+The lint enforces the wall: a core or curated map cannot reference a community
+asset, so nothing from an unvetted PR can reach the flagship ROM. In-game,
+community maps sit behind their own `-- COMMUNITY --` heading in the start
+menu, and any non-flagship build prints what it is (`COMMUNITY BUILD`,
+`BUILD FOR <NAME>`) under the title. CI attaches all of these to every release.
 
 > **Header changes trigger rebuilds.** The Makefile uses GCC's `-MMD` dependency
 > files, so editing a struct in a shared header correctly recompiles every TU

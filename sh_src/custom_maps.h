@@ -78,6 +78,17 @@ extern const custom_map_t custom_maps[];
 extern const int          custom_map_count;   /* total, incl. lobby (load bounds) */
 extern const int          custom_pick_count;  /* selectable maps (pickable roles), ordered first */
 extern const int          custom_start_count; /* starter maps: [0, start); play/test: [start, core) */
-extern const int          custom_core_count;  /* core (starter/play) pickable; community span = [core, pick) */
+/* Tier blocks, in custom_maps[] order (gen_maps sorts by role priority):
+ *   [0, start)            starter        "-- START MAPS --"
+ *   [start, core)         play + test    "-- TEST --"
+ *   [core, core+curated)  curated        "-- MAPS --" / "-- STORIES --"
+ *   [core+curated, pick)  community      "-- COMMUNITY --"
+ * The community block is EMPTY in the flagship ROM: those maps compile in only
+ * for `make community` / `make author AUTHOR=<handle>`. */
+extern const int          custom_core_count;
+extern const int          custom_curated_count;
+/* "" on the flagship, else "COMMUNITY BUILD" / "BUILD FOR <AUTHOR>" — printed
+ * on the start menu + CREDITS so a side build never passes for the release. */
+extern const char         custom_build_label[];
 
 #endif /* CUSTOM_MAPS_H */

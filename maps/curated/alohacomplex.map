@@ -2,7 +2,7 @@
 name: ALOHA COMPLEX
 size: 32x32
 spawn: 8.5, 31.5 facing=N
-role: community
+role: curated
 author: SmokeMonsterPacks
 
 [grid]

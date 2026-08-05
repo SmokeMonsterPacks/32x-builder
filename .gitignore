@@ -9,6 +9,8 @@
 # on disk but untracked; GitHub Releases are the canonical archive.
 !rom/backrooms.32x
 !rom/md_start.bin
+# Which build profile the generated files were last made for (Makefile stamp)
+rom/.profile
 
 # macOS
 .DS_Store

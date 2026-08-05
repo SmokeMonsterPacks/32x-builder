@@ -1130,22 +1130,32 @@ int m_main(void) {
     enum { IT_MAP, IT_PROC, IT_SEP, IT_FOLD, IT_CTRL, IT_VIEW };
     struct { uint8_t kind; uint8_t map; const char *label; } items[40];
     int n_items = 0;
+    /* Tier blocks (see custom_maps.h): core | curated | community. The
+     * community block is empty in the flagship ROM, so its group simply never
+     * appears — the same menu code serves all three builds. */
     const int n_core  = custom_core_count;
-    const int n_comm  = custom_pick_count - custom_core_count;
+    const int n_cur   = custom_curated_count;
+    const int n_comm  = custom_pick_count - custom_core_count - custom_curated_count;
     const int n_start = custom_start_count;
+    const int cur0    = n_core;             /* first curated index */
+    const int comm0   = n_core + n_cur;     /* first community index */
 
-    /* Story chains (next_map links): a community map someone links TO is a
-     * CHAPTER — hidden from the flat list (you start a story at its head, not
-     * mid-book; the pause MAPS tab still warps anywhere as the escape hatch).
-     * A community map with a next-link that nobody links to is a story HEAD —
-     * listed under STORIES. Core maps always list normally. */
+    /* Story chains (next_map links): a map someone links TO is a CHAPTER —
+     * hidden from the flat list (you start a story at its head, not mid-book;
+     * the pause MAPS tab still warps anywhere as the escape hatch). A map with
+     * a next-link that nobody links to is a story HEAD — listed under STORIES.
+     * Core maps always list normally. */
     uint8_t has_in[64] = {0};
     for (int i2 = 0; i2 < custom_pick_count; i2++) {
         int nm2 = custom_maps[i2].next_map;
         if (nm2 >= 0 && nm2 < 64) has_in[nm2] = 1;
     }
 
-    int fold_grp[3] = { 1, 1, 1 };  /* 0=COMMUNITY, 1=STORIES, 2=TEST; 1 = folded */
+    /* 0=MAPS (curated), 1=STORIES (curated chains), 2=TEST, 3=COMMUNITY;
+     * 1 = folded. COMMUNITY is deliberately its OWN group, below the game's
+     * own maps: fan-made content is one clearly labelled door, never mixed
+     * into the lists that make up the game proper. */
+    int fold_grp[4] = { 1, 1, 1, 1 };
     int rebuild_items = 1;          /* build on first frame + after toggles */
     int refocus_grp = -1;           /* after rebuild, park cursor on this header */
     int pending_open = -1;          /* group just unfolded: arm the unroll anim */
@@ -1190,18 +1200,19 @@ int m_main(void) {
                 }
                 items[n_items].kind = IT_PROC; items[n_items].map = 0;
                 items[n_items].label = "PROCEDURAL"; n_items++;
+                /* Curated tier: the game's own map list (+ its story chains). */
                 int any_plain = 0, any_head = 0;
-                for (int i = 0; i < n_comm; i++) {
-                    int mi = n_core + i;
+                for (int i = 0; i < n_cur; i++) {
+                    int mi = cur0 + i;
                     if (has_in[mi]) continue;
                     if (custom_maps[mi].next_map >= 0) any_head = 1; else any_plain = 1;
                 }
                 if (any_plain) {
                     items[n_items].kind = IT_FOLD; items[n_items].map = 0;
-                    items[n_items].label = "-- COMMUNITY --"; n_items++;
+                    items[n_items].label = "-- MAPS --"; n_items++;
                     if (!fold_grp[0])
-                        for (int i = 0; i < n_comm && n_items < 37; i++) {
-                            int mi = n_core + i;
+                        for (int i = 0; i < n_cur && n_items < 37; i++) {
+                            int mi = cur0 + i;
                             if (has_in[mi] || custom_maps[mi].next_map >= 0) continue;
                             items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)mi;
                             items[n_items].label = custom_maps[mi].name; n_items++;
@@ -1211,9 +1222,23 @@ int m_main(void) {
                     items[n_items].kind = IT_FOLD; items[n_items].map = 1;
                     items[n_items].label = "-- STORIES --"; n_items++;
                     if (!fold_grp[1])
-                        for (int i = 0; i < n_comm && n_items < 37; i++) {
-                            int mi = n_core + i;
+                        for (int i = 0; i < n_cur && n_items < 37; i++) {
+                            int mi = cur0 + i;
                             if (has_in[mi] || custom_maps[mi].next_map < 0) continue;
+                            items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)mi;
+                            items[n_items].label = custom_maps[mi].name; n_items++;
+                        }
+                }
+                /* Community tier: present only in the community / author ROMs,
+                 * and always behind its own header. Story heads and one-offs
+                 * share the group — a fan-made chain is still fan-made. */
+                if (n_comm > 0) {
+                    items[n_items].kind = IT_FOLD; items[n_items].map = 3;
+                    items[n_items].label = "-- COMMUNITY --"; n_items++;
+                    if (!fold_grp[3])
+                        for (int i = 0; i < n_comm && n_items < 37; i++) {
+                            int mi = comm0 + i;
+                            if (has_in[mi]) continue;      /* chapters: enter at the head */
                             items[n_items].kind = IT_MAP; items[n_items].map = (uint8_t)mi;
                             items[n_items].label = custom_maps[mi].name; n_items++;
                         }
@@ -1324,9 +1349,17 @@ int m_main(void) {
              * cover title, the VIS-row window (+ overflow arrows) and the
              * hint line, so the box doesn't pump as the list scrolls. */
             lobby_menu_panel(fb_text, 48, 24, 272, 52 + 7 * 14 + 30);
-            /* Title. */
+            /* Title, plus which ROM this is: the flagship says nothing, a
+             * community or personal build says so right under the logo so it
+             * can never be mistaken for the release everyone plays. */
             font_draw_string(fb_text, (SCREEN_W - 13 * 8) / 2, 32,
                              "BACKROOMS 32X", 49);
+            if (custom_build_label[0]) {
+                int lbl_n = 0;
+                while (custom_build_label[lbl_n]) lbl_n++;
+                font_draw_string(fb_text, (SCREEN_W - lbl_n * 8) / 2, 42,
+                                 custom_build_label, 49);
+            }
 
             /* The unified list, smooth-scrolled: ease scroll_px a quarter of
              * the remaining distance per frame toward centering the cursor

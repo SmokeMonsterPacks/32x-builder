@@ -230,6 +230,25 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("partition (%g,%g)->(%g,%g) is diagonal — partitions are axis-aligned"
               % (p["x1"], p["y1"], p["x2"], p["y2"]))
 
+    # Every decal must name an asset THIS REPO has, and a map that ships in the
+    # flagship ROM (core/curated tiers) may only use first-party assets. The
+    # editor lets an author bake a sprite and place it in the same session, so a
+    # submitted map can reference an asset whose own PR never landed — that map
+    # used to pass this lint and then break the ROM build with a codegen error
+    # nobody but the maintainer ever saw.
+    kind_ids = {k["id"] for k in reg.get("decals", {}).get("kinds", [])}
+    sprite_tier = {s["id"]: s.get("tier", "core")
+                   for s in reg.get("assets", {}).get("sprites", [])}
+    map_tier = roles.get(role, {}).get("tier", "community")
+    for kd in sorted({d.get("kind") for d in m["decals"]}):   # once per KIND, not per decal
+        if kd not in kind_ids:
+            e("decal kind %r is not in the game yet — if you baked it in the "
+              "editor, submit the sprite first and place it once that PR is "
+              "merged" % kd)
+        elif map_tier != "community" and sprite_tier.get(kd) == "community":
+            e("%s is a community asset, so it can't be used by a %s map "
+              "(community assets ship only in the community ROM)" % (kd, map_tier))
+
     standalone_ids = {k["id"] for k in reg.get("decals", {}).get("kinds", [])
                       if k.get("standalone")}
     for d in m["decals"]:

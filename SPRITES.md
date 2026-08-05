@@ -1,8 +1,15 @@
 # Community sprites: put your own standee in the Backrooms
 
 Any transparent PNG can become a free-standing cardboard-style standee that
-ships in the ROM and is placeable in any map — same pipeline as community
-maps: bake → PR → CI builds → next release has it.
+ships in the ROM and is placeable in community maps — same pipeline as
+community maps: bake → PR → CI builds → next release has it.
+
+**Where it ships.** A baked sprite is tiered `community`, which means it
+compiles into `backrooms-community.32x` and into your own
+`backrooms-<yourname>.32x`, and community maps can place it freely. The
+flagship `backrooms.32x` carries first-party assets only; the maintainer
+promotes a sprite into it by changing `"tier": "community"` to `"core"` in
+`registry.json`. See the tier table in the [README](README.md).
 
 ## The easy way: the hosted editor
 

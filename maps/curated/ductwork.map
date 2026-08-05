@@ -2,7 +2,7 @@
 name: DUCTWORK
 size: 32x32
 spawn: 26.5, 28.5 facing=W
-role: community
+role: curated
 author: mike
 
 [grid]

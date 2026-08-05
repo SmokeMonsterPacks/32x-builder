@@ -2,7 +2,7 @@
 name: CUBICLE STORAGE
 size: 16x16
 spawn: 0.5, 4.5 facing=E
-role: community
+role: curated
 author: SmokeMonsterPacks
 
 [grid]

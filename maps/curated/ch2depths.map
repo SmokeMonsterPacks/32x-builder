@@ -2,7 +2,7 @@
 name: CH2DEPTHS
 size: 32x32
 spawn: 16.5, 28.5 facing=N
-role: community
+role: curated
 author: mike
 
 [grid]

@@ -149,14 +149,30 @@ def emit_comm_pal(sprites):
     return "\n".join(L)
 
 
+def select(sprites, profile):
+    """Which assets this ROM ships. Community uploads (tier "community") stay
+    out of the flagship: they compile only into the community ROM and into a
+    contributor's own build. Dropping them is SAFE because sprite_defs is
+    indexed by kind and emit() pads the gaps — every remaining kind keeps its
+    index, a dropped one reads as a zero row (and lint_maps forbids a
+    core/curated map from referencing one)."""
+    if profile in ("core", "flagship"):
+        return [s for s in sprites if s.get("tier", "core") != "community"]
+    return sprites            # community + author builds get the lot
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--registry", default=os.path.join(ROOT, "registry.json"))
     ap.add_argument("--out", default=os.path.join(ROOT, "sh_src", "sprite_defs.h"))
+    ap.add_argument("--profile", default="core",
+                    help="core (flagship: first-party assets only) | "
+                         "community | author:<handle> (both: all assets)")
     args = ap.parse_args()
     with open(args.registry) as fh:
         sprites = json.load(fh).get("assets", {}).get("sprites", [])
     validate(sprites)
+    sprites = select(sprites, args.profile)
     text = emit(sprites)
     old = open(args.out).read() if os.path.exists(args.out) else None
     if old != text:

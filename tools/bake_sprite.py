@@ -209,6 +209,11 @@ def registry_entries(reg, sprite_id, W, H, world_h, pal31, author="",
         sprite["tex_hi"] = "spr_%s_tex_hi.h" % sprite_id
         sprite["sym_hi"] = "spr_%s_tex_hi" % sprite_id
         flags.insert(0, "lod")
+    # Everything baked through this path is a community upload: tier it so the
+    # flagship ROM never compiles it in (gen_assets --profile core drops it).
+    # Promotion is a one-word registry edit when the maintainer wants it in the
+    # main game.
+    sprite["tier"] = "community"
     if author:
         sprite["author"] = author
     noun = "standee" if mount == "billboard" else "wall decal"
@@ -220,7 +225,10 @@ def registry_entries(reg, sprite_id, W, H, world_h, pal31, author="",
         # neanderthal's value hardcoded, which floated any standee shorter than
         # a person: the 0.31-high desk hovered nearly its own height off the
         # floor. Wall mounts still take the caller's plate height.
-        "z": (z if mount == "wall" else round(height / 2.0, 4)), "glyph": "⧉",
+        # (`world_h` — the parameter's name. This read `height`, so EVERY
+        # free-standing bake died with a NameError: the editor's standee upload,
+        # the exact path a contributor takes, 500'd on submit.)
+        "z": (z if mount == "wall" else round(world_h / 2.0, 4)), "glyph": "⧉",
         "color": "#b8b0a4",
         "label": "%s (community %s)" % (sprite_id.replace("_", " "), noun),
     }

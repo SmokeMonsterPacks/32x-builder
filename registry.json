@@ -27,7 +27,7 @@
     "value": 2,
     "id": "blackexit",
     "glyph": "X",
-    "label": "Void exit (border opening \u2014 walk out into the expanse)",
+    "label": "Void exit (border opening — walk out into the expanse)",
     "color": "#1a1a2e"
    }
   ]
@@ -92,7 +92,7 @@
     "id": "outlet",
     "kind": 0,
     "z": 0.2,
-    "glyph": "\u229f",
+    "glyph": "⊟",
     "color": "#d8c070",
     "label": "Electrical outlet"
    },
@@ -100,7 +100,7 @@
     "id": "door",
     "kind": 1,
     "z": 0.49,
-    "glyph": "\u25af",
+    "glyph": "▯",
     "color": "#8a5a3a",
     "label": "Exit door (swinging, EXIT sign)"
    },
@@ -108,7 +108,7 @@
     "id": "neanderthal",
     "kind": 2,
     "z": 0.45,
-    "glyph": "\ud83d\uddff",
+    "glyph": "🗿",
     "color": "#a87850",
     "label": "Neanderthal standup (free-standing billboard)",
     "standalone": true
@@ -118,7 +118,7 @@
     "box_model": true,
     "kind": 3,
     "label": "Chair (live 3D, free-standing)",
-    "glyph": "\ud83e\ude91",
+    "glyph": "🪑",
     "color": "#8a5a3a",
     "standalone": true,
     "z": 0.19
@@ -127,7 +127,7 @@
     "id": "exit_hole",
     "kind": 4,
     "z": 0.6,
-    "glyph": "\u25a9",
+    "glyph": "▩",
     "color": "#2a2418",
     "label": "Exit hole (dark climb-in wall opening; pull up to exit)"
    },
@@ -136,15 +136,48 @@
     "box_model": true,
     "kind": 5,
     "z": 0.155,
-    "glyph": "\u29c9",
+    "glyph": "⧉",
     "color": "#b8b0a4",
     "label": "Desk (live 3D, free-standing)",
+    "standalone": true
+   },
+   {
+    "id": "torn",
+    "kind": 6,
+    "z": 0.52,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn (community wall decal)"
+   },
+   {
+    "id": "torn2",
+    "kind": 7,
+    "z": 0.5,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn2 (community wall decal)"
+   },
+   {
+    "id": "torn3",
+    "kind": 8,
+    "z": 0.55,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn3 (community wall decal)"
+   },
+   {
+    "id": "stopsign",
+    "kind": 9,
+    "z": 0.45,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "stopsign (community standee)",
     "standalone": true
    }
   ]
  },
  "assets": {
-  "_doc": "Render catalog for sprite/decal ASSETS \u2014 the single source of truth the codegen turns into the engine's data-driven sprite_defs[] table (tools/gen_assets.py -> sh_src/sprite_defs.h) AND that export_assets.py reads to build the editor preview. 'kind' matches decals.kinds. mount='wall' is painted flat into the wall column (outlet/door \u2014 fixed to a wall, can't float); mount='billboard' is a camera-facing free-standing standup (neanderthal, and future stop-sign/lightpost). 'decode' names the stored-value -> palette strategy shared by the bake tool + engine ('offset' = 0 transparent, v>0 -> base+v-1; 'door' = the multi-ramp dlut). 'sym' is the C array symbol in the _tex.h; WIDTH/HEIGHT macros are upper(sym)+_WIDTH/_HEIGHT. Adding a sprite here + its _tex.h teaches the build, the preview and the renderer about it with no C edits.",
+  "_doc": "Render catalog for sprite/decal ASSETS — the single source of truth the codegen turns into the engine's data-driven sprite_defs[] table (tools/gen_assets.py -> sh_src/sprite_defs.h) AND that export_assets.py reads to build the editor preview. 'kind' matches decals.kinds. mount='wall' is painted flat into the wall column (outlet/door — fixed to a wall, can't float); mount='billboard' is a camera-facing free-standing standup (neanderthal, and future stop-sign/lightpost). 'decode' names the stored-value -> palette strategy shared by the bake tool + engine ('offset' = 0 transparent, v>0 -> base+v-1; 'door' = the multi-ramp dlut). 'sym' is the C array symbol in the _tex.h; WIDTH/HEIGHT macros are upper(sym)+_WIDTH/_HEIGHT. Adding a sprite here + its _tex.h teaches the build, the preview and the renderer about it with no C edits.",
   "sprites": [
    {
     "id": "outlet",
@@ -158,7 +191,8 @@
     "z": 0.2,
     "transparent": 0,
     "decode": "offset",
-    "flags": []
+    "flags": [],
+    "tier": "core"
    },
    {
     "id": "door",
@@ -175,7 +209,8 @@
     "flags": [
      "animated",
      "colmajor"
-    ]
+    ],
+    "tier": "core"
    },
    {
     "id": "neanderthal",
@@ -194,7 +229,8 @@
     "flags": [
      "lod",
      "standalone"
-    ]
+    ],
+    "tier": "core"
    },
    {
     "id": "chair",
@@ -210,7 +246,8 @@
     "decode": "offset",
     "flags": [
      "standalone"
-    ]
+    ],
+    "tier": "core"
    },
    {
     "id": "desk",
@@ -249,46 +286,223 @@
     "flags": [
      "standalone"
     ],
-    "author": "pjzjouhs22"
+    "author": "pjzjouhs22",
+    "tier": "core"
+   },
+   {
+    "id": "torn",
+    "kind": 6,
+    "mount": "wall",
+    "tex": "spr_torn_tex.h",
+    "sym": "spr_torn_tex",
+    "base": 152,
+    "pal": [
+     [
+      25,
+      25,
+      21
+     ],
+     [
+      26,
+      25,
+      22
+     ],
+     [
+      26,
+      26,
+      22
+     ],
+     [
+      27,
+      26,
+      23
+     ],
+     [
+      27,
+      27,
+      23
+     ],
+     [
+      28,
+      28,
+      24
+     ],
+     [
+      30,
+      29,
+      25
+     ]
+    ],
+    "world_h": 0.62,
+    "world_hw": 0.3166,
+    "z": 0.52,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "torn2",
+    "kind": 7,
+    "mount": "wall",
+    "tex": "spr_torn2_tex.h",
+    "sym": "spr_torn2_tex",
+    "base": 160,
+    "pal": [
+     [
+      16,
+      3,
+      3
+     ],
+     [
+      17,
+      3,
+      3
+     ],
+     [
+      18,
+      3,
+      4
+     ]
+    ],
+    "world_h": 0.45,
+    "world_hw": 0.2348,
+    "z": 0.5,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "torn3",
+    "kind": 8,
+    "mount": "wall",
+    "tex": "spr_torn3_tex.h",
+    "sym": "spr_torn3_tex",
+    "base": 168,
+    "pal": [
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "world_h": 0.45,
+    "world_hw": 0.2432,
+    "z": 0.55,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "stopsign",
+    "kind": 9,
+    "mount": "billboard",
+    "tex": "spr_stopsign_tex.h",
+    "sym": "spr_stopsign_tex",
+    "base": 176,
+    "pal": [
+     [
+      18,
+      0,
+      0
+     ],
+     [
+      19,
+      4,
+      4
+     ],
+     [
+      25,
+      23,
+      23
+     ],
+     [
+      25,
+      25,
+      25
+     ],
+     [
+      26,
+      26,
+      26
+     ],
+     [
+      27,
+      27,
+      27
+     ],
+     [
+      28,
+      29,
+      29
+     ]
+    ],
+    "world_h": 0.9,
+    "world_hw": 0.1636,
+    "z": 0.0,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "standalone"
+    ],
+    "tier": "community",
+    "author": "Double K"
    }
   ]
  },
  "light": {
   "_doc": "ceiling light fixture placed per-cell in the editor's Lights layer (the bright fluorescent panel + its 3x3 cell_light pool). The engine auto-derives lights today, so authored lights are editor/preview-only until per-map light support lands in the ROM.",
-  "glyph": "\u2600",
+  "glyph": "☀",
   "color": "#fff7d0"
  },
  "roles": {
-  "_doc": "Map roles. 'protected' = canonical (lives in maps/core/, the editor clones on edit, CODEOWNERS-gated in PRs). 'picker' = appears in the in-game start-menu picker + pause MAPS tab. 'priority' orders custom_maps[] (lower first) so pickable maps sort before the lobby and the engine just bounds the picker on custom_pick_count. 'folder' is where the role lives.",
+  "_doc": "Map roles + BUILD TIERS. 'tier' decides which ROM a map compiles into: core = first-party canon; curated = maps by project authors and outside maps the maintainer has promoted (ship in the flagship ROM); community = everything else (ships only in the community ROM and in that author's own build). 'protected' = the editor clones on edit + CODEOWNERS-gated in PRs. 'picker' = appears in the in-game start-menu picker + pause MAPS tab. 'priority' orders custom_maps[] (lower first) so the tiers land in contiguous index blocks the engine bounds on custom_start_count / custom_core_count / custom_curated_count / custom_pick_count. 'folder' is where the role lives.",
   "starter": {
    "priority": 0,
    "protected": true,
    "picker": true,
-   "folder": "core"
+   "folder": "core",
+   "tier": "core"
   },
   "play": {
    "priority": 1,
    "protected": true,
    "picker": true,
-   "folder": "core"
+   "folder": "core",
+   "tier": "core"
   },
   "test": {
    "priority": 2,
    "protected": false,
    "picker": true,
-   "folder": "community"
+   "folder": "test",
+   "tier": "core"
+  },
+  "curated": {
+   "priority": 3,
+   "protected": true,
+   "picker": true,
+   "folder": "curated",
+   "tier": "curated"
   },
   "community": {
-   "priority": 3,
+   "priority": 4,
    "protected": false,
    "picker": true,
-   "folder": "community"
+   "folder": "community",
+   "tier": "community"
   },
   "lobby": {
-   "priority": 4,
+   "priority": 5,
    "protected": true,
    "picker": false,
-   "folder": "core"
+   "folder": "core",
+   "tier": "core"
   }
  },
  "author_aliases": {
@@ -297,10 +511,12 @@
   "smokemonstermaps": "smokemonster",
   "smokemonster": "smokemonster",
   "mike": "maintainer",
-  "mike holzinger": "maintainer"
+  "mike holzinger": "maintainer",
+  "double k": "doublek",
+  "doublek": "doublek"
  },
  "limits": {
-  "_doc": "must match the engine caps (max_standups tracks raycast.c MAX_STANDUPS \u2014 the loader silently drops standalone decals past it); the codegen rejects maps that exceed these. max_desks 8 + max_chairs 21 + 3 neanderthals = 32, leaving 4 of max_standups 36 spare for the next imported asset. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) \u2014 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
+  "_doc": "must match the engine caps (max_standups tracks raycast.c MAX_STANDUPS — the loader silently drops standalone decals past it); the codegen rejects maps that exceed these. max_desks 8 + max_chairs 21 + 3 neanderthals = 32, leaving 4 of max_standups 36 spare for the next imported asset. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
   "max_dim": 32,
   "max_partitions": 64,
   "max_decals": 32,
@@ -330,7 +546,7 @@
    {
     "max": 99999,
     "label": "Heavy",
-    "fps": "7-12 fps \u2014 walk-test it",
+    "fps": "7-12 fps — walk-test it",
     "color": "#c15c2c"
    }
   ]

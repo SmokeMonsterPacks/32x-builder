@@ -2,7 +2,7 @@
 name: MINOTAUR
 size: 16x16
 spawn: 7.5, 14.5 facing=W
-role: community
+role: curated
 
 [grid]
 ################
