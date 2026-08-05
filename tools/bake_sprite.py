@@ -92,6 +92,109 @@ def orient(img, rotate=0, mirror=False):
     return img
 
 
+def fit_width(img, max_w=MAX_W, max_h=MAX_H, budget=MAX_TEXELS):
+    """The WIDEST texel width this upload can afford, given the per-sprite
+    budget. The bake used to be hardcoded at 48 wide with a 32 fallback, which
+    silently threw away detail the ROM had room for: a wide wall decal came out
+    48x33 = 1584 of the 4096 texels it was entitled to. Landscape art suffered
+    most — exactly the shape a wall decal is."""
+    from PIL import Image
+    a = img.convert("RGBA")
+    box = a.split()[3].getbbox()
+    if box:
+        a = a.crop(box)
+    w0, h0 = a.size
+    for w in range(max_w, 7, -1):
+        h = max(1, round(h0 * w / max(1, w0)))
+        if h > max_h:
+            h = max_h
+            w = max(1, round(w0 * h / max(1, h0)))
+        if w * h <= budget:
+            return w
+    return 8
+
+
+def find_marks(img, gap=0.10):
+    """The separate MARKS on an upload, as [(x0, y0, x1, y1), ...] in source
+    pixels, biggest first.
+
+    Contributors draw a sheet of tears/stains/tags on one canvas and upload the
+    sheet. The baker crops to the whole visible bbox, so the sheet becomes ONE
+    decal made mostly of empty space and every mark on it shrinks to a smudge —
+    the ROM's sprite stops resembling what was uploaded. This is what lets a
+    caller say so, or bake each mark on its own.
+
+    Ink blobs are flood-filled on a downscaled copy, then AGGLOMERATED: any two
+    whose boxes come within `gap` of the canvas are the same mark. Without that
+    step, lettering counts as one mark per letter — "I AM GOD!" is 25 blobs and
+    one mark."""
+    from PIL import Image
+    from collections import deque
+    a = img.convert("RGBA")
+    W0, H0 = a.size
+    scale = min(1.0, 200.0 / max(1, max(W0, H0)))
+    if scale < 1.0:
+        a = a.resize((max(1, int(W0 * scale)), max(1, int(H0 * scale))), Image.NEAREST)
+    W, H = a.size
+    px = a.load()
+
+    def ink(x, y):
+        r, g, b, al = px[x, y]
+        return al >= 24 and not (r > 236 and g > 236 and b > 236)
+
+    seen = bytearray(W * H)
+    boxes = []                      # [x0, y0, x1, y1, area]
+    for sy in range(H):
+        for sx in range(W):
+            if seen[sy * W + sx] or not ink(sx, sy):
+                continue
+            q = deque([(sx, sy)])
+            seen[sy * W + sx] = 1
+            bx0 = bx1 = sx; by0 = by1 = sy; n = 0
+            while q:
+                x, y = q.popleft(); n += 1
+                if x < bx0: bx0 = x
+                if x > bx1: bx1 = x
+                if y < by0: by0 = y
+                if y > by1: by1 = y
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < W and 0 <= ny < H and not seen[ny * W + nx] and ink(nx, ny):
+                            seen[ny * W + nx] = 1
+                            q.append((nx, ny))
+            if n >= 3:
+                boxes.append([bx0, by0, bx1, by1, n])
+
+    tol = gap * max(W, H)
+    merged = True
+    while merged and len(boxes) > 1:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a_, b_ = boxes[i], boxes[j]
+                dx = max(0, max(a_[0] - b_[2], b_[0] - a_[2]))
+                dy = max(0, max(a_[1] - b_[3], b_[1] - a_[3]))
+                if dx <= tol and dy <= tol:
+                    boxes[i] = [min(a_[0], b_[0]), min(a_[1], b_[1]),
+                                max(a_[2], b_[2]), max(a_[3], b_[3]), a_[4] + b_[4]]
+                    boxes.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+
+    # Drop specks: a mark under 3% of the biggest one is dust, not a decal.
+    if not boxes:
+        return []
+    top = max(b[4] for b in boxes)
+    boxes = [b for b in boxes if b[4] >= 0.03 * top]
+    boxes.sort(key=lambda b: -b[4])
+    inv = 1.0 / scale if scale < 1.0 else 1.0
+    return [(int(b[0] * inv), int(b[1] * inv),
+             int((b[2] + 1) * inv), int((b[3] + 1) * inv)) for b in boxes]
+
+
 def bake_image(img, out_w, dither=True, max_h=MAX_H, pal8=None):
     """PIL RGBA image -> (rows, W, H, pal31, pal8): texel 0 transparent,
     1..7 index the sprite's own median-cut palette (darkest first). Crops
@@ -244,7 +347,10 @@ def main():
     ap.add_argument("--src", required=True, help="source image (PNG/WebP/JPG)")
     ap.add_argument("--height", type=float, default=1.0,
                     help="world height in cells (1.0 = about a person)")
-    ap.add_argument("--width", type=int, default=48,
+    ap.add_argument("--mark", type=int, default=0,
+                    help="the upload is a SHEET of several marks: bake only "
+                         "mark N (1 = biggest). Default 0 bakes the whole image")
+    ap.add_argument("--width", type=int, default=0,
                     help="texel width (aspect keeps height; caps %dx%d)" % (MAX_W, MAX_H))
     ap.add_argument("--author", default="", help="credited in the registry")
     ap.add_argument("--mount", choices=["billboard", "wall"], default="billboard",
@@ -268,7 +374,7 @@ def main():
         sys.exit("--id must be 2-16 chars of [a-z0-9_], starting with a letter")
     if not (0.1 <= args.height <= 1.0):
         sys.exit("--height must be 0.1..1.0 cells (the room is 1.0 tall)")
-    if not (8 <= args.width <= MAX_W):
+    if args.width and not (8 <= args.width <= MAX_W):
         sys.exit("--width must be 8..%d texels" % MAX_W)
 
     reg_path = os.path.join(ROOT, "registry.json")
@@ -280,7 +386,22 @@ def main():
 
     from PIL import Image
     src_img = orient(Image.open(args.src), args.rotate, args.mirror)
-    rows, W, H, pal31, pal8 = bake_image(src_img, args.width,
+    marks = find_marks(src_img)
+    if args.mark:
+        if not (1 <= args.mark <= len(marks)):
+            sys.exit("--mark %d: this image has %d mark(s)" % (args.mark, len(marks)))
+        src_img = src_img.convert("RGBA").crop(marks[args.mark - 1])
+    elif len(marks) > 1:
+        # Baking a sheet whole is almost never what the author wanted: every
+        # mark on it lands in one decal, shrunk and surrounded by dead space.
+        sys.stderr.write(
+            "bake_sprite: warning: %s holds %d separate marks. Baked whole they "
+            "become ONE decal of mostly empty space. Bake each on its own with "
+            "--mark 1 .. --mark %d.\n" % (args.src, len(marks), len(marks)))
+    # Width defaults to the widest the per-sprite texel budget allows, so a
+    # landscape decal is not quietly baked at half the detail it could have.
+    out_w = args.width or fit_width(src_img)
+    rows, W, H, pal31, pal8 = bake_image(src_img, out_w,
                                          dither=not args.no_dither)
     if W * H > MAX_TEXELS:
         sys.exit("baked %dx%d = %d texels exceeds the %d budget — "

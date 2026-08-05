@@ -144,7 +144,7 @@
    {
     "id": "torn",
     "kind": 6,
-    "z": 0.52,
+    "z": 0.55,
     "glyph": "⧉",
     "color": "#b8b0a4",
     "label": "torn (community wall decal)"
@@ -152,7 +152,7 @@
    {
     "id": "torn2",
     "kind": 7,
-    "z": 0.5,
+    "z": 0.52,
     "glyph": "⧉",
     "color": "#b8b0a4",
     "label": "torn2 (community wall decal)"
@@ -160,19 +160,35 @@
    {
     "id": "torn3",
     "kind": 8,
-    "z": 0.55,
+    "z": 0.58,
     "glyph": "⧉",
     "color": "#b8b0a4",
     "label": "torn3 (community wall decal)"
    },
    {
-    "id": "stopsign",
+    "id": "iamgod",
     "kind": 9,
+    "z": 0.5,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "iamgod (community wall decal)"
+   },
+   {
+    "id": "stopsign",
+    "kind": 10,
     "z": 0.45,
     "glyph": "⧉",
     "color": "#b8b0a4",
     "label": "stopsign (community standee)",
     "standalone": true
+   },
+   {
+    "id": "crayonwin",
+    "kind": 11,
+    "z": 0.55,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "crayonwin (community wall decal)"
    }
   ]
  },
@@ -315,7 +331,7 @@
      [
       27,
       26,
-      23
+      22
      ],
      [
       27,
@@ -329,13 +345,13 @@
      ],
      [
       30,
-      29,
+      30,
       25
      ]
     ],
-    "world_h": 0.62,
-    "world_hw": 0.3166,
-    "z": 0.52,
+    "world_h": 0.55,
+    "world_hw": 0.5333,
+    "z": 0.55,
     "transparent": 1,
     "decode": "offset",
     "flags": [],
@@ -349,6 +365,107 @@
     "tex": "spr_torn2_tex.h",
     "sym": "spr_torn2_tex",
     "base": 160,
+    "pal": [
+     [
+      25,
+      24,
+      21
+     ],
+     [
+      25,
+      25,
+      21
+     ],
+     [
+      26,
+      26,
+      22
+     ],
+     [
+      27,
+      27,
+      23
+     ],
+     [
+      28,
+      27,
+      23
+     ],
+     [
+      29,
+      29,
+      25
+     ]
+    ],
+    "world_h": 0.5,
+    "world_hw": 0.4324,
+    "z": 0.52,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "torn3",
+    "kind": 8,
+    "mount": "wall",
+    "tex": "spr_torn3_tex.h",
+    "sym": "spr_torn3_tex",
+    "base": 168,
+    "pal": [
+     [
+      24,
+      24,
+      20
+     ],
+     [
+      26,
+      25,
+      22
+     ],
+     [
+      27,
+      26,
+      22
+     ],
+     [
+      28,
+      27,
+      23
+     ],
+     [
+      29,
+      29,
+      25
+     ],
+     [
+      30,
+      30,
+      26
+     ],
+     [
+      31,
+      30,
+      26
+     ]
+    ],
+    "world_h": 0.34,
+    "world_hw": 0.1475,
+    "z": 0.58,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "iamgod",
+    "kind": 9,
+    "mount": "wall",
+    "tex": "spr_iamgod_tex.h",
+    "sym": "spr_iamgod_tex",
+    "base": 176,
     "pal": [
      [
       16,
@@ -367,7 +484,7 @@
      ]
     ],
     "world_h": 0.45,
-    "world_hw": 0.2348,
+    "world_hw": 0.2361,
     "z": 0.5,
     "transparent": 1,
     "decode": "offset",
@@ -376,35 +493,12 @@
     "author": "Double K"
    },
    {
-    "id": "torn3",
-    "kind": 8,
-    "mount": "wall",
-    "tex": "spr_torn3_tex.h",
-    "sym": "spr_torn3_tex",
-    "base": 168,
-    "pal": [
-     [
-      0,
-      0,
-      0
-     ]
-    ],
-    "world_h": 0.45,
-    "world_hw": 0.2432,
-    "z": 0.55,
-    "transparent": 1,
-    "decode": "offset",
-    "flags": [],
-    "tier": "community",
-    "author": "Double K"
-   },
-   {
     "id": "stopsign",
-    "kind": 9,
+    "kind": 10,
     "mount": "billboard",
     "tex": "spr_stopsign_tex.h",
     "sym": "spr_stopsign_tex",
-    "base": 176,
+    "base": 184,
     "pal": [
      [
       18,
@@ -417,7 +511,7 @@
       4
      ],
      [
-      25,
+      24,
       23,
       23
      ],
@@ -443,13 +537,36 @@
      ]
     ],
     "world_h": 0.9,
-    "world_hw": 0.1636,
+    "world_hw": 0.1641,
     "z": 0.0,
     "transparent": 1,
     "decode": "offset",
     "flags": [
      "standalone"
     ],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "crayonwin",
+    "kind": 11,
+    "mount": "wall",
+    "tex": "spr_crayonwin_tex.h",
+    "sym": "spr_crayonwin_tex",
+    "base": 192,
+    "pal": [
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "world_h": 0.42,
+    "world_hw": 0.2278,
+    "z": 0.55,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [],
     "tier": "community",
     "author": "Double K"
    }

@@ -1097,13 +1097,15 @@ init();
               : 'Bake it \u2014 the preview shows exactly what ships';
   };
   let sprRot = 0, sprMir = false;
+  let sprMark = 0;          /* 0 = whole image; N = only that mark of a sheet */
   const thumbCss = () => {
     $s('spr-thumb').style.transform =
       'rotate(' + sprRot + 'deg) scaleX(' + (sprMir ? -1 : 1) + ')';
   };
   $s('spr-file').addEventListener('change', () => {
     const f = $s('spr-file').files[0];
-    sprRot = 0; sprMir = false; thumbCss();
+    sprRot = 0; sprMir = false; sprMark = 0; thumbCss();
+    $s('spr-sheet').style.display = 'none';
     if (f) {
       $s('spr-thumb').src = URL.createObjectURL(f);
       $s('spr-orient').style.display = '';
@@ -1136,6 +1138,7 @@ init();
     fd.append('rotate', String(sprRot));
     fd.append('mirror', sprMir ? '1' : '0');
     fd.append('hi', $s('spr-hi').checked ? '1' : '0');
+    fd.append('mark', String(sprMark));
     $s('spr-msg').textContent = 'baking…';
     const r = await fetch('/bake_sprite', { method: 'POST', body: fd });
     const j = await r.json();
@@ -1147,10 +1150,34 @@ init();
       '<div style="font-size:11px">' + j.id + ' — ' + j.w + 'x' + j.h +
       ' texels, kind ' + j.kind + ' (' +
       (j.mount === 'wall' ? 'wall decal' : 'standee') +
-      ', ' + j.pal8.length + ' colors' + (j.hi ? ', +hi-res' : '') + ')</div>';
+      ', ' + j.pal8.length + ' colors' + (j.hi ? ', +hi-res' : '') +
+      (j.mark ? ', mark ' + j.mark + ' of ' + j.marks : '') + ')</div>';
     $s('spr-actions').style.display = '';
+    /* A SHEET (several separate marks on one canvas) is the one case where the
+       preview looks plausible and the in-game decal is a smudge: the marks are
+       all there, each shrunk into a corner of one decal. Say so, and offer the
+       per-mark bake right here. */
+    showSheetChoice(j);
     $s('spr-msg').textContent = 'baked \u2014 now try it in the map (step 6)';
   });
+
+  function showSheetChoice(j) {
+    const box = $s('spr-sheet');
+    box.textContent = '';
+    if (!j.sheet_warning) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    const p = document.createElement('div');
+    p.textContent = j.sheet_warning;
+    box.appendChild(p);
+    for (let i = 1; i <= j.marks; i++) {
+      const b = document.createElement('button');
+      b.textContent = 'bake mark ' + i;
+      b.title = 'Re-bake using ONLY mark ' + i + ' (1 is the biggest). Upload the '
+              + 'same image again under another name for the others.';
+      b.onclick = () => { sprMark = i; $s('spr-bake').click(); };
+      box.appendChild(b);
+    }
+  }
   $s('spr-try').addEventListener('click', () => {
     if (!bundle) return;
     /* Session-local registration: palette button, grid glyph, walkthrough

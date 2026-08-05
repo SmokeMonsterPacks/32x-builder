@@ -246,12 +246,47 @@ def bake_sprite_route():
     except ValueError:
         rot = 0
     mirror = (request.form.get("mirror") or "") == "1"
-    try:
-        img = Image.open(f.stream)
-    except Exception:
-        return jsonify({"error": "not a readable image"}), 400
+    # Read the upload into memory: PIL wants a seekable stream, and a failure's
+    # REASON has to reach the author — "not a readable image" on a perfectly
+    # good WebP is how an upload path loses someone.
+    #
+    # The retry is not paranoia. werkzeug 3.1's multipart parser strips a
+    # trailing CR that belongs to the PAYLOAD: any file whose last byte is 0x0D
+    # arrives one byte short (verified — a 9-byte file ending in \r is delivered
+    # as 8). That is ~1 upload in 256, fatal for WebP ("could not create decoder
+    # object") and silent corruption elsewhere. Double K's decal sheet ends in
+    # \r, which is why his sprites never made it through the editor at all.
+    import io as _io
+    raw = f.read()
+    img = err = None
+    for candidate in (raw, raw + b"\r"):
+        try:
+            probe = Image.open(_io.BytesIO(candidate))
+            probe.load()
+            img = probe
+            break
+        except Exception as e:                     # noqa: BLE001 (reported below)
+            err = e
+    if img is None:
+        return jsonify({"error": "could not read that image (%s: %s) — PNG, "
+                                 "WebP and JPEG all work"
+                                 % (type(err).__name__, err)}), 400
     img = bake_sprite.orient(img, rot if rot in (90, 180, 270) else 0, mirror)
-    rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, 48)
+    # A SHEET (several separate marks on one canvas) baked whole becomes one
+    # decal of mostly empty space, each mark shrunk to a smudge — the ROM's
+    # sprite stops resembling the upload. Report the marks, and bake just one
+    # when the author picks it.
+    marks = bake_sprite.find_marks(img)
+    try:
+        mark = int(request.form.get("mark") or 0)
+    except ValueError:
+        mark = 0
+    if mark and 1 <= mark <= len(marks):
+        img = img.crop(marks[mark - 1])
+    # Width: the widest the per-sprite texel budget allows. This was hardcoded
+    # at 48 with a 32 fallback, which threw away detail the ROM had room for —
+    # a landscape wall decal baked at 48x33, 1584 of its 4096 texels.
+    rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, bake_sprite.fit_width(img))
     if W * H > bake_sprite.MAX_TEXELS:
         rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, 32)
     sprite, kindent = bake_sprite.registry_entries(reg, sprite_id, W, H,
@@ -277,8 +312,15 @@ def bake_sprite_route():
                 px[x, y] = tuple(pal8[v - 1]) + (255,)
     pv = pv.resize((W * 3, H * 3), Image.NEAREST)
     buf = io.BytesIO(); pv.save(buf, "PNG")
+    sheet = None
+    if len(marks) > 1 and not mark:
+        sheet = ("This image holds %d separate marks. Baked together they are "
+                 "ONE decal — mostly empty space, every mark shrunk. Pick a "
+                 "mark below and bake it on its own for a sharp sprite (upload "
+                 "the same image again for the others)." % len(marks))
     return jsonify({
         "ok": True, "id": sprite_id, "w": W, "h": H, "kind": sprite["kind"],
+        "marks": len(marks), "mark": mark, "sheet_warning": sheet,
         "mount": mount, "z": kindent["z"],
         "base": sprite["base"], "pal8": [list(c) for c in pal8],
         "hi": bool(texh_hi),
