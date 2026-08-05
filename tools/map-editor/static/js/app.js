@@ -815,11 +815,76 @@ async function doExport() {
   status('exported ' + fname + ' → add it under maps/community/ and open a PR');
 }
 
-/* Submit = the community-PR pipeline. Server runs the SAME lint gate CI runs,
-   then hands back a pre-filled github.com new-file URL: GitHub walks the
-   (signed-in) contributor through fork -> commit -> pull request natively, so
-   the PR is authored by THEIR GitHub identity — no tokens ever touch this
-   server. CI then lints + builds the ROM on the PR; merge = in the next ROM. */
+/* ---------- GitHub sign-in (the one-click submit path) ----------
+ * The backend has done the whole fork -> branch -> commit -> PR dance as the
+ * signed-in user since Phase 3, but the editor never rendered a way to sign
+ * in — so every contributor fell through to the pre-filled-URL flow and hit
+ * github.com's "you must fork this repository" wall, which is exactly where
+ * non-git authors stop. This is that missing control. */
+function goSignIn() {
+  saveWipNow();                     // the round trip leaves the page; keep the map
+  window.location.href = '/auth/login';
+}
+
+async function refreshAuth() {
+  const el = $('#gh-auth');
+  if (!el) return;
+  const j = await jget('/auth/user').catch(() => ({}));
+  ME.ghOAuth = !!j.oauth;
+  ME.ghUser = j.login || null;
+  el.textContent = '';
+  if (!ME.ghOAuth) return;          // instance without OAuth: manual flow only
+  if (ME.ghUser) {
+    const who = document.createElement('span');
+    who.className = 'gh-who';
+    who.textContent = '@' + ME.ghUser;
+    who.title = 'Signed in with GitHub — Submit opens your pull request in one click';
+    const out = document.createElement('button');
+    out.className = 'gh-out'; out.textContent = 'sign out';
+    out.onclick = async () => {
+      await fetch('/auth/logout', { method: 'POST' });
+      await refreshAuth(); status('signed out of GitHub');
+    };
+    el.append(who, out);
+  } else {
+    const inb = document.createElement('button');
+    inb.className = 'gh-signin'; inb.textContent = 'Sign in with GitHub';
+    inb.title = 'One click: the editor makes your own copy (fork) of the game repo, ' +
+                'commits your map to it and opens the pull request for you.';
+    inb.onclick = goSignIn;
+    el.append(inb);
+  }
+}
+
+/* The status bar can carry ACTIONS, not just text — a dead-end message ("sign
+   in first") is what stranded the first outside tester. */
+function statusActions(text, actions) {
+  const el = $('#status');
+  el.textContent = text + ' ';
+  for (const [label, fn, title] of actions) {
+    const b = document.createElement('button');
+    b.className = 'status-act'; b.textContent = label;
+    if (title) b.title = title;
+    b.onclick = fn;
+    el.append(b);
+  }
+}
+
+function promptSignIn(prefix) {
+  statusActions((prefix || '') + 'submitting opens a pull request under your own ' +
+                'GitHub account:', [
+    ['Sign in with GitHub', goSignIn,
+     'One click — the editor forks the repo, commits your map and opens the PR for you.'],
+    ['do it by hand instead', () => submitManual(),
+     'Opens github.com with your map pre-filled. GitHub will ask you to fork first.'],
+  ]);
+}
+
+/* Submit = the community-PR pipeline. Server runs the SAME lint gate CI runs;
+   signed in, it forks/commits/opens the PR for you. Signed out, it hands back a
+   pre-filled github.com new-file URL and GitHub walks you through the same steps
+   manually. Either way the PR is authored by THEIR GitHub identity — no tokens
+   ever touch this server. CI lints + builds the ROM on the PR; merge = next ROM. */
 async function doSubmit() {
   syncName();
   /* Preflight the budget CLIENT-SIDE: refuse before posting anything, with
@@ -850,8 +915,21 @@ async function doSubmit() {
     }
     const errs = (j.errors || [j.error || ('HTTP ' + r.status)]);
     if (r.status !== 401) { status('submit failed: ' + errs.join(' | ')); return; }
-    /* session expired -> fall through to the URL flow */
+    /* session expired -> sign in again rather than silently demoting them to
+     * the manual flow they signed in to avoid. */
+    await refreshAuth();
+    promptSignIn('your GitHub session expired — ');
+    return;
   }
+  /* Not signed in, but this instance CAN do it for them: offer that first. */
+  if (ME.ghOAuth) { promptSignIn(''); return; }
+  await submitManual();
+}
+
+/* The zero-auth path: lint server-side, then hand the author a pre-filled
+   github.com page. GitHub itself asks them to fork — say so up front, because
+   an unexplained "you must fork this repository" reads as a permission error. */
+async function submitManual() {
   const r = await fetch('/submit_url', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(ME.model),
@@ -864,8 +942,9 @@ async function doSubmit() {
   }
   if (j.url_len < 7500) {                 // fits comfortably in a URL
     window.open(j.url, '_blank');
-    status('opening GitHub: sign in, then "Propose new file" → "Create pull request". ' +
-           'Your map lands in ' + j.filename + ' under your own name.');
+    status('opening GitHub. It will ask you to FORK the repository — that just makes ' +
+           'your own copy to commit into, so click it. Then "Propose new file" → ' +
+           '"Create pull request". Your map lands in ' + j.filename + ' under your own name.');
   } else {                                // too big for a URL: hand over a REAL file
     /* The old path opened GitHub's empty new-file editor and copied the map to
      * the clipboard for a manual paste — a paste that silently failed (stale
@@ -876,7 +955,8 @@ async function doSubmit() {
     downloadText(j.text, fname);
     window.open(j.upload_url, '_blank');
     status('your map is too big for GitHub’s URL editor, so it downloaded as ' +
-           fname + ' — drag that file into the GitHub upload page that just opened, ' +
+           fname + ' — drag that file into the GitHub upload page that just opened ' +
+           '(it will ask you to fork the repo first: that is your own copy, click it), ' +
            'then "Propose changes" to open your PR.');
   }
 }
@@ -935,6 +1015,11 @@ function saveWip() {                                // debounced; keeps the sess
     _wipTimer = null;
     try { localStorage.setItem(WIP_KEY, JSON.stringify({ model: ME.model, name: ME.name })); } catch (e) {}
   }, 800);
+}
+function saveWipNow() {                             // before we leave the page (sign-in)
+  if (_wipTimer) { clearTimeout(_wipTimer); _wipTimer = null; }
+  try { localStorage.setItem(WIP_KEY, JSON.stringify({ model: ME.model, name: ME.name })); }
+  catch (e) {}
 }
 function loadWip() {
   try { const s = localStorage.getItem(WIP_KEY); return s ? JSON.parse(s) : null; } catch (e) { return null; }
@@ -1124,7 +1209,13 @@ init();
       $s('spr-msg').innerHTML = '<a href="' + j.pr_url + '" target="_blank">PR #'
         + j.pr_number + ' opened ↗</a>';
     } else if (r.status === 401) {
-      $s('spr-msg').textContent = 'sign in (top right) or use ⬇ Bundle';
+      /* Actionable, not a dead end: the sign-in is one click from here. */
+      $s('spr-msg').textContent = 'this opens a PR under your GitHub account — ';
+      const b = document.createElement('button');
+      b.className = 'status-act'; b.textContent = 'Sign in with GitHub';
+      b.title = 'Or use ⬇ Bundle to download the files and PR them yourself.';
+      b.onclick = goSignIn;
+      $s('spr-msg').append(b);
     } else {
       $s('spr-msg').textContent = (j.errors || [j.error || 'failed']).join('; ');
     }

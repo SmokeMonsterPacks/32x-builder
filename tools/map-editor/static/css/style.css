@@ -28,6 +28,15 @@ button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #15140f; border-color: var(--accent); font-weight: bold; }
 button.active { background: var(--accent); color: #15140f; border-color: var(--accent); }
 #status { color: var(--accent); margin-left: 8px; min-height: 1em; }
+.status-act { margin-left: 6px; padding: 2px 8px; font-size: 12px;
+  background: var(--accent); color: #15140f; border-color: var(--accent); font-weight: bold; }
+.status-act + .status-act { background: #2c2a1f; color: var(--ink); font-weight: normal; }
+
+/* GitHub sign-in (right of the file bar) */
+.gh-auth { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+.gh-auth .gh-signin { border-color: var(--accent); color: var(--accent); }
+.gh-auth .gh-who { color: var(--ink-dim); }
+.gh-auth .gh-out { padding: 2px 6px; font-size: 11px; color: var(--ink-dim); }
 
 main { display: flex; height: calc(100vh - 70px); }
 #sidebar { width: 220px; padding: 10px; overflow-y: auto; border-right: 1px solid var(--line); }
