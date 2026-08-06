@@ -283,11 +283,18 @@ def bake_sprite_route():
         mark = 0
     if mark and 1 <= mark <= len(marks):
         img = img.crop(marks[mark - 1])
-    # Width: the widest the per-sprite texel budget allows. This was hardcoded
-    # at 48 with a 32 fallback, which threw away detail the ROM had room for —
-    # a landscape wall decal baked at 48x33, 1584 of its 4096 texels.
-    rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, bake_sprite.fit_width(img))
-    if W * H > bake_sprite.MAX_TEXELS:
+    # Width: the widest the per-mount texel budget allows. This was hardcoded at
+    # 48 with a 32 fallback, so a wall decal baked at 48x33 — and a drawing's
+    # fine grain (the tester's torn wallpaper is ~3px speckle in 654px of art)
+    # averages to a smooth smudge long before the palette gets involved. We tell
+    # contributors we bake their image DOWN; at that size we were mangling it.
+    wall = (mount == "wall")
+    max_w = bake_sprite.MAX_W_WALL if wall else bake_sprite.MAX_W
+    max_h = bake_sprite.MAX_H * 4 if wall else bake_sprite.MAX_H
+    budget = bake_sprite.MAX_TEXELS_WALL if wall else bake_sprite.MAX_TEXELS
+    fit = bake_sprite.fit_width(img, max_w=max_w, max_h=max_h, budget=budget)
+    rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, fit, max_h=max_h)
+    if W * H > budget:
         rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, 32)
     sprite, kindent = bake_sprite.registry_entries(reg, sprite_id, W, H,
                                                   world_h, pal31, author,

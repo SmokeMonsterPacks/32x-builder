@@ -33,8 +33,16 @@ MAX_W, MAX_H = 64, 96          # texel caps for a STANDEE (tall, camera-facing)
 # pixel exactly like the standee, so a wider cap costs no render time -- only
 # ROM, which the same 4 KB budget already bounds. At 64 the tester's torn
 # wallpaper spent 2112 of its 4096 texels and threw away the rest of its detail.
-MAX_W_WALL   = 96
-MAX_TEXELS   = 4096            # ROM budget per community sprite (4 KB)
+# Wall decals also get their own TEXEL budget, and it is much larger than a
+# standee's. Measured on the tester's torn wallpaper: his speckle is ~3px grain
+# in a 654px-wide drawing, so at 89 texels each texel swallows a 7x7 block of it
+# and the grain averages to a smooth smudge BEFORE any palette or shading math.
+# Proof: his own art downscaled to 89x46 with no palette limit looks identical
+# to what we shipped. The grain only survives from ~176 texels up. A decal
+# samples one texel per screen pixel, so this costs ROM and nothing else.
+MAX_W_WALL      = 224
+MAX_TEXELS_WALL = 26624         # 26 KB: enough for 224x116
+MAX_TEXELS   = 4096            # ROM budget per community STANDEE (4 KB)
 RAMP_N       = 16              # COMM_BASE ramp length (raycast.c)
 
 # Per-sprite COLOR palettes, the same model every first-party asset uses
@@ -448,11 +456,15 @@ def main():
             "--mark 1 .. --mark %d.\n" % (args.src, len(marks), len(marks)))
     # Width defaults to the widest the per-sprite texel budget allows, so a
     # landscape decal is not quietly baked at half the detail it could have.
+    wall = (args.mount == "wall")
     out_w = args.width or fit_width(
-        src_img, max_w=(MAX_W_WALL if args.mount == "wall" else MAX_W))
+        src_img, max_w=(MAX_W_WALL if wall else MAX_W),
+        max_h=(MAX_H * 4 if wall else MAX_H),
+        budget=(MAX_TEXELS_WALL if wall else MAX_TEXELS))
     rows, W, H, pal31, pal8 = bake_image(src_img, out_w,
-                                         dither=not args.no_dither)
-    if W * H > MAX_TEXELS:
+                                         dither=not args.no_dither,
+                                         max_h=(MAX_H * 4 if wall else MAX_H))
+    if W * H > (MAX_TEXELS_WALL if wall else MAX_TEXELS):
         sys.exit("baked %dx%d = %d texels exceeds the %d budget — "
                  "use a smaller --width" % (W, H, W * H, MAX_TEXELS))
     hi = args.hi and args.mount == "billboard"

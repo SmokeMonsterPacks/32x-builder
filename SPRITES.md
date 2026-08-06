@@ -56,8 +56,12 @@ files in your PR.
 
 ## What the bake does (and its limits)
 
-- Crops to your image's transparent bounding box, scales to ≤64×96 texels
-  (4096-texel ROM budget per sprite — about 4 KB).
+- Crops to your image's transparent bounding box, then scales DOWN to the
+  texel budget for its mount: a standee gets ≤64×96 (about 4 KB), a wall decal
+  ≤224×384 (about 26 KB). Wall decals get the bigger share because fine grain
+  is what they're usually made of — a stippled tear baked at 89 texels wide
+  averages its speckle into a smooth smudge, which is mangling your art, not
+  shrinking it.
 - Reduces your image to up to **7 of its own colors** (median-cut, like a
   small-palette GIF), so your art keeps its hues — greens stay green. Each
   sprite gets its own slot block in the console's palette; about 14 color

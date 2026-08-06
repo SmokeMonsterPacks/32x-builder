@@ -142,38 +142,6 @@
     "standalone": true
    },
    {
-    "id": "torn",
-    "kind": 6,
-    "z": 0.55,
-    "glyph": "⧉",
-    "color": "#b8b0a4",
-    "label": "torn (community wall decal)"
-   },
-   {
-    "id": "torn2",
-    "kind": 7,
-    "z": 0.52,
-    "glyph": "⧉",
-    "color": "#b8b0a4",
-    "label": "torn2 (community wall decal)"
-   },
-   {
-    "id": "torn3",
-    "kind": 8,
-    "z": 0.58,
-    "glyph": "⧉",
-    "color": "#b8b0a4",
-    "label": "torn3 (community wall decal)"
-   },
-   {
-    "id": "iamgod",
-    "kind": 9,
-    "z": 0.5,
-    "glyph": "⧉",
-    "color": "#b8b0a4",
-    "label": "iamgod (community wall decal)"
-   },
-   {
     "id": "stopsign",
     "kind": 10,
     "z": 0.45,
@@ -183,8 +151,40 @@
     "standalone": true
    },
    {
-    "id": "crayonwin",
+    "id": "torn",
     "kind": 11,
+    "z": 0.55,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn (community wall decal)"
+   },
+   {
+    "id": "torn2",
+    "kind": 12,
+    "z": 0.52,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn2 (community wall decal)"
+   },
+   {
+    "id": "torn3",
+    "kind": 13,
+    "z": 0.58,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "torn3 (community wall decal)"
+   },
+   {
+    "id": "iamgod",
+    "kind": 14,
+    "z": 0.5,
+    "glyph": "⧉",
+    "color": "#b8b0a4",
+    "label": "iamgod (community wall decal)"
+   },
+   {
+    "id": "crayonwin",
+    "kind": 15,
     "z": 0.55,
     "glyph": "⧉",
     "color": "#b8b0a4",
@@ -306,221 +306,6 @@
     "tier": "core"
    },
    {
-    "id": "torn",
-    "kind": 6,
-    "mount": "wall",
-    "tex": "spr_torn_tex.h",
-    "sym": "spr_torn_tex",
-    "base": 152,
-    "pal": [
-     [
-      23,
-      23,
-      19
-     ],
-     [
-      23,
-      23,
-      20
-     ],
-     [
-      24,
-      24,
-      20
-     ],
-     [
-      25,
-      25,
-      21
-     ],
-     [
-      27,
-      27,
-      23
-     ],
-     [
-      29,
-      28,
-      24
-     ],
-     [
-      31,
-      30,
-      26
-     ]
-    ],
-    "world_h": 0.55,
-    "world_hw": 0.5321,
-    "z": 0.55,
-    "transparent": 1,
-    "decode": "offset",
-    "flags": [
-     "artpal"
-    ],
-    "tier": "community",
-    "author": "Double K"
-   },
-   {
-    "id": "torn2",
-    "kind": 7,
-    "mount": "wall",
-    "tex": "spr_torn2_tex.h",
-    "sym": "spr_torn2_tex",
-    "base": 160,
-    "pal": [
-     [
-      23,
-      23,
-      19
-     ],
-     [
-      23,
-      23,
-      20
-     ],
-     [
-      24,
-      23,
-      20
-     ],
-     [
-      25,
-      24,
-      21
-     ],
-     [
-      27,
-      27,
-      23
-     ],
-     [
-      29,
-      28,
-      24
-     ],
-     [
-      31,
-      30,
-      26
-     ]
-    ],
-    "world_h": 0.5,
-    "world_hw": 0.4375,
-    "z": 0.52,
-    "transparent": 1,
-    "decode": "offset",
-    "flags": [
-     "artpal"
-    ],
-    "tier": "community",
-    "author": "Double K"
-   },
-   {
-    "id": "torn3",
-    "kind": 8,
-    "mount": "wall",
-    "tex": "spr_torn3_tex.h",
-    "sym": "spr_torn3_tex",
-    "base": 168,
-    "pal": [
-     [
-      23,
-      23,
-      19
-     ],
-     [
-      24,
-      23,
-      20
-     ],
-     [
-      24,
-      24,
-      20
-     ],
-     [
-      26,
-      25,
-      22
-     ],
-     [
-      27,
-      27,
-      23
-     ],
-     [
-      29,
-      28,
-      24
-     ],
-     [
-      31,
-      30,
-      26
-     ]
-    ],
-    "world_h": 0.34,
-    "world_hw": 0.1475,
-    "z": 0.58,
-    "transparent": 1,
-    "decode": "offset",
-    "flags": [
-     "artpal"
-    ],
-    "tier": "community",
-    "author": "Double K"
-   },
-   {
-    "id": "iamgod",
-    "kind": 9,
-    "mount": "wall",
-    "tex": "spr_iamgod_tex.h",
-    "sym": "spr_iamgod_tex",
-    "base": 176,
-    "pal": [
-     [
-      14,
-      3,
-      3
-     ],
-     [
-      16,
-      3,
-      3
-     ],
-     [
-      17,
-      3,
-      3
-     ],
-     [
-      18,
-      3,
-      4
-     ],
-     [
-      19,
-      4,
-      4
-     ],
-     [
-      20,
-      4,
-      4
-     ]
-    ],
-    "world_h": 0.45,
-    "world_hw": 0.2359,
-    "z": 0.5,
-    "transparent": 1,
-    "decode": "offset",
-    "flags": [
-     "artpal"
-    ],
-    "tier": "community",
-    "author": "Double K"
-   },
-   {
     "id": "stopsign",
     "kind": 10,
     "mount": "billboard",
@@ -577,8 +362,223 @@
     "author": "Double K"
    },
    {
-    "id": "crayonwin",
+    "id": "torn",
     "kind": 11,
+    "mount": "wall",
+    "tex": "spr_torn_tex.h",
+    "sym": "spr_torn_tex",
+    "base": 152,
+    "pal": [
+     [
+      23,
+      23,
+      19
+     ],
+     [
+      23,
+      23,
+      20
+     ],
+     [
+      24,
+      24,
+      20
+     ],
+     [
+      25,
+      25,
+      21
+     ],
+     [
+      27,
+      27,
+      23
+     ],
+     [
+      29,
+      28,
+      24
+     ],
+     [
+      31,
+      30,
+      26
+     ]
+    ],
+    "world_h": 0.55,
+    "world_hw": 0.531,
+    "z": 0.55,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "artpal"
+    ],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "torn2",
+    "kind": 12,
+    "mount": "wall",
+    "tex": "spr_torn2_tex.h",
+    "sym": "spr_torn2_tex",
+    "base": 160,
+    "pal": [
+     [
+      23,
+      23,
+      19
+     ],
+     [
+      23,
+      23,
+      20
+     ],
+     [
+      24,
+      23,
+      20
+     ],
+     [
+      25,
+      24,
+      21
+     ],
+     [
+      27,
+      27,
+      23
+     ],
+     [
+      29,
+      28,
+      24
+     ],
+     [
+      31,
+      30,
+      26
+     ]
+    ],
+    "world_h": 0.5,
+    "world_hw": 0.435,
+    "z": 0.52,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "artpal"
+    ],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "torn3",
+    "kind": 13,
+    "mount": "wall",
+    "tex": "spr_torn3_tex.h",
+    "sym": "spr_torn3_tex",
+    "base": 168,
+    "pal": [
+     [
+      23,
+      23,
+      19
+     ],
+     [
+      24,
+      23,
+      20
+     ],
+     [
+      24,
+      24,
+      20
+     ],
+     [
+      26,
+      25,
+      22
+     ],
+     [
+      27,
+      27,
+      23
+     ],
+     [
+      29,
+      28,
+      24
+     ],
+     [
+      31,
+      30,
+      26
+     ]
+    ],
+    "world_h": 0.34,
+    "world_hw": 0.1477,
+    "z": 0.58,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "artpal"
+    ],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "iamgod",
+    "kind": 14,
+    "mount": "wall",
+    "tex": "spr_iamgod_tex.h",
+    "sym": "spr_iamgod_tex",
+    "base": 176,
+    "pal": [
+     [
+      14,
+      3,
+      3
+     ],
+     [
+      16,
+      3,
+      3
+     ],
+     [
+      17,
+      3,
+      3
+     ],
+     [
+      18,
+      3,
+      4
+     ],
+     [
+      19,
+      4,
+      4
+     ],
+     [
+      20,
+      4,
+      4
+     ]
+    ],
+    "world_h": 0.45,
+    "world_hw": 0.2363,
+    "z": 0.5,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "artpal"
+    ],
+    "tier": "community",
+    "author": "Double K"
+   },
+   {
+    "id": "crayonwin",
+    "kind": 15,
     "mount": "wall",
     "tex": "spr_crayonwin_tex.h",
     "sym": "spr_crayonwin_tex",
@@ -591,7 +591,7 @@
      ]
     ],
     "world_h": 0.42,
-    "world_hw": 0.2272,
+    "world_hw": 0.2275,
     "z": 0.55,
     "transparent": 1,
     "decode": "offset",
