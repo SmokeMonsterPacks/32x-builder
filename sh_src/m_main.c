@@ -726,7 +726,14 @@ static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *lab
 #define PANE_Y 24
 #define PANE_W 224
 #define PANE_H 156
-static uint8_t pane_buf[PANE_W * PANE_H];   /* SDRAM: captured menu pane */
+/* MEMORY OVERLAY (.hero_overlay_lo — see mars.ld): the captured pane is live
+ * only between capture_menu_pane() and the end of menu_flip_out(), a window with
+ * no raycast_render call in it, so the deep gameplay stack can never reach it
+ * while it holds anything. It is refilled by capture_menu_pane every time, so a
+ * prior render's spill through this address range is overwritten before use —
+ * which is why losing the .bss zero-init is safe. */
+static uint8_t pane_buf[PANE_W * PANE_H]
+    __attribute__((section(".hero_overlay_lo")));   /* SDRAM: captured menu pane */
 
 static void capture_menu_pane(const uint8_t *fb) {
     for (int v = 0; v < PANE_H; v++) {

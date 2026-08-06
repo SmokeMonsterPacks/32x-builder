@@ -4303,7 +4303,12 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
          * Pre-decode ONCE into a scratch copy holding final CRAM indices
          * (door_shade 1 = the viewer's one-fog-step convention; texel 0 =
          * wall surround in game -> transparent here) and draw with base 0. */
-        static uint8_t door_pv[DOOR_TEX_WIDTH * DOOR_TEX_HEIGHT];
+        /* MEMORY OVERLAY (.hero_overlay_lo — see mars.ld): viewer-only preview.
+         * door_pv_built deliberately STAYS in .bss: it is the zero-inited gate
+         * that makes the one-shot fill below run, and moving it to the NOLOAD
+         * overlay would let garbage read as "already built" and skip it. */
+        static uint8_t door_pv[DOOR_TEX_WIDTH * DOOR_TEX_HEIGHT]
+            __attribute__((section(".hero_overlay_lo")));
         static int door_pv_built = 0;
         if (!door_pv_built) {
             static const uint8_t finegrey[14] = {
@@ -4427,11 +4432,17 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
  * tri-mesh into the framebuffer. rotY/rotX are 0..255 angles. The caller
  * clears the backdrop first. Dedicated-screen use (one model, no raycasting)
  * so the 457-tri mesh is affordable. Reuses chair_tri_fill for the polygons. */
-static int   mv_px[CHAIRM_NVERTS];
-static int   mv_py[CHAIRM_NVERTS];
-static fx_t  mv_pz[CHAIRM_NVERTS];
-static uint16_t mv_order[CHAIRM_NTRIS];
-static fx_t     mv_dep[CHAIRM_NTRIS];
+/* MEMORY OVERLAY (.hero_overlay_lo — see mars.ld): asset-viewer scratch, reached
+ * only via raycast_asset_preview() from the menu, and dead during gameplay. Each
+ * frame writes entries [0, nv) / [0, ntr) and reads only through that same range,
+ * so the missing .bss zero-init is never observed. _lo, not .hero_overlay: these
+ * are LIVE while the viewer runs, so they must sit away from the stack. */
+#define MV_OVL __attribute__((section(".hero_overlay_lo")))
+static int   mv_px[CHAIRM_NVERTS] MV_OVL;
+static int   mv_py[CHAIRM_NVERTS] MV_OVL;
+static fx_t  mv_pz[CHAIRM_NVERTS] MV_OVL;
+static uint16_t mv_order[CHAIRM_NTRIS] MV_OVL;
+static fx_t     mv_dep[CHAIRM_NTRIS] MV_OVL;
 
 /* The in-game 7-box chair expanded to a tri list — the viewer's GAME variant.
  * Same 8.8 y-up model space as chairm_verts (chair height 1.0 = 256), so the
