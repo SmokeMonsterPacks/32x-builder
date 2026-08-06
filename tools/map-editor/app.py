@@ -406,6 +406,12 @@ def bake_sprite_route():
                 px[x, y] = tuple(pal8[v - 1]) + (255,)
     pv = pv.resize((W * 3, H * 3), Image.NEAREST)
     buf = io.BytesIO(); pv.save(buf, "PNG")
+    # The shared game has a hard ceiling of 14 sprite palettes and it is the
+    # first thing a growing community hits — say where they stand, and that
+    # their own fork has the whole arena. This is the honest nudge toward a
+    # fork: not "go away", but "there you own all of it".
+    used, cap = lint_maps.arena_usage(reg["assets"]["sprites"])
+    arena = {"used": used, "cap": cap, "left": max(0, cap - used)}
     sheet = None
     if len(marks) > 1 and not mark:
         sheet = ("Baked as ONE decal, which is your image as you drew it. It "
@@ -414,6 +420,7 @@ def bake_sprite_route():
     return jsonify({
         "ok": True, "id": sprite_id, "w": W, "h": H, "kind": sprite["kind"],
         "marks": len(marks), "mark": mark, "sheet_warning": sheet,
+        "arena": arena,
         "mount": mount, "z": kindent["z"],
         "base": sprite["base"], "pal8": [list(c) for c in pal8],
         "hi": bool(texh_hi),

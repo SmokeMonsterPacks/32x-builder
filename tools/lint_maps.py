@@ -286,6 +286,47 @@ def lint_model(m, base, folder, reg, seen_names, errs):
             e("next: points at itself")
 
 
+ARENA_BASE, ARENA_END, ARENA_STRIDE = 144, 256, 8
+
+
+def arena_usage(sprites):
+    """(used, capacity) sprite slots in the community CRAM arena."""
+    used = [s for s in sprites if isinstance(s.get("base"), int)]
+    return len(used), (ARENA_END - ARENA_BASE) // ARENA_STRIDE
+
+
+def _lint_palette_arena(sprites, errs):
+    """The community palette arena is the REAL ceiling on a shared ROM, and it
+    is much lower than ROM size suggests: 14 sprite slots, 8 CRAM entries each.
+    One contributor's set of decals took four. A shared "everybody's work" ROM
+    therefore fills after a handful of people — which is exactly why the editor
+    points contributors at their own fork, where all 14 slots are theirs.
+
+    Without this check the wall arrives as a cryptic codegen error on whoever's
+    PR happens to be the straw, or worse, as sprites rendering in each other's
+    colours."""
+    used, cap = arena_usage(sprites)
+    if used > cap:
+        errs.append(
+            "assets: %d sprites with their own palette, but the community CRAM "
+            "arena holds %d (%d..%d, %d entries each). A shared ROM cannot take "
+            "more — promote a sprite to a first-party ramp, drop one, or let "
+            "the author keep it in their own fork where the whole arena is "
+            "theirs." % (used, cap, ARENA_BASE, ARENA_END - 1, ARENA_STRIDE))
+    seen = {}
+    for s in sprites:
+        b = s.get("base")
+        if not isinstance(b, int):
+            continue
+        if b in seen:
+            errs.append("assets: %s and %s share palette base %d — their colours "
+                        "would overwrite each other" % (seen[b], s.get("id", "?"), b))
+        seen[b] = s.get("id", "?")
+        if b < ARENA_BASE or b + ARENA_STRIDE > ARENA_END:
+            errs.append("assets: %s base %d is outside the community arena %d..%d"
+                        % (s.get("id", "?"), b, ARENA_BASE, ARENA_END - 1))
+
+
 def lint_assets(reg, sh_dir, errs):
     try:
         export_assets.build_assets(ROOT)        # resolves palette + registry + sprites
@@ -296,6 +337,7 @@ def lint_assets(reg, sh_dir, errs):
     # sprite_defs[] table — validate every entry + that its _tex.h exist and are
     # well-formed, so a bad asset fails the build/PR (same gate as maps).
     sprites = reg.get("assets", {}).get("sprites", [])
+    _lint_palette_arena(sprites, errs)
     kinds_seen, tex_files = {}, set(["wall_tex.h", "partition_tex.h"])
     for s in sprites:
         sid = s.get("id", "?")

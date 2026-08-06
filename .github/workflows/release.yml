@@ -88,14 +88,21 @@ jobs:
         if: steps.exists.outputs.skip != 'true'
         run: make release MARSDEV="$MARSDEV"
 
-      # The flagship above ships core + curated content only. These extra ROMs
-      # carry what contributors have sent in:
+      # The flagship above ships core + curated content only. This one carries
+      # what contributors have sent in and the maintainer has accepted:
       #   backrooms-community.32x   every community map + community asset
-      #   backrooms-<handle>.32x    the flagship + ONE contributor's own maps,
-      #                             so a first-time mapper gets a ROM with their
-      #                             level in the real game
-      # Both are skipped cleanly when maps/community/ is empty.
-      - name: Build the community + per-author ROMs
+      #
+      # There is deliberately NO per-author ROM here. Upstream cannot host a
+      # build per contributor: it is one more ROM compiled on every release,
+      # forever, growing with the community. The console says the same thing
+      # louder — the community palette arena holds 14 sprites TOTAL, and one
+      # contributor's set of decals took four, so a shared "everybody's work"
+      # ROM fills after a handful of people no matter how the CI is arranged.
+      # Contributors get their own ROM from their own FORK, where the whole
+      # budget is theirs (see the editor's "Your copy" panel).
+      #
+      # Skipped cleanly when maps/community/ is empty.
+      - name: Build the community ROM
         if: steps.exists.outputs.skip != 'true'
         id: sidebuilds
         run: |
@@ -107,30 +114,7 @@ jobs:
             echo "assets=" >> "$GITHUB_OUTPUT"; exit 0
           fi
           make community MARSDEV="$MARSDEV"
-          ASSETS="rom/backrooms-community.32x"
-          # One ROM per DISTINCT author handle, as gen_maps resolves it (raw
-          # author: folded through registry author_aliases, lowercased).
-          HANDLES=$(python3 - <<'PY'
-          import glob, json, sys
-          sys.path.insert(0, "tools")
-          import mapfmt
-          alias = json.load(open("registry.json")).get("author_aliases", {})
-          out = set()
-          for p in glob.glob("maps/community/*.map"):
-              raw = (mapfmt.parse(open(p).read()).get("author") or "").strip()
-              who = alias.get(raw.lower(), raw).lower()
-              if who and not who.startswith("_"):
-                  out.add(who)
-          print("\n".join(sorted(out)))
-          PY
-          )
-          for h in $HANDLES; do
-            echo "::group::author ROM: $h"
-            make author AUTHOR="$h" MARSDEV="$MARSDEV"
-            ASSETS="$ASSETS rom/backrooms-$h.32x"
-            echo "::endgroup::"
-          done
-          echo "assets=$ASSETS" >> "$GITHUB_OUTPUT"
+          echo "assets=rom/backrooms-community.32x" >> "$GITHUB_OUTPUT"
 
       - name: Release notes (commits since the previous build tag)
         if: steps.exists.outputs.skip != 'true'
@@ -162,7 +146,11 @@ jobs:
             echo '**Which ROM do I want?** `backrooms.32x` is the game — canon plus the'
             echo 'maps the project authors made or vetted. `backrooms-community.32x`'
             echo 'adds every map and asset contributors have sent in, vetted or not.'
-            echo '`backrooms-<name>.32x` is the game plus that one contributor’s maps.'
+            echo
+            echo 'Making your own maps or sprites? **Fork the repo** — your fork builds'
+            echo 'its own ROM, and the console’s 14-sprite palette budget is yours alone'
+            echo 'there instead of shared with everyone else. The'
+            echo '[editor](https://backrooms-32x-project.fly.dev/) sets it up in a click.'
             echo 'NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 

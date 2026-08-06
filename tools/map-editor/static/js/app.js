@@ -1231,6 +1231,18 @@ init();
        all there, each shrunk into a corner of one decal. Say so, and offer the
        per-mark bake right here. */
     showSheetChoice(j);
+    /* Palette headroom: the shared game holds 14 sprite palettes TOTAL. Say so
+       at bake time, because it decides where this asset should live. */
+    if (j.arena) {
+      const a = j.arena, m = $s('spr-arena');
+      m.style.display = '';
+      m.textContent = a.left > 3
+        ? 'Shared game: ' + a.left + ' of ' + a.cap + ' sprite palettes left. ' +
+          'In your own copy you have all ' + a.cap + '.'
+        : 'Shared game: only ' + a.left + ' of ' + a.cap + ' sprite palettes left — ' +
+          'the console holds no more. Save this to your own copy instead, where ' +
+          'the whole budget is yours.';
+    }
     $s('spr-msg').textContent = 'baked \u2014 now try it in the map (step 6)';
   });
 
