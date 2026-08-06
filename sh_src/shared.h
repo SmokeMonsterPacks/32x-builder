@@ -173,6 +173,13 @@ typedef struct {
      * slab + cap passes, for same-binary A/B of their cost (HUD L:). Both CPUs
      * read it cache-through in raycast_draw_tail. Crawl passes unaffected. */
     volatile uint8_t bulk_kill;
+    /* Carpet VERTICAL depth LOD: stamp stains on every OTHER screen row once the
+     * row's fog shade reaches the mid band, mirroring the x_step 4/8/16 banding
+     * that already runs horizontally. Each row costs a DIVU plus ~6 muls of setup
+     * before a single stain lands, so halving rows halves setup AND the column
+     * walk -- measured via the blunt all-rows VERT toggle, carpet went 2,068 ->
+     * 888 ticks (-57%). Same-binary A/B lives in TESTING>CARPETLOD. */
+    volatile uint8_t carpet_vlod;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to

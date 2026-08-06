@@ -310,6 +310,42 @@ static uint8_t bg_distv[SCREEN_W];   /* depth >> 12 (1/16 cell, range 16 cells):
 static int16_t seam_top[SCREEN_W];
 static int16_t seam_bot[SCREEN_W];
 #define SEAM_VALID(c) (seam_top[c] >= 0)
+/* Set by the wall pass to its own seam_rec each frame. The seam arrays are ONLY
+ * written (and only reset to -1) when seam_rec is on, so with SEAMS=HARD and no
+ * dither/LOD they hold whatever the last recording frame left behind, forever.
+ * The covered-row skip below must not trust stale seams, hence this flag. */
+static int g_seam_rec_on = 0;
+
+/* COVERED-ROW SKIP. Ceiling paints [0,horizon) and carpet paints [horizon,
+ * SCREEN_H), both for every column and both BEFORE the wall pass, so any row the
+ * walls will cover in EVERY column is drawn and immediately buried. Measured OD
+ * (wall coverage) runs 8% in open rooms, 32% in a corridor, and 92% in partition
+ * views -- so this pays exactly where the partition scenes hurt.
+ *
+ * Row-level, not per-column, on purpose: carpet's inner loop is one hash and a
+ * conditional byte store, so a per-sample bounds test would cost more than the
+ * store it skips. Collapsing to a scalar pair makes the per-row test free.
+ *
+ * The band is LAST frame's -- the wall pass resets the seams after we run. That
+ * is fine: raycast_clear_half already laid the base gradient and these passes
+ * only ADD detail, so being wrong on a fast turn costs one frame of missing
+ * stains/grid over correct base colour, never garbage. COVER_MARGIN shrinks the
+ * band at both edges to absorb a frame of turning. Per-CPU over its own column
+ * range, so no cross-SH2 coherency question arises. */
+#define COVER_MARGIN 4
+static inline void covered_rows(int col_start, int col_end, int *lo, int *hi) {
+    int b_lo = 0, b_hi = SCREEN_H - 1;
+    if (!g_seam_rec_on) { *lo = 1; *hi = 0; return; }   /* stale seams: skip nothing */
+    for (int c = col_start; c < col_end; c++) {
+        if (!SEAM_VALID(c)) { b_lo = 1; b_hi = 0; break; }  /* a bare column covers no row */
+        int t = seam_top[c], b = seam_bot[c];
+        if (t > b_lo) b_lo = t;
+        if (b < b_hi) b_hi = b;
+        if (b_lo > b_hi) break;
+    }
+    *lo = b_lo + COVER_MARGIN;
+    *hi = b_hi - COVER_MARGIN;
+}
 
 /* NUM_PARTITIONS_MAX declared in raycast.h so procgen sees the same cap. */
 
@@ -5640,9 +5676,26 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
     /* VERT: floor-cast only the even rows (line table duplicates them down).
      * Halves the per-row DIVU + stain stamps. Start on the first even row past
      * the horizon so the even grid matches the wall/clear passes. */
-    int cystep = SHARED_UC->wall_vert ? 2 : 1;
-    int y0 = (cystep == 2) ? ((horizon_y + 2) & ~1) : (horizon_y + 1);
+    /* CARPET VERTICAL DEPTH LOD. vstep is the blunt all-rows VERT toggle; cystep
+     * is the PER-ROW step, doubled once a row's fog shade reaches the mid band --
+     * the same geo_shade banding x_step already uses (4/8/16), applied to the
+     * other axis. Every row pays a DIVU plus ~6 muls of setup before a single
+     * stain lands, so a far row was paying full setup to place ~9 samples;
+     * x_step cannot touch that, this can. Measured with the blunt VERT toggle
+     * (all rows): carpet 2,068 -> 888 ticks, -57%.
+     *
+     * cystep is reassigned at the TOP of each iteration, so the two `continue`s
+     * below advance by THIS row's step rather than a stale one -- which also
+     * means fog-skipped far rows skip two at a time. */
+    #define CARPET_VLOD_SHADE 4
+    const int vstep = SHARED_UC->wall_vert ? 2 : 1;
+    const int vlod  = SHARED_UC->carpet_vlod;
+    int cov_lo, cov_hi;
+    covered_rows(col_start, col_end, &cov_lo, &cov_hi);
+    int cystep = vstep;
+    int y0 = (vstep == 2) ? ((horizon_y + 2) & ~1) : (horizon_y + 1);
     for (int y = y0; y < SCREEN_H; y += cystep) {
+        cystep = vstep;
         if (y < 0) continue;        /* extreme positive pitch */
         /* Skip + LOD key off the geometric (unshifted) distance so far rows
          * stay fog-skipped. The crouch color shift only brightens what we DO
@@ -5652,7 +5705,12 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
         if (gy < 0)         gy = 0;
         if (gy >= SCREEN_H) gy = SCREEN_H - 1;
         int geo_shade = row_color[gy] - FLOOR_BASE;
+        /* Vertical LOD band. Set BEFORE the fog-skip below so skipped rows also
+         * advance two at a time. Keyed to geo (unshifted) shade for the same
+         * reason x_step is: crouch must not un-band the near-horizon rows. */
+        if (vlod && geo_shade >= CARPET_VLOD_SHADE) cystep = vstep * 2;
         if (geo_shade >= SHADE_LEVELS - 2) continue;
+        if (y >= cov_lo && y <= cov_hi) continue;   /* buried by walls in every column */
         int sy = y + sample_bias;
         if (sy < 0)         sy = 0;
         if (sy >= SCREEN_H) sy = SCREEN_H - 1;
@@ -6179,6 +6237,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     const int qdither     = (cstep0 == 4) ? (int)SHARED_UC->wall_qdither : 0;
     const int lod         = (cstep0 == 1) ? (int)SHARED_UC->wall_lod : 0;
     const int seam_rec    = seam_smooth || dissolve || qdither || lod;
+    g_seam_rec_on = seam_rec;   /* gates the covered-row skip against stale seams */
     if (seam_rec)
         for (int c = col_start; c < col_end; c++) seam_top[c] = -1;
 

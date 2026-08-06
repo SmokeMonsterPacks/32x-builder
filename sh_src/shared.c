@@ -23,5 +23,6 @@ shared_t shared = {
     .wall_dissolve = 0,   /* transient; driven by the AUTO half→full ramp */
     .wall_qdither = 1,    /* quarter-res boundary dither (spatial, static per frame) */
     .wall_lod = 0,        /* WALLS=LOD prototype off by default */
+    .carpet_vlod = 1,     /* carpet vertical depth LOD on; TESTING>CARPETLOD A/Bs it */
     .hero_dying = 0,      /* caveman alive until knocked down */
 };
