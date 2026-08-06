@@ -40,8 +40,11 @@ MAX_W, MAX_H = 64, 96          # texel caps for a STANDEE (tall, camera-facing)
 # Proof: his own art downscaled to 89x46 with no palette limit looks identical
 # to what we shipped. The grain only survives from ~176 texels up. A decal
 # samples one texel per screen pixel, so this costs ROM and nothing else.
+# A SQUARE sheet is a normal upload (an artist draws a page of damage and that
+# page IS the decal), so the budget has to hold 224x224, not just a wide strip.
 MAX_W_WALL      = 224
-MAX_TEXELS_WALL = 26624         # 26 KB: enough for 224x116
+MAX_H_WALL      = 224
+MAX_TEXELS_WALL = 50176         # 49 KB: a full 224x224 decal
 MAX_TEXELS   = 4096            # ROM budget per community STANDEE (4 KB)
 RAMP_N       = 16              # COMM_BASE ramp length (raycast.c)
 
@@ -459,11 +462,11 @@ def main():
     wall = (args.mount == "wall")
     out_w = args.width or fit_width(
         src_img, max_w=(MAX_W_WALL if wall else MAX_W),
-        max_h=(MAX_H * 4 if wall else MAX_H),
+        max_h=(MAX_H_WALL if wall else MAX_H),
         budget=(MAX_TEXELS_WALL if wall else MAX_TEXELS))
     rows, W, H, pal31, pal8 = bake_image(src_img, out_w,
                                          dither=not args.no_dither,
-                                         max_h=(MAX_H * 4 if wall else MAX_H))
+                                         max_h=(MAX_H_WALL if wall else MAX_H))
     if W * H > (MAX_TEXELS_WALL if wall else MAX_TEXELS):
         sys.exit("baked %dx%d = %d texels exceeds the %d budget — "
                  "use a smaller --width" % (W, H, W * H, MAX_TEXELS))

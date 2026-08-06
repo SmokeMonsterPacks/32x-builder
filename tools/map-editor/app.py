@@ -290,7 +290,7 @@ def bake_sprite_route():
     # contributors we bake their image DOWN; at that size we were mangling it.
     wall = (mount == "wall")
     max_w = bake_sprite.MAX_W_WALL if wall else bake_sprite.MAX_W
-    max_h = bake_sprite.MAX_H * 4 if wall else bake_sprite.MAX_H
+    max_h = bake_sprite.MAX_H_WALL if wall else bake_sprite.MAX_H
     budget = bake_sprite.MAX_TEXELS_WALL if wall else bake_sprite.MAX_TEXELS
     fit = bake_sprite.fit_width(img, max_w=max_w, max_h=max_h, budget=budget)
     rows, W, H, pal31, pal8 = bake_sprite.bake_image(img, fit, max_h=max_h)
@@ -321,10 +321,9 @@ def bake_sprite_route():
     buf = io.BytesIO(); pv.save(buf, "PNG")
     sheet = None
     if len(marks) > 1 and not mark:
-        sheet = ("This image holds %d separate marks. Baked together they are "
-                 "ONE decal — mostly empty space, every mark shrunk. Pick a "
-                 "mark below and bake it on its own for a sharp sprite (upload "
-                 "the same image again for the others)." % len(marks))
+        sheet = ("Baked as ONE decal, which is your image as you drew it. It "
+                 "holds %d separate marks — if you meant each to be its own "
+                 "placeable decal, bake them one at a time here." % len(marks))
     return jsonify({
         "ok": True, "id": sprite_id, "w": W, "h": H, "kind": sprite["kind"],
         "marks": len(marks), "mark": mark, "sheet_warning": sheet,
