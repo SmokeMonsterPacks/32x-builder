@@ -207,7 +207,7 @@ plus the debug extras — nothing down here is required knowledge:
 |---|---|
 | **MODE + B** | Cycle the automap overlay (same as GAME → MAP) |
 | **MODE + ↑ / ↓** | Automap zoom (same as GAME → ZOOM) |
-| **MODE + X** | Cycle wall resolution: FULL → HALF → AUTO → SERL (diagnostic) |
+| **MODE + X** | Cycle wall resolution: FULL → HALF → AUTO → SERL (diagnostic) → LOW |
 | **MODE + Y** | Toggle the on-screen profiler (frame/render timers, per-pass ticks) |
 | **MODE + Z** | Controller-input tester (raw pad register — for diagnosing emulator key binds) |
 | **MODE + C** | Partition-diagnostic mode (HUD `J`): normal / legacy paths / gate-off pricing |
@@ -216,6 +216,9 @@ plus the debug extras — nothing down here is required knowledge:
 `WALLS: AUTO` (the default) measures frame time and drops to half-res only when
 a scene gets heavy, so the image stays crisp when it can afford to. `SERL`
 serializes the two CPUs for contention-free profiling and is intentionally slow.
+Half is AUTO's floor — measured on hardware, quarter-res tied half on framerate
+while looking worse, so it is manual-only (`LOW`) rather than something AUTO
+will pick for you.
 
 ---
 

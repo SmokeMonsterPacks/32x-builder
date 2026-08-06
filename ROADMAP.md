@@ -299,6 +299,33 @@ Still pending — would layer over the existing buzz/hum bed.
 
 ## Performance
 
+### The frame is now measured — and the bottleneck moves  (2026-08-06)
+The HUD accounts for ~93% of frame time (gap: 58 ticks). New counters: `I`
+(lights, split out of `P`), `HU` (post-render draw), `SW` (swapBuffers), `ID`
+(secondary barrier), `OD` (wall coverage %).
+
+**There is no single bottleneck. It flips with scene type:**
+
+| scene | dominant | ticks |
+|---|---|---|
+| corridor | walls | 6,268 |
+| open room | floor + ceiling | 7,929 (walls only 3,581) |
+| crawl / dark room | slab + sprites | 7,349 |
+
+Every resolution tier in this engine is on the *wall* pass, which tops the list
+in one of those three. Ask which scene before picking a target.
+
+**Closed with numbers — do not re-litigate:** the dual-CPU split is already
+optimal (`ID` 93, H and S within 51 ticks). Lights are ~1.5% of frame. Quarter
+res is nerfed out of AUTO and LOD.
+
+**Still open:** ceiling has no LOD at all (3,286 ticks in open rooms) and cannot
+take the covered-row skip as-is — its grid lines compare world coords between
+*consecutive* rows, so skipping breaks the chain. Slab (`L` 4,657 in crawl
+scenes) is the largest untouched pass and already has a BULKHEAD A/B toggle.
+Unexplained: `C` (clear) jumped 373 → 1,015 between two frames at the same
+camera, outside its usual 336–762 band.
+
 ### Partition parity — deferred items + the cost wall  (2026-07-24)
 **Status:** parity batch banked (commit "Partition parity: near-slab LOD…").
 The slab/overlay path is a second-class render citizen: it re-implements, by
@@ -417,9 +444,15 @@ hi-res column-major, threshold `FX(3)`). Three or more bands could be
 added later; not currently a bottleneck.
 
 ### Floor-cast carpet at proper LOD
-Still open — currently every-4th-column stamp covers the full bottom
-half. Could compress further with a sparser near-row pattern and skip
-the horizon-band entirely (already half-done — we skip max-dark rows).
+✅ done (2026-08-06). Two cuts, both measured on hardware. **Vertical depth
+LOD**: the pass already stepped x_step 4/8/16 by fog band but ran every screen
+row, and each row costs a DIVU plus ~6 muls of setup before one stain lands.
+Row step now doubles at the mid band, keyed to the same geo_shade. **Covered-row
+skip**: ceiling and carpet paint every pixel *before* the wall pass, so rows the
+walls bury were drawn for nothing — the new OD counter reads 8% coverage in open
+rooms, 32% in corridors, 92% in partition views. The band collapses to a scalar
+pair so the per-row test is free. Partition view, same camera: R 1,147 → 492,
+T 19,290 → 18,191. TESTING>CARPETLOD A/Bs it in one binary.
 
 ## Polish
 
