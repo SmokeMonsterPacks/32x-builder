@@ -90,6 +90,21 @@ crawlspace eye-height gate (walk-under).
    recessed in it. Ties into the "different door types" list.
 5. **Curve LUT** — round/pointed arch tops (polish).
 
+### Exit hole — believable up close  (next up, 2026-08-06)
+Three fixes, in the order 3 → 2 → 1: the look is the hard part, and the
+animation should be tuned against final geometry.
+
+3. **Not believable up close.** Same job as the door recess/jamb, which is
+   already solved once and is the model to copy. `draw_exit_hole` is
+   `raycast.c:5446`; the geometry globals (plane, `c0`, axis, dir, `HOLE_HW`)
+   are `raycast.c:967-974`. Both CPUs draw it in the tail pass and the globals
+   are cache-purged per map load.
+2. **Crawl-in animation too slow.** `PULLUP_FRAMES 21` (`m_main.c:1685`),
+   driven at `m_main.c:1687-1690`, triggered by `raycast_exit_hole_check()` at
+   1712. Open question: scripted or interruptible.
+1. **Too frequent in procgen.** Spawn-weight problem. Test with
+   `place_exit_door` / exit-hole placement side by side.
+
 ### Bigger / more authentic map
 **Status:** ✅ done — settled on a hand-tuned 32×32.
 
@@ -325,6 +340,13 @@ take the covered-row skip as-is — its grid lines compare world coords between
 scenes) is the largest untouched pass and already has a BULKHEAD A/B toggle.
 Unexplained: `C` (clear) jumped 373 → 1,015 between two frames at the same
 camera, outside its usual 336–762 band.
+
+**Measurement traps that cost hours here.** `WALLS=AUTO` is path-dependent —
+the stillness ratchet means standing still to read the HUD changes the number,
+so pin `WALLS` before any capture. The profiler itself costs 2,255 ticks and is
+present in every historical number in this file. Uncommitted iterations share
+one build stamp, so commit between A/B arms or you cannot tell which binary you
+measured.
 
 ### Partition parity — deferred items + the cost wall  (2026-07-24)
 **Status:** parity batch banked (commit "Partition parity: near-slab LOD…").
@@ -572,6 +594,11 @@ caller passed `world_hw` (a half-extent), so every generic sprite previewed at
 exactly half width for as long as that path has existed. The neanderthal hid it
 by hardcoding already-full dimensions.
 
+**First customer for the polished path: the PVM.** One model, PVM + desk fused,
+through `bake_boxes.py` (the desk went through at 3 boxes / 18 faces, and the
+separating-axis ordering is already solved). Then an animated static screen on
+it: a flat quad on a known face, cheap procedural noise.
+
 
 ### `make deploy` to MiSTer
 ✅ done — auto-scp's the .32x to `root@mister.office.local`.
@@ -599,4 +626,15 @@ scp'ing, so USB renumber doesn't break the push.
 total, primary half-render time, secondary half-render time) sampled from
 SH-2 free-running timer at Φ/32 (1.39μs per tick). Both CPUs init
 their own FRT; secondary publishes its delta via `SHARED_UC->secondary_render_ticks`.
+
+### Master System arc — staged so the beat ships either way
+Two independent pieces, deliberately not blocked on each other.
+
+**A. A snake game that looks like SMS**, on hardware we already control. Ships
+guaranteed, no research risk.
+
+**B. A minimal research ROM answering one question:** can software enter VDP
+Mode 4 and come back, on real hardware? The Power Base Converter asserts Mode 4
+from the cartridge port, so whether it can be done in software is the gate. If
+B works, swap it in behind the beat A already shipped.
 Remove the overlay before shipping a release build.
