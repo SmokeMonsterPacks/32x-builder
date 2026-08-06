@@ -120,6 +120,7 @@ static void pad_test_draw(uint8_t *fb, uint16_t snap) {
 void hud_genesis_blank(void) {   /* non-static: the menu's METRICS toggle blanks too */
     static char blank[41] = "                                        ";
     HwMdPuts(blank, 0, 0, 0);    /* X/Y + T/H/S */
+    HwMdPuts(blank, 0, 0, 1);    /* HU/SW/ID (the fixed per-frame overhead) */
     HwMdPuts(blank, 0, 0, 2);    /* A */
     HwMdPuts(blank, 0, 0, 23);   /* H/TX/P6 (chair A/B + pad type) — was MISSING:
                                   * turning metrics off left this row hovering */
@@ -203,6 +204,19 @@ static uint16_t prof_half_smoothed = 0;
 
 extern volatile uint16_t prof_primary_half_ticks;  /* written by raycast_render */
 
+/* THE UNMEASURED QUARTER. Summing max(H,S) + L + I + P against T left a gap of
+ * ~5,600 ticks that stayed FLAT across four captures while the work under it
+ * swung 3,250 — so it is fixed per-frame overhead, not the vblank wait (that
+ * would shrink as work grows). These three name it:
+ *   HU = post-render draw: automap + menu_render + the HUD text itself
+ *   SW = swapBuffers: the vblank wait and the framebuffer flip handshake
+ *   ID = prof_primary_idle_ticks, the primary spinning on the secondary barrier
+ * Sampled one frame BEHIND what's on screen (prof_sample_and_draw runs inside
+ * the HU bracket), which is fine for a steady-state read. */
+static uint16_t prof_post_hud = 0;
+static uint16_t prof_post_swap = 0;
+extern volatile uint16_t prof_primary_idle_ticks;  /* written by raycast_render */
+
 static inline uint16_t prof_read_frt(void) {
     /* Hitachi SH-2 FRT quirk: reading FRCH latches FRCL into a
      * temporary register so the 16-bit value stays atomic. */
@@ -270,6 +284,28 @@ static void prof_sample_and_draw(uint8_t *fb) {
     HwMdPuts((char *)("B" VERSION_BUILD_STR " " VERSION_SHA_STR),
              HUD_TILE_COLOR, 25, 27);
 
+    /* Row 1 — THE FIXED OVERHEAD, previously invisible. HU = post-render draw
+     * (automap + menu + this HUD), SW = swapBuffers (vblank wait + flip), ID =
+     * primary spinning on the secondary barrier. HU+SW+ID should account for
+     * most of the ~5,600-tick gap between max(H,S)+L+I+P and T. */
+    {
+        static const char lbl[3][3] = { "HU", "SW", "ID" };
+        uint16_t pv[3] = { prof_post_hud, prof_post_swap, prof_primary_idle_ticks };
+        char t1[32];
+        int pos = 0;
+        for (int i = 0; i < 3; i++) {
+            t1[pos++] = lbl[i][0];
+            t1[pos++] = lbl[i][1];
+            t1[pos++] = ':';
+            uint16_t x = pv[i];
+            for (int d = 4; d >= 0; d--) { t1[pos + d] = '0' + (x % 10); x /= 10; }
+            pos += 5;
+            t1[pos++] = ' ';
+        }
+        t1[pos] = 0;
+        HwMdPuts(t1, HUD_TILE_COLOR, 0, 1);   /* HU/SW/ID, GENESIS layer */
+    }
+
     /* Second line: primary-half per-pass breakdown — Clear / ceiling-Grid /
      * caRpet / Walls (raw FRT ticks), then F = effective FPS. Per-pass tells
      * us which pass to optimize; F is the bottom-line score it rolls up to. */
@@ -308,11 +344,17 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * (crawlspace, scene-dependent), P = lights + standups sprites. This is
      * the ~25%-of-frame block that was invisible until now. */
     {
+        /* I = draw_lights, split out of P so the light loop's off-screen
+         * rejection sweep (ALL NUM_LIGHTS visited, culled inside the body) is
+         * readable on its own; P is now STANDUPS ONLY. Six fields at 8 chars
+         * each overrun the 40-char line, so only the first FIVE render — I sits
+         * in the last visible slot and K (split column, a position not a cost)
+         * takes the clipped one. E/prof_dda_fat was already off-screen here. */
         extern volatile uint16_t prof_pass_ovl, prof_pass_sprite, prof_pass_slab;
-        extern volatile uint16_t prof_split_col, prof_dda_fat, prof_ovl_px;
-        static const char lbl[6] = {'L', 'O', 'U', 'P', 'K', 'E'};
+        extern volatile uint16_t prof_split_col, prof_ovl_px, prof_pass_lights;
+        static const char lbl[6] = {'L', 'O', 'U', 'P', 'I', 'K'};
         uint16_t pv[6] = { prof_pass_slab, prof_pass_ovl, prof_ovl_px,
-                           prof_pass_sprite, prof_split_col, prof_dda_fat };
+                           prof_pass_sprite, prof_pass_lights, prof_split_col };
         char t3[52];
         int pos = 0;
         for (int i = 0; i < 6; i++) {
@@ -324,7 +366,7 @@ static void prof_sample_and_draw(uint8_t *fb) {
             t3[pos++] = ' ';
         }
         t3[pos] = 0;
-        HwMdPuts(t3, HUD_TILE_COLOR, 0, 25);   /* O/P/K/E, GENESIS layer */
+        HwMdPuts(t3, HUD_TILE_COLOR, 0, 25);   /* L/O/U/P/I visible, GENESIS layer */
     }
 
     /* Fourth line — the PARTITION CAMPAIGN counters (primary half, per frame):
@@ -1669,6 +1711,7 @@ int m_main(void) {
          * read the same value when computing the distant-wall strobe. */
         SHARED_UC->frame_count++;
         raycast_render();
+        uint16_t t_post = prof_read_frt();          /* render done; HU starts */
         uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
         if (g_automap_on) automap_draw(fb_text);   /* red vectors under the text */
         menu_render(fb_text);
@@ -1677,7 +1720,9 @@ int m_main(void) {
             pos_draw(fb_text);
         }
         if (g_padtest_on) pad_test_draw(fb_text, pad);
+        { uint16_t n = prof_read_frt(); prof_post_hud = (uint16_t)(n - t_post); t_post = n; }
         swapBuffers();
+        { uint16_t n = prof_read_frt(); prof_post_swap = (uint16_t)(n - t_post); }
     }
 
     /* EXIT TO LOBBY: fade the level out, level the camera (stale hold-C

@@ -7914,6 +7914,12 @@ volatile uint16_t prof_pass_clear = 0, prof_pass_ceil = 0,
  * low_ceiling + bulkheads (crawlspace, scene-dependent); sprite = lights +
  * standups. The line-table head-bob (~0.05ms) is left out. */
 volatile uint16_t prof_pass_slab = 0, prof_pass_sprite = 0;
+/* draw_lights split out of prof_pass_sprite: the light loop visits ALL
+ * NUM_LIGHTS (procgen lays a fixture every 2 cells = 225 on a 32x32) and culls
+ * INSIDE the body, so off-screen fixtures still cost an iteration + ~6 muls
+ * each. This counter says whether that rejection sweep is worth indexing away.
+ * With this split, prof_pass_sprite is STANDUPS ONLY. */
+volatile uint16_t prof_pass_lights = 0;
 static inline uint16_t prof_frt_read(void) {
     uint8_t hi = SH2_FRT_FRCH;
     uint8_t lo = SH2_FRT_FRCL;
@@ -8247,6 +8253,7 @@ void raycast_render(void) {
     /* Lights first, then standups — foreground sprites overpaint ceiling-panel
      * pixels in shared rows; the per-column z-test handles walls. */
     draw_lights(0, sprite_split);
+    { uint16_t n = prof_frt_read(); prof_pass_lights = (uint16_t)(n - ps); ps = n; }
     draw_standups(0, sprite_split);
     { uint16_t n = prof_frt_read(); prof_pass_sprite = (uint16_t)(n - ps); }
     /* Barrier: wait for the secondary to finish its tail+sprite half before the
