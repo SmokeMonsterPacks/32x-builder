@@ -4131,8 +4131,19 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                      * it recedes (shades run 1..7) so it stops floating as a
                      * bright cutout in the fog. Hands off to the silhouette at
                      * far LOD. If this reads BRIGHTER with distance the ramp is
-                     * reversed -- flip to (sd->base + (8 - sh)). */
-                    int sh = k - fog;
+                     * reversed -- flip to (sd->base + (8 - sh)).
+                     *
+                     * SPRITE_F_ARTPAL sits this out: a community sprite's 7
+                     * entries are the artist's COLOURS, so walking them swaps
+                     * hues rather than dimming them (a red stop sign would fog
+                     * toward whatever its darkest entry happens to be). Keep
+                     * the art's own colours until real gloom, then let the
+                     * dark end carry it. */
+                    int sh;
+                    if (sd->flags & SPRITE_F_ARTPAL)
+                        sh = (fog >= 5) ? 1 : k;
+                    else
+                        sh = k - fog;
                     if (sh < 1) sh = 1; else if (sh > 7) sh = 7;
                     vmap[k] = (uint8_t)(sd->base + sh);
                 } else {
@@ -7362,7 +7373,20 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                              * the wall-shade fold SUBTRACTS toward dark,
                              * exactly like the outlet's. */
                             if (tv) {
-                                int ob = tv - oshade;
+                                /* SPRITE_F_ARTPAL: the palette is the ARTIST'S
+                                 * colours, not a fog ramp of one material, so
+                                 * walking the index does not darken it — it
+                                 * RECOLOURS it. A cream-over-grey-tan wallpaper
+                                 * tear lost its cream and read as a sage blob
+                                 * (verified by replaying this fold over the
+                                 * baked texels at every shade level). Art keeps
+                                 * its own colours; only genuine gloom (the
+                                 * deepest fold) drops it to its dark end. */
+                                int ob;
+                                if (sd->flags & SPRITE_F_ARTPAL)
+                                    ob = (oshade >= 4) ? 1 : tv;
+                                else
+                                    ob = tv - oshade;
                                 if (ob < 1) ob = 1;
                                 uint8_t oc8 = (uint8_t)(sd->base + ob);
                                 if (hr >= 2) *(uint32_t *)po = LDUP(oc8); else if (hr) *(uint16_t *)po = WDUP(oc8); else *po = oc8;

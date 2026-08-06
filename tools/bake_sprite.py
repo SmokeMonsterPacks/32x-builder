@@ -341,7 +341,11 @@ def registry_entries(reg, sprite_id, W, H, world_h, pal31, author="",
     """
     kind = max(k["kind"] for k in reg["decals"]["kinds"]) + 1
     world_hw = round(world_h * (W / float(H)) / 2.0, 4)
-    flags = ["standalone"] if mount == "billboard" else []
+    # Community art carries its OWN colours, not a shading ramp: the renderer
+    # must not walk this palette to fog it (see SPRITE_F_ARTPAL).
+    flags = ["artpal"]
+    if mount == "billboard":
+        flags.insert(0, "standalone")
     sprite = {
         "id": sprite_id, "kind": kind, "mount": mount,
         "tex": "spr_%s_tex.h" % sprite_id, "sym": "spr_%s_tex" % sprite_id,

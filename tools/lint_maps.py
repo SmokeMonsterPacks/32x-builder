@@ -307,7 +307,7 @@ def lint_assets(reg, sh_dir, errs):
         if s.get("decode") not in (None, "offset", "door"):
             errs.append("assets: sprite %s bad decode %r" % (sid, s["decode"]))
         for f in s.get("flags", []):
-            if f not in ("animated", "lod", "standalone", "colmajor"):
+            if f not in ("animated", "lod", "standalone", "colmajor", "artpal"):
                 errs.append("assets: sprite %s bad flag %r" % (sid, f))
         if "kind" in s:
             if s["kind"] in kinds_seen:

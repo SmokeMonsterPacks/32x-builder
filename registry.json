@@ -354,7 +354,9 @@
     "z": 0.55,
     "transparent": 1,
     "decode": "offset",
-    "flags": [],
+    "flags": [
+     "artpal"
+    ],
     "tier": "community",
     "author": "Double K"
    },
@@ -407,7 +409,9 @@
     "z": 0.52,
     "transparent": 1,
     "decode": "offset",
-    "flags": [],
+    "flags": [
+     "artpal"
+    ],
     "tier": "community",
     "author": "Double K"
    },
@@ -460,7 +464,9 @@
     "z": 0.58,
     "transparent": 1,
     "decode": "offset",
-    "flags": [],
+    "flags": [
+     "artpal"
+    ],
     "tier": "community",
     "author": "Double K"
    },
@@ -508,7 +514,9 @@
     "z": 0.5,
     "transparent": 1,
     "decode": "offset",
-    "flags": [],
+    "flags": [
+     "artpal"
+    ],
     "tier": "community",
     "author": "Double K"
    },
@@ -562,7 +570,8 @@
     "transparent": 1,
     "decode": "offset",
     "flags": [
-     "standalone"
+     "standalone",
+     "artpal"
     ],
     "tier": "community",
     "author": "Double K"
@@ -586,7 +595,9 @@
     "z": 0.55,
     "transparent": 1,
     "decode": "offset",
-    "flags": [],
+    "flags": [
+     "artpal"
+    ],
     "tier": "community",
     "author": "Double K"
    }

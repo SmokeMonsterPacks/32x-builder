@@ -16,7 +16,8 @@ ROOT = os.path.dirname(HERE)
 MOUNT  = {"wall": "SPRITE_MOUNT_WALL", "billboard": "SPRITE_MOUNT_BILLBOARD"}
 DECODE = {"offset": "SPRITE_DECODE_OFFSET", "door": "SPRITE_DECODE_DOOR"}
 FLAG   = {"animated": "SPRITE_F_ANIMATED", "lod": "SPRITE_F_LOD",
-          "standalone": "SPRITE_F_STANDALONE", "colmajor": "SPRITE_F_COLMAJOR"}
+          "standalone": "SPRITE_F_STANDALONE", "colmajor": "SPRITE_F_COLMAJOR",
+          "artpal": "SPRITE_F_ARTPAL"}
 
 
 def die(m):
@@ -56,6 +57,12 @@ def emit(sprites):
           '#define SPRITE_F_LOD        0x02   /* has a hi-res variant (tex_hi) */',
           '#define SPRITE_F_STANDALONE 0x04   /* free-standing (not wall-anchored) */',
           '#define SPRITE_F_COLMAJOR   0x08   /* lo-res texture stored [W][H] (door) */',
+          '/* The palette holds the ARTIST\'S COLOURS, not a fog ramp of one',
+          ' * material. First-party assets bake a luminance ramp, so the renderer',
+          ' * shades them by walking the index down (neanderthal, outlet). Doing',
+          ' * that to real art RECOLOURS it -- a torn wallpaper decal of cream',
+          ' * over grey-tan lost its cream entirely and read as a sage blob. */',
+          '#define SPRITE_F_ARTPAL     0x10',
           '',
           'typedef struct {',
           '    const uint8_t *tex, *tex_hi;       /* lo-res + optional hi-res (LOD) */',
