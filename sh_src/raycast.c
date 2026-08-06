@@ -4262,10 +4262,11 @@ int raycast_asset_valid(int sel) {
 }
 
 const char *raycast_asset_name(int sel) {
-    static const char *const names[] = { "OUTLET", "DOOR", "NEANDERTHAL", "CHAIR",
-                                         "", "DESK" };
-    if (sel < 0 || sel >= (int)(sizeof names / sizeof names[0])) return "ASSET";
-    return names[sel];
+    /* Names come from sprite_defs.h (generated from the registry), so a
+     * community upload shows its own id here rather than a generic "ASSET". */
+    if (sel < 0 || sel >= (int)(sizeof sprite_names / sizeof sprite_names[0]))
+        return "ASSET";
+    return sprite_names[sel][0] ? sprite_names[sel] : "ASSET";
 }
 
 void raycast_asset_dims(int sel, int *w, int *h) {

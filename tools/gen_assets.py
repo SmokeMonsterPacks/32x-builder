@@ -98,6 +98,19 @@ def emit(sprites):
 
     L += ['};', '',
           '#define SPRITE_DEF_COUNT (int)(sizeof sprite_defs / sizeof sprite_defs[0])',
+          '',
+          '/* Kind-indexed display names for the in-ROM ASSET VIEWER. Generated so a',
+          ' * community sprite is identifiable there instead of reading "ASSET" --',
+          ' * the viewer is how an author checks their upload against their art. */',
+          'static const char *const sprite_names[] = {']
+    next_k = 0
+    for s in sorted(sprites, key=lambda s: s["kind"]):
+        while next_k < s["kind"]:
+            L.append('    "",')
+            next_k += 1
+        next_k = s["kind"] + 1
+        L.append('    "%s",' % s["id"].upper()[:16])
+    L += ['};', '',
           '#endif /* SPRITE_DEFS_H */', '']
     return "\n".join(L)
 
