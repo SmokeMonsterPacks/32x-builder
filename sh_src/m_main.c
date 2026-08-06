@@ -289,11 +289,16 @@ static void prof_sample_and_draw(uint8_t *fb) {
      * primary spinning on the secondary barrier. HU+SW+ID should account for
      * most of the ~5,600-tick gap between max(H,S)+L+I+P and T. */
     {
-        static const char lbl[3][3] = { "HU", "SW", "ID" };
-        uint16_t pv[3] = { prof_post_hud, prof_post_swap, prof_primary_idle_ticks };
-        char t1[32];
+        /* OD = % of this half's screen the wall strips cover. Ceiling and carpet
+         * paint every pixel BEFORE the walls do, so OD is the share of G+R that
+         * gets buried — the overdraw number, not a cost in ticks. */
+        extern volatile uint16_t prof_wall_cover;
+        static const char lbl[4][3] = { "HU", "SW", "ID", "OD" };
+        uint16_t pv[4] = { prof_post_hud, prof_post_swap,
+                           prof_primary_idle_ticks, prof_wall_cover };
+        char t1[40];
         int pos = 0;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             t1[pos++] = lbl[i][0];
             t1[pos++] = lbl[i][1];
             t1[pos++] = ':';

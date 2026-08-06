@@ -6236,8 +6236,17 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     for (int qcol = col_start; qcol < col_end; qcol += 4) {
         int cstep_q = cstep0;
         if (lod) {
-            cstep_q = (lod_prev_depth < LOD_T_NEAR) ? lod_near_cs
-                    : (lod_prev_depth < LOD_T_FAR)  ? 2 : 4;
+            /* QUARTER NERFED OUT OF LOD (measured 2026-08-06). The far tier used
+             * to be 4 (quarter blocks). Same-ROM A/B in the test corridor:
+             *   HALF             W 6,283  T 18,121  F:10
+             *   QUARTER+dither   W 4,816  T 17,978  F:10   <- ties half, looks worse
+             *   LOD (4 far)      W 8,856  T 20,941  F:08
+             * Quarter's raw saving is real but the boundary dither hands half of
+             * it back, and what survives does not clear an fps step. Half both
+             * ties it and looks better, so the far tier is now 2 as well. Note
+             * the far-quad dither below assumes 4px blocks, so it must stay OFF
+             * for LOD now that no tier produces them. */
+            cstep_q = (lod_prev_depth < LOD_T_NEAR) ? lod_near_cs : 2;
             /* B-fix: a near see-over slab pulls this quad back to full res when
              * you STOP to look, overriding the near-band drop that pixel-doubles
              * it. While MOVING we keep the drop (same cstep the walls take), so
@@ -7850,23 +7859,30 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * gradient into its neighbour, so the hard shade step softens. Static per
      * frame (no stutter); the Bayer blends on both axes so it reads smooth on the
      * PVM and as an intentional dither texture (not a blocky step) on sharp HDMI.
-     * Runs only at quarter (cstep==4) and only over each block's wall band. */
+     * Runs only at quarter (cstep==4) and only over each block's wall band.
+     *
+     * DITHER_COL collapses the Bayer evaluation to a lookup, BIT-IDENTICAL to the
+     * three-threshold form it replaces. Walking the table shows only ONE of the
+     * three tests can ever pass for a given row, and which one is a fixed
+     * function of y&3:
+     *     y&3=0 {0,8,2,10}  -> br[3]=10<9 no, br[2]=2<5 YES, br[1]=8<2 no  -> col 2
+     *     y&3=1 {12,4,14,6} -> br[3]=6<9 YES                               -> col 3
+     *     y&3=2 {3,11,1,9}  -> br[3]=9<9 no, br[2]=1<5 YES                 -> col 2
+     *     y&3=3 {15,7,13,5} -> br[3]=5<9 YES                               -> col 3
+     * So the old inner loop spent 3 table loads, 3 compares and 2 untaken
+     * branches per row to re-derive a constant, plus a y*SCREEN_W multiply. This
+     * pass MEASURED 1,804 ticks at quarter -- it was consuming quarter-res's
+     * entire advantage over half (F:10 both), which is why quarter looked
+     * pointless. Aliasing is safe: a block writes cols +1..+3 and reads +4, the
+     * next block's left edge, which this pass never writes. */
+    static const uint8_t DITHER_COL[4] = { 2, 3, 2, 3 };
     if (qdither) {
-        static const uint8_t bayer4[4][4] = {
-            {  0,  8,  2, 10 }, { 12,  4, 14,  6 },
-            {  3, 11,  1,  9 }, { 15,  7, 13,  5 } };
         for (int ac = col_start; ac + 4 < col_end; ac += 4) {
             if (!SEAM_VALID(ac)) continue;
             int y0 = seam_top[ac], y1 = seam_bot[ac];
-            uint8_t *base = fb + ac;
-            for (int y = y0; y <= y1; y++) {
-                uint8_t *row = base + y * SCREEN_W;
-                uint8_t bcol = row[4];                 /* next block's left column */
-                const uint8_t *br = bayer4[y & 3];
-                if (br[3] <  9) row[3] = bcol;         /* ~60% toward neighbour */
-                if (br[2] <  5) row[2] = bcol;         /* ~30% */
-                if (br[1] <  2) row[1] = bcol;         /* ~10% */
-            }
+            uint8_t *row = fb + ac + y0 * SCREEN_W;
+            for (int y = y0; y <= y1; y++, row += SCREEN_W)
+                row[DITHER_COL[y & 3]] = row[4];   /* toward next block's left col */
         }
     }
 
@@ -7876,22 +7892,20 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * nothing needs re-blocking here. This just softens the far quarter blocks:
      * a Bayer ramp of the block's right side toward the next quad, same as the
      * global DITHER but keyed to depth (WALL_DIST >= LOD_T_FAR). */
-    if (lod) {
-        static const uint8_t bayer4[4][4] = {
-            {  0,  8,  2, 10 }, { 12,  4, 14,  6 },
-            {  3, 11,  1,  9 }, { 15,  7, 13,  5 } };
+    /* DEAD while LOD's far tier is 2 (half-pairs): this loop blends columns +1..+3
+     * of a 4px block, which only exists at cstep 4, so running it now would smear
+     * half-pairs. It measured 314 ticks when it did run, so it was never why LOD
+     * underperformed. Kept and compiled out, so a future quarter tier flips it
+     * back on with this one constant. */
+    #define LOD_FAR_QUARTER 0
+    if (lod && LOD_FAR_QUARTER) {
+        /* Same DITHER_COL collapse as the quarter pass above, identical output. */
         for (int q = col_start; q + 4 < col_end; q += 4) {
             if (!SEAM_VALID(q) || WALL_DIST(q) < LOD_T_FAR) continue;  /* far quads only */
             int y0 = seam_top[q], y1 = seam_bot[q];
-            uint8_t *base = fb + q;
-            for (int y = y0; y <= y1; y++) {
-                uint8_t *r = base + y * SCREEN_W;
-                uint8_t bcol = r[4];                   /* next quad's left column */
-                const uint8_t *br = bayer4[y & 3];
-                if (br[3] <  9) r[3] = bcol;           /* ~60% toward neighbour */
-                if (br[2] <  5) r[2] = bcol;           /* ~30% */
-                if (br[1] <  2) r[1] = bcol;           /* ~10% */
-            }
+            uint8_t *r = fb + q + y0 * SCREEN_W;
+            for (int y = y0; y <= y1; y++, r += SCREEN_W)
+                r[DITHER_COL[y & 3]] = r[4];   /* toward next quad's left col */
         }
     }
 }
@@ -7920,6 +7934,13 @@ volatile uint16_t prof_pass_slab = 0, prof_pass_sprite = 0;
  * each. This counter says whether that rejection sweep is worth indexing away.
  * With this split, prof_pass_sprite is STANDUPS ONLY. */
 volatile uint16_t prof_pass_lights = 0;
+/* OD: percent of the primary's screen area covered by wall strips. The ceiling
+ * pass paints rows [0,horizon) and the carpet pass paints [horizon,SCREEN_H),
+ * both for EVERY column and both BEFORE the wall pass -- so whatever the walls
+ * later cover was drawn and immediately buried. That makes this percentage the
+ * share of G+R that is pure overdraw. Costs ~100 ticks to compute (one pass over
+ * split columns, after the W bracket closes so it does not inflate W). */
+volatile uint16_t prof_wall_cover = 0;
 static inline uint16_t prof_frt_read(void) {
     uint8_t hi = SH2_FRT_FRCH;
     uint8_t lo = SH2_FRT_FRCL;
@@ -8044,10 +8065,18 @@ void raycast_render(void) {
              * frame_ema>16000 (~F:11 or worse), disarm once it eases below 13000.
              * Requires we're already at half (auto_hr==1); the overlay's 70KB of
              * stack headroom makes quarter safe everywhere now. */
+            /* QUARTER NERFED OUT OF AUTO (measured 2026-08-06). AUTO now floors
+             * at half. Same-ROM A/B in the test corridor: quarter+dither tied
+             * half at F:10 while looking worse, and quarter-no-dither bought one
+             * fps for the chunkiest image on the board. The premise above --
+             * "the 4px chunk is masked by motion" -- held up visually, but the
+             * frames it was buying were not there. The deadband and its
+             * thresholds stay so this is a one-line revert if carpet LOD or
+             * another win later moves the frame into a band where quarter pays. */
             static int auto_q = 0;
             if      (frame_ema > AUTO_QTR_ON)  auto_q = 1;
             else if (frame_ema < AUTO_QTR_OFF) auto_q = 0;
-            if (auto_q && auto_hr == 1 && is_walking) eff_hr = 2;
+            (void)auto_q;   /* was: if (auto_q && auto_hr == 1 && is_walking) eff_hr = 2; */
             /* STILLNESS RATCHET (Mike): motion masks the chunk, so AUTO happily
              * sits at half/quarter while you move through a busy room. But the
              * instant you STOP to take stock, judder can't hide anything and fps
@@ -8210,6 +8239,21 @@ void raycast_render(void) {
     { uint16_t n = prof_frt_read(); prof_pass_carpet = (uint16_t)(n - pp); pp = n; }
     raycast_draw_walls(0, split);
     { uint16_t n = prof_frt_read(); prof_pass_walls  = (uint16_t)(n - pp); }
+    /* OD — wall coverage as a percent of this half's screen area. seam_top/bot
+     * hold each column's wall extent and are reset to -1 per frame, so this is a
+     * read of work already done. Outside the W bracket on purpose. */
+    {
+        uint32_t covered = 0;
+        for (int c = 0; c < split; c++) {
+            if (!SEAM_VALID(c)) continue;
+            int t = seam_top[c], b = seam_bot[c];
+            if (t < 0) t = 0;
+            if (b >= SCREEN_H) b = SCREEN_H - 1;
+            if (b >= t) covered += (uint32_t)(b - t + 1);
+        }
+        uint32_t area = (uint32_t)split * SCREEN_H;
+        prof_wall_cover = area ? (uint16_t)((covered * 100u) / area) : 0;
+    }
 
     uint16_t idle_start = prof_frt_read();
     prof_primary_half_ticks = (uint16_t)(idle_start - prof_start);
