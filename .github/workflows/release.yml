@@ -150,6 +150,15 @@ jobs:
             echo "$NOTES"
             echo
             echo '---'
+            # In a FORK, the contributor's own maps are community-tier, so the
+            # flagship ROM does NOT contain them. Say which file is theirs
+            # before they download the wrong one.
+            if [ "$GITHUB_REPOSITORY" != "mholzinger/32x-builder" ]; then
+              echo '> **This is a fork build.** Your own maps and sprites are in'
+              echo '> `backrooms-community.32x` — the plain `backrooms.32x` is the'
+              echo '> upstream game without them.'
+              echo
+            fi
             echo '**Which ROM do I want?** `backrooms.32x` is the game — canon plus the'
             echo 'maps the project authors made or vetted. `backrooms-community.32x`'
             echo 'adds every map and asset contributors have sent in, vetted or not.'

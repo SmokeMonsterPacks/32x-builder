@@ -38,6 +38,10 @@ button.active { background: var(--accent); color: #15140f; border-color: var(--a
 .gh-auth .gh-who { color: var(--ink-dim); }
 .gh-auth .gh-out { padding: 2px 6px; font-size: 11px; color: var(--ink-dim); }
 
+/* "Your copy" panel: the contributor's own fork */
+#fork-panel div { margin-bottom: 6px; line-height: 1.5; }
+#fork-panel a { color: var(--accent); }
+
 main { display: flex; height: calc(100vh - 70px); }
 #sidebar { width: 220px; padding: 10px; overflow-y: auto; border-right: 1px solid var(--line); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-bottom: 10px; }

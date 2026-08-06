@@ -204,6 +204,93 @@ def submit_pr():
                     "existing": pr["existing"]})
 
 
+# ---------------- the contributor's own fork ----------------
+#
+# Submitting upstream is for work you want in the MAIN game, and that is a
+# curated decision. A fork is the contributor's own copy, where their maps and
+# sprites are their own work and the whole budget — the community CRAM arena,
+# the sprite kind numbering, the ROM — belongs to them. Their fork's CI builds
+# them a ROM on every push.
+
+@app.route("/fork/status")
+def fork_status_route():
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    try:
+        return jsonify(github_pr.fork_status(token, login, config.GITHUB_REPO))
+    except github_pr.GitHubError as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/fork/create", methods=["POST"])
+def fork_create():
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    try:
+        fork = github_pr.ensure_fork(token, login, config.GITHUB_REPO,
+                                     config.GITHUB_BRANCH)
+    except github_pr.GitHubError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "fork": fork,
+                    "repo_url": "https://github.com/%s" % fork,
+                    "actions_url": "https://github.com/%s/actions" % fork})
+
+
+@app.route("/fork/save_map", methods=["POST"])
+def fork_save_map():
+    """Commit the current map onto the contributor's own fork. Linted the same
+    way as a submission (a broken map would just fail their own build), but it
+    lands directly — their repo, their call."""
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    model = request.get_json(force=True, silent=True)
+    model, text, errs = _lint_submission(model)
+    if errs:
+        return jsonify({"ok": False, "errors": errs}), 400
+    slug = _safe(model["name"]).lower()
+    try:
+        r = github_pr.commit_to_fork(
+            token, login, config.GITHUB_REPO, config.GITHUB_BRANCH,
+            [("maps/community/%s.map" % slug, text)],
+            "Map: %s (from the hosted editor)" % model["name"])
+    except github_pr.GitHubError as e:
+        return jsonify({"ok": False, "errors": [str(e)]}), 502
+    r["ok"] = True
+    r["path"] = "maps/community/%s.map" % slug
+    return jsonify(r)
+
+
+@app.route("/fork/save_sprite", methods=["POST"])
+def fork_save_sprite():
+    """Commit a baked sprite (texture + registry) onto the contributor's fork.
+    In their own repo the community palette arena is theirs alone, so they can
+    spend it on as many assets as they like."""
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    j = request.get_json(force=True, silent=True) or {}
+    sprite_id = re.sub(r"[^a-z0-9_]", "", (j.get("id") or ""))[:16]
+    texh, reg_text = j.get("tex_h") or "", j.get("registry") or ""
+    texh_hi = j.get("tex_h_hi") or ""
+    if not (sprite_id and texh and reg_text):
+        return jsonify({"error": "incomplete bundle — re-bake and retry"}), 400
+    files = [("sh_src/spr_%s_tex.h" % sprite_id, texh)]
+    if texh_hi:
+        files.append(("sh_src/spr_%s_tex_hi.h" % sprite_id, texh_hi))
+    files.append(("registry.json", reg_text))
+    try:
+        r = github_pr.commit_to_fork(
+            token, login, config.GITHUB_REPO, config.GITHUB_BRANCH, files,
+            "Sprite: %s (from the hosted editor)" % sprite_id)
+    except github_pr.GitHubError as e:
+        return jsonify({"ok": False, "errors": [str(e)]}), 502
+    r["ok"] = True
+    return jsonify(r)
+
+
 @app.route("/bake_sprite", methods=["POST"])
 def bake_sprite_route():
     """Community sprite upload: bake the image against the shared COMM ramp

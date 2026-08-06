@@ -35,8 +35,12 @@ promotes a sprite into it by changing `"tier": "community"` to `"core"` in
    request under your name: the baked texture and its registry entries.
    Or **⬇ Bundle** downloads both files for a manual PR.
 
-Once the PR merges, the next `build-N` release renders your standee in-game,
-and every mapper can place it.
+Two places it can go. **🏠 Save to my copy** commits it to your own fork,
+where the community palette arena is yours alone — spend all ~14 sprite slots
+on your own art, split a drawing into as many assets as you want, and your
+fork's CI builds you a ROM with them in it. **🚀 Submit sprite PR** offers it
+to the main game instead; once that merges, the next `build-N` release renders
+your standee and every mapper can place it.
 
 ## The CLI way
 

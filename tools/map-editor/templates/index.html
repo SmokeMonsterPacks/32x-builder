@@ -44,6 +44,10 @@
       <h2>Layer</h2>
       <div id="layers" class="btn-col"></div>
     </div>
+    <div class="panel" id="fork-panel-wrap">
+      <h2 title="Your fork is your own copy of the game: your maps and sprites, the whole asset budget to yourself, and a ROM built for you on every save.">Your copy</h2>
+      <div id="fork-panel" class="btn-col" style="display:none;font-size:11px"></div>
+    </div>
     <div class="panel">
       <h2>Budget</h2>
       <div id="budget"></div>
@@ -92,6 +96,7 @@
           <button id="spr-try" title="Arms your sprite as a placeable item for THIS session. Standee: click an open cell. Wall decal: click a wall edge. Then hit ▶ Walk and look at it in first person.">Place in this map</button>
           <label style="font-size:11px"><b>7.</b> Happy with it?</label>
           <button id="spr-download" title="Downloads the two files a pull request needs (the texture header + registry.json), for a manual PR — see SPRITES.md">&#11015; Bundle (.h + registry)</button>
+          <button id="spr-fork" title="Commit this sprite to YOUR copy of the game. Your fork, your asset budget — no review, and your next build has it.">&#127968; Save to my copy</button>
           <button id="spr-submit" class="primary" title="Signed in with GitHub (top right): opens the two-file pull request under your own name. Once merged, the sprite ships in the next release.">&#128640; Submit sprite PR</button>
         </div>
         <div id="spr-msg" style="font-size:11px"></div>

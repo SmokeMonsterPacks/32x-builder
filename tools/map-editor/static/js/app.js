@@ -846,6 +846,7 @@ async function refreshAuth() {
       await refreshAuth(); status('signed out of GitHub');
     };
     el.append(who, out);
+    refreshFork();
   } else {
     const inb = document.createElement('button');
     inb.className = 'gh-signin'; inb.textContent = 'Sign in with GitHub';
@@ -853,7 +854,79 @@ async function refreshAuth() {
                 'commits your map to it and opens the pull request for you.';
     inb.onclick = goSignIn;
     el.append(inb);
+    const fw = $('#fork-panel-wrap'); if (fw) fw.style.display = 'none';
   }
+}
+
+/* ---------- your own fork ----------
+ * A fork isn't plumbing on the way to a PR, it's the contributor's own copy of
+ * the game. In it they own the whole budget — the community palette arena, the
+ * sprite numbering, the ROM — so they can build out as many maps and assets as
+ * they like without competing with anyone else's uploads, and their fork's CI
+ * cuts them a ROM on every push. Submitting upstream stays available for work
+ * they want in the main game. */
+async function refreshFork() {
+  const p = $('#fork-panel');
+  if (!p || !ME.ghUser) return;
+  const j = await jget('/fork/status').catch(() => ({}));
+  ME.fork = (j && j.exists) ? j.fork : null;
+  ME.forkIsUpstream = !!(j && j.is_upstream);
+  const wrap = $('#fork-panel-wrap');
+  if (ME.forkIsUpstream) { if (wrap) wrap.style.display = 'none'; return; }  // maintainer
+  if (wrap) wrap.style.display = '';
+  p.style.display = '';
+  p.textContent = '';
+  const line = document.createElement('div');
+  if (ME.fork) {
+    line.innerHTML = 'Your copy: <a href="https://github.com/' + ME.fork +
+      '" target="_blank" rel="noopener">' + ME.fork + ' ↗</a>';
+    p.appendChild(line);
+    const save = document.createElement('button');
+    save.className = 'primary'; save.textContent = '⬇ Save to my copy';
+    save.title = 'Commit this map to YOUR repo. Your copy builds its own ROM ' +
+                 'with your maps and sprites in it — no review, no waiting.';
+    save.onclick = doForkSaveMap;
+    const rom = document.createElement('button');
+    rom.textContent = 'my builds ↗';
+    rom.title = 'Your fork’s Actions tab: each push builds a ROM you can download.';
+    rom.onclick = () => window.open('https://github.com/' + ME.fork + '/actions', '_blank');
+    p.append(save, rom);
+  } else {
+    line.textContent = 'Make your own copy of the game: your maps, your sprites, ' +
+                       'your whole asset budget, your own ROM builds.';
+    p.appendChild(line);
+    const mk = document.createElement('button');
+    mk.className = 'primary'; mk.textContent = 'Create my copy';
+    mk.title = 'Forks the game on GitHub under your account. Takes a few seconds.';
+    mk.onclick = async () => {
+      mk.disabled = true; status('creating your copy of the game…');
+      const r = await jpost('/fork/create', {});
+      mk.disabled = false;
+      if (r.error) { status('fork failed: ' + r.error); return; }
+      await refreshFork();
+      status('your copy is ready: ' + r.fork + ' — enable Actions on it once and ' +
+             'every save builds you a ROM.');
+    };
+    p.appendChild(mk);
+  }
+}
+
+async function doForkSaveMap() {
+  syncName();
+  status('saving to your copy…');
+  const r = await fetch('/fork/save_map', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ME.model),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    const errs = (j.errors || [j.error || ('HTTP ' + r.status)]);
+    status('save failed: ' + errs[0]); return;
+  }
+  statusActions('saved to ' + j.fork + ' as ' + j.path + '.', [
+    ['see the build', () => window.open(j.actions_url, '_blank'),
+     'Your fork builds a ROM on each push (enable Actions on the fork once).'],
+  ]);
 }
 
 /* The status bar can carry ACTIONS, not just text — a dead-end message ("sign
@@ -1222,6 +1295,24 @@ init();
     if (bundle.tex_h_hi) dl('spr_' + bundle.id + '_tex_hi.h', bundle.tex_h_hi);
     dl('registry.json', bundle.registry);
     status('bundle downloaded — see SPRITES.md for the PR steps');
+  });
+  $s('spr-fork').addEventListener('click', async () => {
+    if (!bundle) return;
+    $s('spr-msg').textContent = 'saving to your copy…';
+    const r = await fetch('/fork/save_sprite', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: bundle.id, tex_h: bundle.tex_h,
+                             tex_h_hi: bundle.tex_h_hi || '',
+                             registry: bundle.registry }) });
+    const j = await r.json().catch(() => ({}));
+    if (j.ok) {
+      $s('spr-msg').innerHTML = 'saved to <a href="' + j.repo_url +
+        '" target="_blank">' + j.fork + ' ↗</a> — your next build has it';
+    } else if (r.status === 401) {
+      $s('spr-msg').textContent = 'sign in with GitHub (top right) first';
+    } else {
+      $s('spr-msg').textContent = (j.errors || [j.error || 'failed']).join('; ');
+    }
   });
   $s('spr-submit').addEventListener('click', async () => {
     if (!bundle) return;

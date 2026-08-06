@@ -140,6 +140,23 @@ starting with a **fork** (your own copy of the project; clicking it is expected)
 **Push (if you have write access).** Drop the `.map` in `maps/community/` and
 push to `main`. Faster; skips the preview bot.
 
+### Your own copy of the game
+
+Sign in and the editor offers to make you a **fork** — your own copy of the
+whole project. It is worth taking:
+
+- **Save to my copy** commits your map straight into it. No review, no waiting.
+- Your fork builds **its own ROM** on every save (enable Actions on the fork
+  once, under its Actions tab), so you can play your work immediately.
+- The asset budget is **yours alone** there. The console's community palette
+  arena fits about 14 custom sprites and the main repo shares that across
+  everybody; in your fork you spend all of it on your own work, and split your
+  art into as many separate sprites as you like.
+
+**Submit to game** is the other door, and it stays open: it opens a pull request
+against the main repo for work you want in everyone's game. Fork for building,
+submit for sharing.
+
 ### Which ROM your map lands in
 
 Every release ships more than one ROM, and where your map appears depends on
