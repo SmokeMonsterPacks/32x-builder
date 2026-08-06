@@ -440,6 +440,74 @@ renderer with a "hero_scratch is free during the viewer" lifetime
 assumption. The bake tool already emits `CHAIR_DIR_WMAX` so the scratch
 auto-sizes to any `--height`.
 
+## Community pipeline / forking model  (2026-08-05, build-216)
+
+**Shipped — don't rebuild it.** Content carries a **tier** that decides which
+ROM compiles it: `core` (maps/core, maps/test), `curated` (maps/curated — the
+project's own maps plus outside work the maintainer promoted), `community`
+(maps/community + sprites flagged `"tier": "community"`). Tier is a curation
+call, not an identity one. `make` builds the flagship, `make community` builds
+everything, `make author AUTHOR=<handle>` builds one contributor's ROM (kept for
+local use; upstream CI no longer runs it, see below). Promotion = move the file
+to maps/curated/ + change one word. Lint enforces the wall: a core/curated map
+cannot reference a community asset, and an unknown decal kind is an error.
+
+The editor is **fork-first**: sign in, "Your copy" creates the contributor's
+fork, `Save to my copy` commits a map or baked sprite straight onto it, and
+`/fork/assets` reads their fork's registry + `spr_*_tex.h` back so their own
+sprites appear in the palette and Walk preview. Their fork's CI builds their ROM.
+
+### The numbers that decide every design question here
+
+| limit | value | where |
+|---|---|---|
+| community palette arena | **14 sprites total** (CRAM 144..255, 8 entries each) | `COMM_BASE`, `tools/lint_maps.py:arena_usage` |
+| maps in a build | 64 | `has_in[64]`, m_main.c start menu |
+| start-menu rows | 40 | `items[40]`, m_main.c |
+| wall decal texels | 224x224, ~49 KB | `MAX_W_WALL`/`MAX_TEXELS_WALL` |
+| standee texels | 64x96, ~4 KB | `MAX_W`/`MAX_TEXELS` |
+| community ROM today | 1.83 MB (cart room to 4 MB) | build-216 |
+
+**The scarce resource is palette, not ROM.** One contributor's decal set took 4
+of the 14 slots, so a shared "everybody's work" ROM fills after ~3 contributors
+no matter how CI is arranged. That is the whole reason for the fork model, and
+why upstream CI stopped building a ROM per author (one more compile per
+contributor per release, forever).
+
+### Next steps, in order
+
+1. **First-run fork validation** — the one path never exercised: a real OAuth
+   session calling `ensure_fork`. Forks also have Actions **disabled by
+   default**, so the first build needs a human click; confirm the flow and
+   whether the editor should detect and say so. Do this before pointing a new
+   contributor at it.
+2. **Community map bucket in the editor** (the agreed next build). Browse
+   community maps read from GitHub — upstream `maps/community/` plus forks that
+   opt in — and import one into the session. Maps are unbounded and shareable;
+   assets are not, so import must check the map's asset dependencies against the
+   session's free palette slots and say "needs torn, torn2, torn3; you have 8
+   slots free" rather than importing something unbuildable.
+3. **Declared asset dependencies per map.** A `.map`'s sprite needs are implicit
+   in its decal kinds today. The bucket needs them explicit (emit at lint time
+   or in a header line) to answer "can I import this".
+4. **Fork discovery.** The bucket needs a list of participating forks: GitHub
+   fork-search vs an opt-in file in the repo. Unsolved; pick before building 2.
+5. **Engine caps when the community grows**: `has_in[64]` and `items[40]` bound
+   the shared build long before ROM size does.
+
+### Website model (what the fly.io app is, and isn't)
+
+Stateless. The image has no volume, and GitHub is the store — maps, assets and
+identity all live in repos, the app only ever proxies the user's own token. It
+serves the editor, the shared lint/bake, and the fork/PR plumbing. It must
+**not** become an asset host or a moderation queue: anything that needs storage
+belongs in a repo, and anything that needs judgement belongs in a PR. A
+"community bucket" is therefore a *view over GitHub*, not a bucket on fly.
+
+Gotcha found the hard way: werkzeug 3.1 strips a trailing CR belonging to an
+upload's payload, so any file whose last byte is 0x0D arrives one byte short
+(fatal for WebP). `/bake_sprite` retries with the byte restored.
+
 ## Tools / infra
 
 ### GLB import polish — make an imported model "just work" end to end
