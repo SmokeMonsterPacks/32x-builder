@@ -238,6 +238,69 @@ def fork_create():
                     "actions_url": "https://github.com/%s/actions" % fork})
 
 
+@app.route("/fork/assets")
+def fork_assets():
+    """The signed-in contributor's OWN sprites, read from their fork.
+
+    Without this, a fork is write-only: you bake a sprite, save it to your copy,
+    come back tomorrow and the editor (which only knows the upstream registry
+    baked into this image) has never heard of it — so you can't place it, can't
+    preview it, and can't build a map that uses it. Their fork is the source of
+    truth for what THEIR ROM contains, so that is what their palette should show.
+
+    Returns entries shaped exactly like a fresh bake, so the client injects them
+    with the same code path it uses for try-before-submit."""
+    token, login = session.get("gh_token"), session.get("gh_login")
+    if not (token and login):
+        return jsonify({"error": "not signed in"}), 401
+    fork = github_pr.fork_name(login, config.GITHUB_REPO)
+    if fork == config.GITHUB_REPO:
+        return jsonify({"fork": fork, "sprites": [], "is_upstream": True})
+    reg_text = github_pr.get_file(token, fork, "registry.json", config.GITHUB_BRANCH)
+    if reg_text is None:
+        return jsonify({"fork": fork, "sprites": [], "no_fork": True})
+    try:
+        reg = json.loads(reg_text)
+    except ValueError:
+        return jsonify({"error": "your fork's registry.json is not valid JSON"}), 400
+
+    # Only what THIS instance doesn't already have: everything else is already
+    # in the palette from the image's own registry.
+    with open(config.REGISTRY) as fh:
+        have = {s["id"] for s in json.load(fh)["assets"]["sprites"]}
+    kinds = {k["id"]: k for k in reg.get("decals", {}).get("kinds", [])}
+    out, skipped = [], []
+    for s in reg.get("assets", {}).get("sprites", []):
+        sid = s.get("id")
+        if not sid or sid in have or not isinstance(s.get("base"), int):
+            continue
+        tex = github_pr.get_file(token, fork, "sh_src/%s" % s.get("tex", ""),
+                                 config.GITHUB_BRANCH)
+        if not tex:
+            skipped.append(sid)
+            continue
+        try:
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".h", delete=False) as fh:
+                fh.write(tex); tmp = fh.name
+            t = export_assets.parse_tex(tmp)
+            os.unlink(tmp)
+        except Exception:
+            skipped.append(sid)
+            continue
+        # parse_tex returns the flat array in file order; the lo-res community
+        # textures are row-major [H][W], which is what the client expects.
+        kd = kinds.get(sid, {})
+        out.append({
+            "id": sid, "kind": s.get("kind"), "z": kd.get("z", 0.5),
+            "mount": s.get("mount", "billboard"), "base": s["base"],
+            "pal8": [[c * 255 // 31 for c in e] for e in (s.get("pal") or [])],
+            "w": t["w"], "h": t["h"], "texels": t["data"],
+            "world_h": s.get("world_h", 0.9), "world_hw": s.get("world_hw", 0.3),
+        })
+    return jsonify({"fork": fork, "sprites": out, "skipped": skipped})
+
+
 @app.route("/fork/save_map", methods=["POST"])
 def fork_save_map():
     """Commit the current map onto the contributor's own fork. Linted the same

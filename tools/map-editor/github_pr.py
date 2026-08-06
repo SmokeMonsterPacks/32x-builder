@@ -131,6 +131,21 @@ def ensure_fork(token, login, upstream, base_branch, wait=20):
     return fork
 
 
+def get_file(token, repo, path, ref="main"):
+    """Fetch one text file from a repo, or None if it isn't there. Used to read
+    a contributor's OWN registry and textures so the editor can show their
+    assets — their fork is the source of truth for what their ROM will build."""
+    import base64
+    status, j = _req("GET", API + "/repos/%s/contents/%s?ref=%s"
+                     % (repo, urllib.parse.quote(path), ref), token)
+    if status != 200 or "content" not in j:
+        return None
+    try:
+        return base64.b64decode(j["content"]).decode()
+    except Exception:
+        return None
+
+
 def commit_to_fork(token, login, upstream, base_branch, files, message):
     """Commit files straight onto the contributor's OWN fork (its default
     branch) — no PR, no review, their repo. Their fork's CI then builds a ROM

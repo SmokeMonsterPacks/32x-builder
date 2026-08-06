@@ -886,6 +886,12 @@ async function refreshFork() {
     save.title = 'Commit this map to YOUR repo. Your copy builds its own ROM ' +
                  'with your maps and sprites in it — no review, no waiting.';
     save.onclick = doForkSaveMap;
+    const ld = document.createElement('button');
+    ld.textContent = '↻ my sprites';
+    ld.title = 'Re-read the sprites in your copy and put them in the Decals palette.';
+    ld.onclick = () => loadForkAssets(false);
+    p.appendChild(ld);
+    loadForkAssets(true);            // silent on load: your assets are just there
     const rom = document.createElement('button');
     rom.textContent = 'my builds ↗';
     rom.title = 'Your fork’s Actions tab: each push builds a ROM you can download.';
@@ -909,6 +915,42 @@ async function refreshFork() {
     };
     p.appendChild(mk);
   }
+}
+
+/* Pull the signed-in contributor's OWN sprites out of their fork and register
+   them in this session — palette button, grid glyph, preview texels — using the
+   same injection the bake flow uses. Without it a fork is write-only: assets
+   you saved yesterday simply aren't there today. */
+async function loadForkAssets(quiet) {
+  if (!ME.ghUser || !ME.fork) return 0;
+  const j = await jget('/fork/assets').catch(() => ({}));
+  const list = (j && j.sprites) || [];
+  let added = 0;
+  for (const s of list) {
+    if (!ME.reg.decals.kinds.find(k => k.id === s.id)) {
+      const ent = { id: s.id, kind: s.kind, z: s.z, glyph: '⧉', color: '#b8b0a4',
+                    label: s.id + ' (your copy)' };
+      if (s.mount !== 'wall') ent.standalone = true;
+      ME.reg.decals.kinds.push(ent);
+    }
+    const A = window.ME.assets;
+    if (A && !A.sprites[s.id]) {
+      for (let i = 0; i < s.pal8.length; i++) A.palette[s.base + 1 + i] = s.pal8[i];
+      const px = new Array(s.w * s.h);
+      for (let i = 0; i < s.texels.length; i++)
+        px[i] = s.texels[i] === 0 ? -1 : s.base + s.texels[i];
+      A.sprites[s.id] = { w: s.w, h: s.h, px, world_h: s.world_h,
+                          world_hw: s.world_hw, wall: s.mount === 'wall' };
+    }
+    added++;
+  }
+  if (added) buildPalette();
+  if (!quiet) {
+    status(added ? 'loaded ' + added + ' sprite(s) from ' + ME.fork +
+                   ' — they are in the Decals palette'
+                 : 'no extra sprites in ' + ME.fork + ' yet');
+  }
+  return added;
 }
 
 async function doForkSaveMap() {
