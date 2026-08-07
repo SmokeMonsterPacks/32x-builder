@@ -4,6 +4,15 @@ Each item below is something we attempted, hit a wall on, or deliberately
 deferred. Listed in roughly the order I think they'd be productive to
 revisit.
 
+**Working order right now (decided 2026-08-06), in this sequence:**
+
+1. **The wall hole** — make the exit believable up close, then the animation,
+   then the procgen frequency. See *Exit hole* under Level / geometry.
+2. **The PVM** — first customer for the GLB box-import path, then an animated
+   static screen on it. See *GLB import polish* under Tools / infra.
+3. **Master System** — the Mode 4 look first, real SMS binaries only after.
+   See *Master System arc* under Tools / infra.
+
 ## Story / triggered lighting  (requested 2026-07-24)
 
 **Status:** feature request — not started. Mike wants lighting to become a
@@ -627,14 +636,44 @@ total, primary half-render time, secondary half-render time) sampled from
 SH-2 free-running timer at Φ/32 (1.39μs per tick). Both CPUs init
 their own FRT; secondary publishes its delta via `SHARED_UC->secondary_render_ticks`.
 
-### Master System arc — staged so the beat ships either way
-Two independent pieces, deliberately not blocked on each other.
+### Master System arc  (third in the working order, 2026-08-06)
+The goal is SMS-style games on this hardware. Two things that sound like one
+thing, and separating them is most of the design:
 
-**A. A snake game that looks like SMS**, on hardware we already control. Ships
-guaranteed, no research risk.
+**VDP Mode 4 is a register bit.** Clear bit 2 (M5) of VDP register 1 and the MD
+VDP renders the SMS-derived mode. Reachable in software from a normal cart, no
+adapter, register writes still going through the MD control port at `0xC00004`
+(the SMS-style `0xBE`/`0xBF` ports are the *Z80's* view and we never need them).
 
-**B. A minimal research ROM answering one question:** can software enter VDP
-Mode 4 and come back, on real hardware? The Power Base Converter asserts Mode 4
-from the cartridge port, so whether it can be done in software is the gate. If
-B works, swap it in behind the beat A already shipped.
+**SMS mode is a cartridge-port pin.** What the Power Base Converter asserts —
+it hands the Z80 bus mastery over an SMS-shaped memory map, remaps VDP I/O, and
+holds the 68K in reset. Three reasons that is not a game path: the 68K being off
+means there is no return, only a reset; it is a pin rather than a register, so
+it likely does not exist on the MiSTer core or a flashcart (unconfirmed, and
+worth confirming before anyone plans around it); and the MD Z80 has no I/O port
+decoding of its own, so SMS code's `OUT (0xBE),A` goes nowhere without the
+machine's own compat mapping doing the work.
+
+Ranked:
+
+1. **Shim — Mode 4 look, our code.** A snake game that looks like SMS. Days.
+   No research risk. This is the one that ships.
+2. **SH-2 emulator — real SMS binaries.** Z80 interpreter plus a Mode 4
+   renderer into the 32X framebuffer, PSG passed through to the real chip. The
+   only path that runs actual SMS code on hardware we deploy to. Budget: SMS Z80
+   is 3.58 MHz / ~900K instructions per second, so one 23 MHz SH-2 gives ~25
+   host cycles per Z80 instruction *before* VDP work — tight for a plain
+   interpreter, and the second SH-2 taking the VDP/scanline side is the natural
+   split (same shape as the column split we already run). Weeks. Full speed is
+   not a given; feasibility is not the open question, speed is.
+3. **Native SMS mode.** Not viable per above. Recorded so it stops being
+   re-proposed.
+
+**The gate, and it is cheap: does Mode 4 survive the 32X mixer?** The research
+ROM should answer exactly one question — put the VDP in Mode 4, draw a
+recognizable tile grid, and see whether it reaches the screen through the 32X
+video path on real hardware. If it does not, both 1 and 2 change shape. Second
+unknown, for later: Mode 4 CRAM is 6-bit against Mode 5's 9-bit, so a
+Mode 5 → Mode 4 → Mode 5 round trip almost certainly does not preserve the
+palette.
 Remove the overlay before shipping a release build.
