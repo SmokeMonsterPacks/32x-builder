@@ -974,6 +974,33 @@ static int  g_exit_hole_dir;          /* +1/-1: approach -> wall along the axis 
 #define HOLE_HW  FX(0.30)
 #define HOLE_Z0  100                  /* sill: ~0.39 up the wall — must climb */
 #define HOLE_Z1  212                  /* head: ~0.83 up the wall */
+/* The wall's own cut THICKNESS at the left/right aperture edges — the vertical
+ * jamb, exactly what DOOR_REVEAL_D is for the door. Head and sill always had
+ * their reveals (the underside and the ledge); without this one the wallpaper
+ * met the cavity on a hard line and the opening read as painted on. */
+#define HOLE_REVEAL_D  FX(0.12)
+/* The hole's own shade ramp: the wall ramp (luma 223..73) CONTINUED past its
+ * floor, because a wall-ramp interior read mid-brown however hard the shade
+ * was pushed — the hole looked lit. But a tail run down to near-black read
+ * UNCANNY: a soft black blob behind a glowing frame, not a room. So the tail
+ * is exactly ONE warm step past the wall floor — DOOR_DARK+2, luma 60, a dark
+ * yellow-brown rather than a neutral dark. Depth here is a deep colour, not an
+ * absence of one. Monotonic across the join (DOOR_DARK+3 at luma 84 is
+ * skipped, being LIGHTER than the wall floor), so one fade runs from lit
+ * wallpaper to the far dark with no palette seam. */
+static const uint8_t hole_ramp[17] = {
+    WALL_BASE + 0,  WALL_BASE + 1,  WALL_BASE + 2,  WALL_BASE + 3,
+    WALL_BASE + 4,  WALL_BASE + 5,  WALL_BASE + 6,  WALL_BASE + 7,
+    WALL_BASE + 8,  WALL_BASE + 9,  WALL_BASE + 10, WALL_BASE + 11,
+    WALL_BASE + 12, WALL_BASE + 13, WALL_BASE + 14, WALL_BASE + 15,
+    DOOR_DARK_BASE + 2,
+};
+#define HOLE_DARKEST 16
+/* The cavity HOLDS its lip shade this far in before the fade to dark starts.
+ * Fading from the face meant the interior was already halfway to murk before
+ * the eye had read it as an opening; the surfaces need to stay lit long enough
+ * to establish that they ARE surfaces. Half the cavity's one-cell depth. */
+#define HOLE_FADE_START  FX(0.5)
 
 void ceil_h_clear(void) {       /* CEIL_H_FULL lives in raycast.h (procgen reads it) */
     for (int y = 0; y < MAP_H; y++)
@@ -2348,17 +2375,24 @@ static uint8_t is_running  = 0;   /* moving AND holding A (sprint) — speeds fo
  * (±1 from SIN_FX(bob_phase)) is added on top each frame. */
 static int     pitch_smooth_y = 0;
 
-/* CLIMB-INTO-THE-HOLE camera: called by the game loop each pull-up frame
- * with progress t/total. Three POV beats, all through channels the renderer
- * already follows (pitch_smooth_y, eye_h, player position — player_update is
- * frozen during the climb so the writes stick):
- *   A (first quarter)  glance UP a little at the opening
- *   B (to 5/8)         the PULL — eye rises to belly-over-sill height while
- *                      the body draws halfway to the aperture, the same
- *                      easing family as standing up from a crouch
- *   C (rest)           ENTER — the POV slides to just short of the face
- *                      plane, so the hole's own walls surround the view;
- *                      the glance settles level and the caller fades out. */
+/* CLIMB-INTO-THE-HOLE camera: called by the game loop each pull-up frame with
+ * progress t/total. Four POV beats, all through channels the renderer already
+ * follows (pitch_smooth_y, eye_h, player position — player_update is frozen
+ * during the climb so the writes stick):
+ *   A  PLANT   (3/16)   hands to the sill, gaze DOWN to them, eye DIPS
+ *   B  HAUL    (to 10)  the pull: eye clears the sill, gaze further down onto
+ *                       the hole's floor, body draws halfway to the aperture
+ *   C  HANG    (to 12)  balanced on the arms, eye settles back, gaze held
+ *   D  SHIMMY  (rest)   torso through: gaze comes back up and forward, body
+ *                       sways across the aperture, then the caller fades out
+ * Tuning knobs (eye_h is 8.8 of room height, 128 = standing; pitch is +DOWN): */
+#define PU_DIP_EYE      120   /* A: the load before the lift */
+#define PU_TOP_EYE      176   /* B: head clears the sill */
+#define PU_SET_EYE      164   /* C: weight settles onto the arms */
+#define PU_END_EYE      160   /* D: crawl height */
+#define PU_HANDS_PITCH   14   /* A: down at the sill you just grabbed */
+#define PU_FLOOR_PITCH   22   /* B/C: down into the hole you are climbing onto */
+#define PU_SHIMMY   FX(0.035) /* D: lateral wriggle across the face */
 void raycast_exit_pullup(int t, int total) {
     static fx_t sx, sy;
     if (g_exit_hole_cx < 0 || total <= 0) { pitch_smooth_y = 0; return; }
@@ -2374,25 +2408,59 @@ void raycast_exit_pullup(int t, int total) {
                                : (g_exit_hole_plane - g_exit_hole_dir * FX(0.12));
     fx_t ty = g_exit_hole_axis ? (g_exit_hole_plane - g_exit_hole_dir * FX(0.12))
                                : g_exit_hole_c0;
-    /* C (enter) is a fast SNAP — 4 frames — per feel: the pull is deliberate,
-     * the commitment into the mouth is quick. */
-    int a_end = total / 4, b_end = total - 4;
-    if (b_end <= a_end) b_end = a_end + 1;
-    if (t <= a_end) {                                   /* A: glance up */
-        pitch_smooth_y = -(t * 22) / (a_end ? a_end : 1);
-    } else if (t <= b_end) {                            /* B: the pull */
+    /* FOUR beats. The old three glanced UP and then rode one linear ramp
+     * forward, which reads as levitating: nothing about it costs the body
+     * anything. A person hauling themselves into a hole gives it away with
+     * where they LOOK — down at the hands they just planted, then down at the
+     * floor of the hole for the whole lift (you watch what you are climbing
+     * onto), and only at the very end back up and forward. Pitch is positive
+     * DOWN here, which is why the old -22 was exactly backwards. */
+    int a_end = total * 3 / 16;  if (a_end < 1) a_end = 1;
+    int b_end = total * 10 / 16; if (b_end <= a_end) b_end = a_end + 1;
+    int c_end = total * 12 / 16; if (c_end <= b_end) c_end = b_end + 1;
+    if (c_end >= total) c_end = total - 1;
+    fx_t mx = sx + ((tx - sx) >> 1), my = sy + ((ty - sy) >> 1);
+
+    if (t <= a_end) {                                   /* A: PLANT */
+        /* Hands onto the sill and the knees load — the eye DIPS before it
+         * rises. That dip is the whole difference between a lift and a float. */
+        int f = (t << 8) / a_end;
+        pitch_smooth_y = (PU_HANDS_PITCH * f) >> 8;
+        SHARED_UC->eye_h = (uint8_t)(128 - (((128 - PU_DIP_EYE) * f) >> 8));
+    } else if (t <= b_end) {                            /* B: HAUL */
+        /* The pull. Eye clears the sill while the gaze goes further DOWN, onto
+         * the floor of the hole. Body travels half the distance to the mouth —
+         * arms, not legs, so it is slower than the approach was. */
         int f = ((t - a_end) << 8) / (b_end - a_end);   /* 0..256 */
-        pitch_smooth_y = -22 + ((16 * f) >> 8);         /* -22 -> -6 */
-        SHARED_UC->eye_h = (uint8_t)(128 + ((44 * f) >> 8));  /* belly 172 */
-        player.x = sx + (fx_t)(((int64_t)(tx - sx) * f) >> 9);  /* halfway in */
-        player.y = sy + (fx_t)(((int64_t)(ty - sy) * f) >> 9);
-    } else {                                            /* C: enter */
-        int f = ((t - b_end) << 8) / (total - b_end > 0 ? total - b_end : 1);
-        pitch_smooth_y = -6 + ((6 * f) >> 8);
-        SHARED_UC->eye_h = (uint8_t)(172 - ((12 * f) >> 8));  /* settle 160 */
-        fx_t mx = sx + ((tx - sx) >> 1), my = sy + ((ty - sy) >> 1);
+        pitch_smooth_y = PU_HANDS_PITCH
+                       + (((PU_FLOOR_PITCH - PU_HANDS_PITCH) * f) >> 8);
+        SHARED_UC->eye_h = (uint8_t)(PU_DIP_EYE
+                       + (((PU_TOP_EYE - PU_DIP_EYE) * f) >> 8));
+        player.x = sx + (fx_t)(((int64_t)(mx - sx) * f) >> 8);
+        player.y = sy + (fx_t)(((int64_t)(my - sy) * f) >> 8);
+    } else if (t <= c_end) {                            /* C: HANG */
+        /* Weight transfers onto the arms at the top and the eye sinks back a
+         * little. Two frames of held gaze, still looking down into the hole:
+         * the beat where a person is balanced and not yet committed. */
+        int f = ((t - b_end) << 8) / (c_end - b_end);
+        pitch_smooth_y = PU_FLOOR_PITCH;
+        SHARED_UC->eye_h = (uint8_t)(PU_TOP_EYE
+                       - (((PU_TOP_EYE - PU_SET_EYE) * f) >> 8));
+        player.x = mx; player.y = my;
+    } else {                                            /* D: SHIMMY */
+        /* Torso in. Only now does the gaze come back up and forward, and the
+         * body sways across the aperture as it wriggles through — two sine
+         * beats decaying to nothing, on the along-face axis. */
+        int f = ((t - c_end) << 8) / (total - c_end);
+        pitch_smooth_y = PU_FLOOR_PITCH - ((PU_FLOOR_PITCH * f) >> 8);
+        SHARED_UC->eye_h = (uint8_t)(PU_SET_EYE
+                       - (((PU_SET_EYE - PU_END_EYE) * f) >> 8));
         player.x = mx + (fx_t)(((int64_t)(tx - mx) * f) >> 8);
         player.y = my + (fx_t)(((int64_t)(ty - my) * f) >> 8);
+        fx_t sway = FX_MUL(PU_SHIMMY, SIN_FX((uint8_t)(f << 1)));
+        sway = (fx_t)(((int64_t)sway * (256 - f)) >> 8);   /* decay to still */
+        if (g_exit_hole_axis) player.x += sway; else player.y += sway;
+        if (t == c_end + 1) SHARED_UC->slide_sfx = 1;      /* the torso scrape */
     }
     if (t >= total) pitch_smooth_y = 0;
 }
@@ -2405,6 +2473,34 @@ static int     eye_smooth = STAND_EYE;
  * eases back to level by mid-stand. Added as extra pitch in raycast_render. */
 static int     standup_dip = 0;
 #define STANDUP_DIP 40         /* peak look-down pixels while rising; 0 disables */
+
+/* ARRIVAL DROP: the far side of the climb. Cutting to a lit room said "level
+ * loaded"; falling out of an opening that ISN'T THERE when you turn around
+ * says something much worse, and costs one animation. Called per fade-in frame
+ * by the portal so the picture comes up DURING the fall.
+ *
+ * The landing hands off rather than scripting the stand: it leaves eye_smooth
+ * compressed and lets player_update's existing crouch-release ease the player
+ * upright, which already carries the standup_dip floor-glance. So the last
+ * beat of the arrival is the same motion as getting up anywhere else. */
+#define AD_START_EYE   232     /* out of an opening high in the wall */
+#define AD_IMPACT_EYE   56     /* the compression you land in */
+#define AD_FALL_PITCH   26     /* the floor coming up to meet you */
+void raycast_arrival_drop(int t, int total) {
+    int fall = total * 2 / 3; if (fall < 1) fall = 1;
+    pitch_smooth_y = AD_FALL_PITCH;
+    if (t <= fall) {
+        int f = (t << 8) / fall;
+        int f2 = (f * f) >> 8;              /* gravity: the fall accelerates */
+        eye_smooth = AD_START_EYE
+                   - (((AD_START_EYE - AD_IMPACT_EYE) * f2) >> 8);
+    } else {
+        eye_smooth = AD_IMPACT_EYE;
+        if (t == fall + 1) SHARED_UC->slide_sfx = 1;   /* the landing scuff */
+    }
+    SHARED_UC->eye_h = (uint8_t)eye_smooth;
+    is_walking = 0; is_running = 0;
+}
 
 /* Read controller, advance player by one frame. Axis-separated collision
  * gives natural sliding along walls. */
@@ -5454,6 +5550,7 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
     int eye = (int)SHARED_UC->eye_h;
     const fx_t PAR = FX(0.01);
+    int jambs = SHARED_UC->hole_jamb;    /* TESTING>HOLEJAMB A/Bs the close-up work */
 
     /* Column-clip: project the opening's two endpoints on the face plane. */
     fx_t det = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
@@ -5529,18 +5626,30 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
          * full cell of depth, while the SHADOW side starts deep and hits
          * murk within a third of a cell. Which interior side a column
          * shows is the ray's drift direction (rda sign). 8.8 for dither. */
-        int murk = bsh + DARK_ROOM_SHADE + 2;
-        if (murk > SHADE_LEVELS - 2) murk = SHADE_LEVELS - 2;
+        /* The interior is UNLIT, so its darkness is ABSOLUTE, not "N steps
+         * below the face". The old relative murk (bsh + DARK_ROOM_SHADE + 2)
+         * meant a hole you were standing next to bottomed out mid-ramp and
+         * read as lit. Only haze between you and the opening lifts it now,
+         * hence the one small fog term. */
+        int murk = HOLE_DARKEST - (bsh >> 2);
+        if (murk < HOLE_DARKEST - 2) murk = HOLE_DARKEST - 2;
         fx_t depth_in = t2 - t; if (depth_in < 0) depth_in = 0;
         int s_start, reach;                   /* reach: fade span, <<8-scaled */
-        if (side_hit && rda < 0) { s_start = bsh + 1; reach = 8; }  /* lit side */
+        if (side_hit && rda < 0) { s_start = bsh + 1; reach = 9; }  /* lit side */
         else if (side_hit)       { s_start = bsh + 5; reach = 10; } /* shadow side */
         else                     { s_start = bsh + 2; reach = 9; }  /* back run-in */
         if (s_start > murk) s_start = murk;
+        /* Fade measured from HOLE_FADE_START, not from the face — and one reach
+         * step faster all round to cover the same span in the half-depth left. */
+        fx_t fade_in = depth_in - HOLE_FADE_START; if (fade_in < 0) fade_in = 0;
         int sv8 = (s_start << 8)
-                + (int)(((int64_t)depth_in * ((murk - s_start) << (reach - 8))
+                + (int)(((int64_t)fade_in * ((murk - s_start) << (reach - 8))
                          << 8) >> FX_SHIFT);
-        if (sv8 > murk << 8) sv8 = murk << 8;
+        /* Nothing but the BACK panel may reach murk: every other surface stops
+         * two steps short. Letting them all converge on the same dark left the
+         * corners dithering one murk into another — no edges, so the cavity
+         * read as a soft blob behind a lit frame rather than a box. */
+        if (sv8 > (murk - 2) << 8) sv8 = (murk - 2) << 8;
         int sv = sv8 >> 8;
 
         /* DITHERED fades, not band stacks: every gradient below resolves its
@@ -5548,39 +5657,70 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
          * rows/columns interleave two adjacent ramp entries instead of
          * stepping through them as visible stripes (the "rainbow" note). */
         #define HOLE_DITH(acc8, y_) \
-            (uint8_t)(WALL_BASE + (((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8 > \
-                       SHADE_LEVELS - 1 ? SHADE_LEVELS - 1 : \
-                       ((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8))
+            hole_ramp[((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8 > HOLE_DARKEST \
+                      ? HOLE_DARKEST : ((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8]
         uint8_t *base = fb + col;
         int y0, y1;
         /* Head underside: shadowed from the lip (film ref: the top reveal
          * gets no room light), core-dark at depth. */
         {
+            /* HOLD then fall, the same rule the side walls follow. Ramping
+             * across the whole band made the head one long soft gradient, and
+             * with the sill doing it too the opening read as a dark FRAME —
+             * four blurs meeting — instead of two lit surfaces going into a
+             * cavity. The near half stays lit; the fall happens at the back. */
             int s0 = bsh + 4; if (s0 > sv) s0 = sv;
             int h = head_hi - head_lo;
-            int step = (h > 0)
-                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)h) : 0;
-            int acc = s0 << 8;
+            int hold = h >> 1, run = h - hold;
+            int step = (run > 0)
+                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)run) : 0;
             y0 = head_lo < 0 ? 0 : head_lo;
             y1 = head_hi > SCREEN_H - 1 ? SCREEN_H - 1 : head_hi;
-            acc += step * (y0 - head_lo);          /* clamped-top catch-up */
-            for (int y = y0; y <= y1; y++) {
+            int k = y0 - head_lo - hold;            /* clamped-top catch-up */
+            int acc = (s0 << 8) + (k > 0 ? step * k : 0);
+            for (int y = y0; y <= y1; y++, k++) {
                 base[y * SCREEN_W] = HOLE_DITH(acc, y);
-                acc += step;
+                if (k >= 0) acc += step;
             }
         }
         y0 = head_hi + 1 < 0 ? 0 : head_hi + 1;    /* the core */
         y1 = sill_lo - 1 > SCREEN_H - 1 ? SCREEN_H - 1 : sill_lo - 1;
-        if (!side_hit && y0 <= y1) {
-            /* BACK WALL: no wallpaper — MYSTERY. Flat deep yellow at the
-             * murk register (shared with the side fades' target), checker-
-             * dithered between two adjacent shades: textureless gloom. */
-            uint8_t ca = (uint8_t)(WALL_BASE + murk);
-            uint8_t cb = (uint8_t)(WALL_BASE + murk + 1);
+        if (jambs && side_hit && depth_in < HOLE_REVEAL_D) {
+            /* VERTICAL JAMB — the wall's cut thickness, the door recess's
+             * DOOR_REVEAL_D band done for a hole. Starts one step off the face
+             * shade so the rim reads CONTINUOUS with the wallpaper it was cut
+             * out of (that continuity is the whole illusion), then darkens
+             * inward across the thickness — depth AO — with a contact step
+             * where it meets the head above and the sill below. */
+            int q = (int)(((int64_t)depth_in * (4 * FX_ONE / HOLE_REVEAL_D))
+                          >> FX_SHIFT);
+            if (q < 0) q = 0; else if (q > 3) q = 3;
+            int ja = bsh + 1 + (q >> 1);
+            int jb = ja + (q & 1);                 /* dither partner */
+            int span = sill_lo - head_hi; if (span < 1) span = 1;
+            int edge = span >> 3; if (edge < 1) edge = 1;
+            uint8_t ca = hole_ramp[ja > HOLE_DARKEST ? HOLE_DARKEST : ja];
+            uint8_t cb = hole_ramp[jb > HOLE_DARKEST ? HOLE_DARKEST : jb];
+            uint8_t cc = hole_ramp[ja + 1 > HOLE_DARKEST ? HOLE_DARKEST : ja + 1];
+            for (int y = y0; y <= y1; y++)
+                base[y * SCREEN_W] =
+                    (y - head_hi < edge || sill_lo - y < edge) ? cc
+                    : (((y ^ col) & 1) ? cb : ca);
+        } else if (!side_hit && y0 <= y1) {
+            /* BACK WALL: no wallpaper — MYSTERY. Textureless gloom at the tail
+             * of hole_ramp, checker-dithered against the step above it. The
+             * only surface allowed this deep, which is what makes the corners
+             * around it read as corners. */
+            uint8_t ca = hole_ramp[murk];
+            uint8_t cb = hole_ramp[murk > 0 ? murk - 1 : 0];
             for (int y = y0; y <= y1; y++)
                 base[y * SCREEN_W] = ((y ^ col) & 1) ? cb : ca;
         } else {
-            int acc = sv8;
+            /* CAVITY SIDE WALL: the same fade, one step darker so the
+             * side/back junction reads as a corner. No wallpaper — the chevron
+             * belongs to the room's skin, and inside the cut it read as a
+             * pattern that had no business being there. */
+            int acc = sv8 + (jambs ? (1 << 8) : 0);
             for (int y = y0; y <= y1; y++)
                 base[y * SCREEN_W] = HOLE_DITH(acc, y);
         }
@@ -5588,15 +5728,16 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         {
             int s0 = bsh + 1; if (s0 > sv) s0 = sv;
             int h = sill_hi - sill_lo;
-            int step = (h > 0)
-                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)h) : 0;
-            int acc = sv8;                         /* core-dark at the top (far)... */
+            int hold = h >> 1, run = h - hold;     /* near half stays lit */
+            int step = (run > 0)
+                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)run) : 0;
             y0 = sill_lo < 0 ? 0 : sill_lo;
             y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
-            acc -= step * (y0 - sill_lo);
-            for (int y = y0; y <= y1; y++) {       /* ...lit by the bottom (near) */
+            int k = sill_hi - y0 - hold;           /* rows left before the hold */
+            int acc = (s0 << 8) + (k > 0 ? step * k : 0);
+            for (int y = y0; y <= y1; y++, k--) {  /* far (top) -> near (bottom) */
                 base[y * SCREEN_W] = HOLE_DITH(acc, y);
-                acc -= step;
+                if (k > 0) acc -= step;
             }
         }
         #undef HOLE_DITH

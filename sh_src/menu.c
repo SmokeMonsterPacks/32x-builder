@@ -57,7 +57,7 @@ void    m_main_automap_zoom(int dir);
 #define AUDIO_CONTENT_ROWS    4   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
-#define TESTING_CONTENT_ROWS  4   /* SERIAL, VERT, BULKHEAD, CARPETLOD (diag/A-B toggles) */
+#define TESTING_CONTENT_ROWS  5   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB (diag/A-B) */
 #define COLOR_CONTENT_ROWS    6   /* SURFACE, R, G, B, WARMTH, SAT */
 #define CREDITS_CONTENT_ROWS  0   /* read-only display, no selection cursor */
 #define CREDITS_DRAWN_ROWS    4   /* MAP / BY / BUILD / DATE lines it paints */
@@ -297,6 +297,7 @@ void menu_update(uint16_t pad) {
         else if (menu_row == 2) SHARED_UC->wall_res_mode = (cur == 5) ? 2 : 5;  /* VERT */
         else if (menu_row == 3) SHARED_UC->bulk_kill ^= 1;   /* bulkhead A/B (L:) */
         else if (menu_row == 4) SHARED_UC->carpet_vlod ^= 1; /* carpet vertical LOD A/B (R:) */
+        else if (menu_row == 5) SHARED_UC->hole_jamb ^= 1;   /* exit-hole jamb + cavity skin A/B */
     } else if (menu_tab == TAB_COLOR) {
         /* Live palette lab. Row 1 picks a surface; 2-4 nudge its R/G/B anchor;
          * 5-6 are the global WARMTH/SAT masters. Every change flags the palette
@@ -480,6 +481,7 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 40, menu_row == 2, "VERT",   (m == 5) ? " ON" : "OFF");
         draw_row(fb, 48, menu_row == 3, "BULKHEAD", SHARED_UC->bulk_kill ? "OFF" : " ON");
         draw_row(fb, 56, menu_row == 4, "CARPETLOD", SHARED_UC->carpet_vlod ? " ON" : "OFF");
+        draw_row(fb, 64, menu_row == 5, "HOLEJAMB", SHARED_UC->hole_jamb ? " ON" : "OFF");
     } else if (menu_tab == TAB_COLOR) {
         char v[6];
         draw_row(fb, 32, menu_row == 1, "SURFACE", pal_surf_names[pal_sel]);

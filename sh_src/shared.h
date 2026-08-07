@@ -180,6 +180,12 @@ typedef struct {
      * walk -- measured via the blunt all-rows VERT toggle, carpet went 2,068 ->
      * 888 ticks (-57%). Same-binary A/B lives in TESTING>CARPETLOD. */
     volatile uint8_t carpet_vlod;
+    /* Exit-hole close-up work: the vertical JAMB (the wall's cut thickness at
+     * the aperture's left/right edges) and the chevron skin on the cavity side
+     * walls. Both only render on side_hit columns, so the cost is bounded by
+     * the hole's own width and vanishes past ~2 cells where the jamb goes
+     * sub-pixel. Same-binary A/B lives in TESTING>HOLEJAMB. */
+    volatile uint8_t hole_jamb;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to

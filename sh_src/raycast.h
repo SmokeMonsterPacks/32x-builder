@@ -161,6 +161,7 @@ void raycast_place_exit_door(void);
 void raycast_place_exit_hole(void);   /* alternate exit: dark 1-cell ceiling hole */
 int  raycast_exit_hole_check(void);   /* 1 = standing centered under the hole */
 void raycast_exit_pullup(int t, int total);  /* climb-out camera, progress t/total */
+void raycast_arrival_drop(int t, int total); /* fall-in camera on the far side */
 void raycast_shimmer(void);
 void raycast_draw_ceiling_grid(int col_start, int col_end);
 void raycast_draw_carpet(int col_start, int col_end);

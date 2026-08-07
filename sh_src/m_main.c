@@ -1067,6 +1067,10 @@ static void asset_viewer_screen(void) {
 /* Walk-through-the-EXIT-door portal: fade to black, generate a fresh procedural
  * map, drop the player at the standard spawn, fade back up. The "way out" only
  * loops you deeper into the backrooms. Mirrors the lobby walk-through fade. */
+/* Set by the exit-hole climb only: the arrival on the far side is a FALL, not
+ * a cut. Doors and menu warps leave it clear and get the plain fade. */
+static int g_arrive_drop = 0;
+
 static void portal_to_procgen(void) {
     g_custom_current = -1;
     for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
@@ -1075,7 +1079,22 @@ static void portal_to_procgen(void) {
     player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
     raycast_init();                 /* rebuilds full-bright palette... */
     raycast_set_brightness(0);      /* ...held black until the fade-in */
-    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+    if (g_arrive_drop) {
+        /* You come out of the black already falling, and the picture is up
+         * before you land — the room arrives around you rather than being
+         * revealed. Nothing is behind you when you turn around. */
+        #define DROP_FRAMES 12
+        g_arrive_drop = 0;
+        for (int i = 1; i <= DROP_FRAMES; i++) {
+            raycast_arrival_drop(i, DROP_FRAMES);
+            int lvl = (i * FADE_STEPS * 3) / (DROP_FRAMES * 2);  /* lit by the landing */
+            fade_step(lvl > FADE_STEPS ? FADE_STEPS : lvl);
+        }
+        /* Left compressed on purpose: player_update's crouch-release stands
+         * the player up from here, floor-glance and all. */
+    } else {
+        for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+    }
 }
 
 /* Pause-menu MAPS-tab warp: the same fade/load/fade as the procgen portal, but
@@ -1678,17 +1697,20 @@ int m_main(void) {
         metrics_mode_check(pad);
         if (!menu_is_active()) {
             /* EXIT-HOLE climb: input frozen while raycast_exit_pullup drives
-             * the three POV beats (glance up, pull to the belly, enter the
-             * aperture) over PULLUP_FRAMES rendered frames — it owns pitch,
-             * eye height AND position. Then the portal fade fires with the
-             * hole's walls surrounding the view. */
-            #define PULLUP_FRAMES 21
+             * the four POV beats (plant, haul, hang, shimmy) over
+             * PULLUP_FRAMES rendered frames — it owns pitch, eye height AND
+             * position. Then the portal fade fires with the hole's walls
+             * surrounding the view. These are RENDERED frames, not vblanks, so
+             * at ~11fps 21 of them ran close to two seconds and the climb
+             * dragged; 16 lands nearer a second and a half. */
+            #define PULLUP_FRAMES 16
             static int g_pullup = 0;
             if (g_pullup > 0) {
                 g_pullup--;
                 raycast_exit_pullup(PULLUP_FRAMES - g_pullup, PULLUP_FRAMES);
                 if (g_pullup == 0) {
                     SHARED_UC->eye_h = 128;
+                    g_arrive_drop = 1;     /* far side is a fall, not a cut */
                     portal_to_procgen();                   /* holes are procgen-only */
                     continue;
                 }
