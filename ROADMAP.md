@@ -6,8 +6,8 @@ revisit.
 
 **Working order right now (decided 2026-08-06), in this sequence:**
 
-1. **The wall hole** — make the exit believable up close, then the animation,
-   then the procgen frequency. See *Exit hole* under Level / geometry.
+1. **The wall hole** — look ✅ and animation ✅ done 2026-08-07; only the
+   procgen frequency is left. See *Exit hole* under Level / geometry.
 2. **The PVM** — first customer for the GLB box-import path, then an animated
    static screen on it. See *GLB import polish* under Tools / infra.
 3. **Master System** — the Mode 4 look first, real SMS binaries only after.
@@ -99,20 +99,49 @@ crawlspace eye-height gate (walk-under).
    recessed in it. Ties into the "different door types" list.
 5. **Curve LUT** — round/pointed arch tops (polish).
 
-### Exit hole — believable up close  (next up, 2026-08-06)
-Three fixes, in the order 3 → 2 → 1: the look is the hard part, and the
-animation should be tuned against final geometry.
+### Exit hole  (2026-08-07)
+Three fixes were queued in the order 3 → 2 → 1. **3 and 2 are done**; 1 is all
+that is left.
 
-3. **Not believable up close.** Same job as the door recess/jamb, which is
-   already solved once and is the model to copy. `draw_exit_hole` is
-   `raycast.c:5446`; the geometry globals (plane, `c0`, axis, dir, `HOLE_HW`)
-   are `raycast.c:967-974`. Both CPUs draw it in the tail pass and the globals
-   are cache-purged per map load.
-2. **Crawl-in animation too slow.** `PULLUP_FRAMES 21` (`m_main.c:1685`),
-   driven at `m_main.c:1687-1690`, triggered by `raycast_exit_hole_check()` at
-   1712. Open question: scripted or interruptible.
-1. **Too frequent in procgen.** Spawn-weight problem. Test with
-   `place_exit_door` / exit-hole placement side by side.
+**3. Believable up close — ✅ done.** The head and sill always had reveals; the
+left/right edges never did, so the wallpaper met the cavity on a hard line and
+the opening read as painted on. `HOLE_REVEAL_D` gives it the wall's cut
+thickness, the door recess's trick. Three findings worth keeping:
+
+- The wall ramp **bottoms at luma 73**, so an interior painted from it reads
+  mid-brown however hard the shade is pushed. The hole shades through its own
+  `hole_ramp` — the wall ramp continued one warm step past its floor
+  (`DOOR_DARK+2`, luma 60). A tail run all the way to near-black was *worse*:
+  an uncanny blob behind a glowing frame. Depth here is a deep colour, not an
+  absence of one.
+- What made it read as a **frame rather than a room** was not the palette. Every
+  surface converged on the same murk, so the corners were one dark dithering
+  into another — no edges anywhere. Only the back panel reaches murk now.
+- Interior darkness must be **absolute, not N-steps-below-the-face**, or
+  standing next to a hole lights its inside.
+
+`TESTING>HOLEJAMB` A/Bs the whole close-up path in one binary.
+`tools/sim_exit_hole.py` renders the real code path at a replayable camera
+(`--dist`, `--off`, `--fix`) — every look decision was made there first and
+confirmed on hardware. Use it before touching this again.
+
+**2. Climb + arrival — ✅ done.** The pull-up glanced UP and rode one linear
+ramp forward, which reads as levitating. Four scripted beats now (plant, haul,
+hang, shimmy) and the tell is where the eye looks: at the hands, then down at
+the floor of the hole for the whole lift, and only at the end back up and
+forward. **Pitch is positive DOWN** — the old `-22` pointed the wrong way for
+every frame of the lift. `PULLUP_FRAMES` 21 → 16, since those are *rendered*
+frames and at ~11fps 21 ran close to two seconds.
+
+The far side is now a FALL, not a cut: the picture comes up during the drop,
+lit by the landing, compressed into a crouch. The stand is a **handoff** —
+`player_update`'s existing crouch-release finishes it, `standup_dip`
+floor-glance included. Nothing is behind you when you turn around.
+Knobs: `PU_*` and `AD_*` in raycast.c, `DROP_FRAMES` in m_main.c. Tuning pass
+still wanted.
+
+**1. Too frequent in procgen — still open.** Spawn-weight problem. Test with
+`place_exit_door` / exit-hole placement side by side.
 
 ### Bigger / more authentic map
 **Status:** ✅ done — settled on a hand-tuned 32×32.
