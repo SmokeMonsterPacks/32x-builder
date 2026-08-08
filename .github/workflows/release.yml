@@ -128,10 +128,37 @@ jobs:
           # New community maps in this release get a shout-out up top.
           NEWMAPS=$(git diff --diff-filter=A --name-only ${PREV:+$PREV..HEAD} -- 'maps/community/*.map' | \
                     sed 's|maps/community/||; s|\.map$||; s/^/- 🗺️ NEW community map: /' || true)
+          # Split the log: a reader wants the GAME changes, not five roadmap
+          # edits. Docs/chore commits still ship, just folded away underneath.
+          CHORE_RE='^- (Roadmap|Docs|README|Rebuild the tracked flagship ROM)'
+          CHANGES=$(printf '%s\n' "$NOTES" | grep -Ev "$CHORE_RE" || true)
+          CHORES=$(printf  '%s\n' "$NOTES" | grep -E  "$CHORE_RE" || true)
+          [ -n "$CHANGES" ] || { CHANGES="$NOTES"; CHORES=""; }
+          # Optional human headline. Only counts if RELEASE_HEADLINE.md was
+          # actually edited in THIS range — otherwise last build's headline
+          # would silently ride along on every release after it.
+          HEADLINE=""
+          if [ -f RELEASE_HEADLINE.md ] && \
+             git diff --name-only ${PREV:+$PREV..HEAD} -- RELEASE_HEADLINE.md | grep -q .; then
+            HEADLINE=$(cat RELEASE_HEADLINE.md)
+          fi
+          # Written to a FILE, not a step output. Passing the notes as an
+          # expression into --notes pasted this text inside a double-quoted
+          # shell string, where bash ran every backticked token as a command
+          # and substituted the empty result -- which is how both ROM filenames
+          # disappeared out of the footer below. --notes-file cannot do that.
           {
-            echo 'notes<<NOTES_EOF'
+            [ -n "$HEADLINE" ] && { echo "$HEADLINE"; echo; }
             [ -n "$NEWMAPS" ] && { echo "$NEWMAPS"; echo; }
-            echo "$NOTES"
+            echo "$CHANGES"
+            if [ -n "$CHORES" ]; then
+              echo
+              echo '<details><summary>Docs and roadmap</summary>'
+              echo
+              echo "$CHORES"
+              echo
+              echo '</details>'
+            fi
             echo
             echo '---'
             # In a FORK, the contributor's own maps are community-tier, so the
@@ -151,8 +178,7 @@ jobs:
             echo 'its own ROM, and the console’s 14-sprite palette budget is yours alone'
             echo 'there instead of shared with everyone else. The'
             echo '[editor](https://backrooms-32x-project.fly.dev/) sets it up in a click.'
-            echo 'NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
+          } > release-notes.md
 
       - name: Publish release
         if: steps.exists.outputs.skip != 'true'
@@ -164,7 +190,7 @@ jobs:
             -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Build ${{ steps.tag.outputs.build }} — ${{ steps.tag.outputs.date }} (${{ steps.tag.outputs.sha }})" \
-            --notes "${{ steps.notes.outputs.notes }}"
+            --notes-file release-notes.md
 
       # Push the SAME artifact we just released, so the GitHub Release asset and
       # the itch.io download are byte-identical — no separate build, no drift.

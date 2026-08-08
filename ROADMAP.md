@@ -143,6 +143,16 @@ still wanted.
 **1. Too frequent in procgen — still open.** Spawn-weight problem. Test with
 `place_exit_door` / exit-hole placement side by side.
 
+**Interior crawl — ✅ shipped as the CORRIDOR (2026-08-07).** Not a raycaster
+mode: a scripted one-point-perspective duct (`raycast_crawl_corridor`),
+three cells, axis-aligned ring fills, bathtub lighting (both mouths lit,
+middle dark), destination peek on the end plane growing to a near
+match-cut. Entering it IS the map flush (`corridor_enter`): the old world
+is discarded at the threshold and the corridor is the next map's entrance
+hallway — which deleted the commit-time generate/peek/restore dance.
+Remaining polish: peek-render fidelity ("the sample screen") and a
+rear-view shrinking aperture behind you if it ever earns its cost.
+
 ### Bigger / more authentic map
 **Status:** ✅ done — settled on a hand-tuned 32×32.
 

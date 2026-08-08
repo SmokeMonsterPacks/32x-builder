@@ -185,6 +185,35 @@ uint8_t world_map[MAP_H][MAP_W];
                              * baked stipple dots, a soft almost-imperceptible dapple */
 #define HANDLE_BASE   113   /* 4 entries: warm gold/brass for the door handle hardware
                              * (dark, mid, light, highlight) so it reads as metal not tan */
+#define HOLE_DEEP_BASE 140  /* 4 entries, light->dark: glow-bright, glow-dim,
+                             * deep-mid, deepest — the EXIT HOLE's cool run.
+                             * 140/141 are the back panel's faint interior
+                             * light; 142/143 are the deep tail. hole_ramp
+                             * splices the wall ramp onto DOOR_DARK, and while
+                             * the luma runs monotonic the HUE does not --
+                             * wall floor #4A4A41 is olive, DOOR_DARK+2 #4A3929
+                             * is brown. The back panel's gradient spans exactly
+                             * that join, so it rendered as a warm top half and
+                             * a cool bottom half meeting at a hard line: a
+                             * shading edge with no geometry under it, which is
+                             * precisely what breaks the read of a square
+                             * tunnel.
+                             *
+                             * They now also carry the DARK-ROOM aesthetic. The
+                             * whole ramp above them is WALL_BASE -- the
+                             * WALLPAPER's own ramp -- so a back panel painted
+                             * from it is a dark piece of wallpaper, tan cast
+                             * and all, rather than a room with no light in it.
+                             * Merely de-warming them did nothing visible -- one
+                             * CRAM step of red out of 31. The cue that actually
+                             * reads is COOL: every lit surface in this game is
+                             * tungsten-warm (R>B), so a back panel with B>R is
+                             * the only thing in frame with no light on it, and
+                             * that contrast is what says "another space" rather
+                             * than "shadowed wall". Free
+                             * CRAM: 140..143 sit between the EXIT sign's plate
+                             * and COMM_BASE, so the community arena is
+                             * untouched. */
 #define COMM_BASE     144   /* start of the COMMUNITY CRAM ARENA (144..255):
                              * each contributor sprite owns an 8-slot block
                              * holding ITS OWN median-cut palette (base+1..
@@ -993,14 +1022,145 @@ static const uint8_t hole_ramp[17] = {
     WALL_BASE + 4,  WALL_BASE + 5,  WALL_BASE + 6,  WALL_BASE + 7,
     WALL_BASE + 8,  WALL_BASE + 9,  WALL_BASE + 10, WALL_BASE + 11,
     WALL_BASE + 12, WALL_BASE + 13, WALL_BASE + 14, WALL_BASE + 15,
-    DOOR_DARK_BASE + 2,
+    HOLE_DEEP_BASE + 2, HOLE_DEEP_BASE + 3,
 };
-#define HOLE_DARKEST 16
-/* The cavity HOLDS its lip shade this far in before the fade to dark starts.
- * Fading from the face meant the interior was already halfway to murk before
- * the eye had read it as an opening; the surfaces need to stay lit long enough
- * to establish that they ARE surfaces. Half the cavity's one-cell depth. */
-#define HOLE_FADE_START  FX(0.5)
+#define HOLE_DARKEST 17
+/* Dither policy, third iteration and the keeper: the interior shades by the
+ * world's fog law at each surface's ray distance (crawlspace endpoints),
+ * carried in 8.8 so the value BETWEEN two fog bands survives -- and the 2x2
+ * bayer resolves that in-between. Mixing therefore starts at the OUTER EDGE
+ * where the hole begins and spreads evenly with depth: no floating front
+ * (the eased-ramp-to-murk's failure), no hard contour bands (the pure
+ * fog-step version's). FLATS still round -- the back panel in a sustained
+ * mix is a print pattern. Blue noise's table is gone from the binary;
+ * tools/gen_bluenoise.py regenerates it. */
+static const uint8_t hole_bayer[4] = { 0, 128, 192, 64 };
+static inline uint8_t hole_shade(int acc8, int bay) {
+    int v = (acc8 + bay) >> 8;
+    if (v < 0) v = 0; else if (v > HOLE_DARKEST) v = HOLE_DARKEST;
+    return hole_ramp[v];
+}
+/* The wall pass's fog curve in 8.8 -- same knee, same span, fractional so
+ * the dither has an in-between to resolve. Matches bsh's integer version
+ * in draw_exit_hole; keep the two in step. */
+static inline int hole_fog8(fx_t d) {
+    if (d < FX(2.5)) return (int)((d * 512) / FX(2.5));
+    if (d > FOG_RAMP_DIST) d = FOG_RAMP_DIST;
+    return 512 + (int)(((d - FX(2.5)) * (13 * 256)) / (FOG_RAMP_DIST - FX(2.5)));
+}
+/* Side-panel vertical AO: the head above shadows the top of a side wall, the
+ * sill below bounces into its foot. Depth is constant down a side-wall column,
+ * so without this the panel is one flat value — which is the other half of why
+ * it banded. Applied as ramp steps, top to bottom. */
+#define AO_TOP   1     /* was 2: with the head band falling dark onto the same
+                        * rows, 2 stacked into a drawn black line at the seam */
+#define AO_BOT  (-1)
+/* (HOLE_SIDE_SPAN is gone: the crawlspace law bounds a side panel's travel
+ * naturally -- fog over one cell of depth is a couple of steps -- where the
+ * old eased-ramp-to-murk needed an artificial cap to stay lit.) */
+
+/* ── DESTINATION PEEK ───────────────────────────────────────────────────
+ * The climb is a transition point: by the time the player commits, the next
+ * map's seed is decided. climb_commit (m_main) generates that map, calls
+ * raycast_peek_render for ONE low-res frame from its spawn POV, then rebuilds
+ * the current map (deterministic loaders make that a byte-identical restore).
+ * During the climb the back panel shows this bitmap scaled into the cavity --
+ * the faint interior light resolving into an actual place -- so the level
+ * change reads as continuous space instead of a loading fade.
+ *
+ * Walls-only, primary-CPU, 64x44: through a dark aperture the destination is
+ * small, fogged and glimpsed, so the full pipeline (two CPUs, textures,
+ * sprites, vblank flip discipline) would buy nothing and risk plenty.
+ * Both CPUs BLIT the buffer in the tail pass; the secondary purges its lines
+ * in raycast_purge_lowceil_cache, and the flag is purged there every frame. */
+#define PEEK_W  96
+#define PEEK_H  64
+#define PEEK_DIM 1                    /* extra fog step: glimpsed, not displayed */
+/* SDRAM is packed to the byte (the stack overlay saw to that), so the bitmap
+ * ALIASES the low end of the title's 71 KB hero_scratch (.hero_overlay) --
+ * live only during the climb, while hero_scratch is live only at the title,
+ * and both fill before every use. Low end = farthest from the stack's spill
+ * zone at the overlay's top. */
+extern uint8_t hero_scratch[];
+#define peek_buf hero_scratch
+#define PEEK_BYTES (PEEK_W * PEEK_H)
+static int g_hole_peek_on = 0;
+/* Which duct wall is LIT (captured at the threshold; see
+ * raycast_corridor_orient). Read by the corridor, the preview, AND the
+ * panel blit's mirror on both CPUs -- declared up here with the peek so
+ * the per-tail purge below can reach it. */
+static int g_corr_lit_left = 1;
+void raycast_peek_clear(void) { g_hole_peek_on = 0; }
+
+void raycast_peek_render(fx_t px, fx_t py, uint8_t angle) {
+    fx_t dirX = COS_FX(angle), dirY = SIN_FX(angle);
+    fx_t planeX = FX_MUL(-dirY, FX(0.66)), planeY = FX_MUL(dirX, FX(0.66));
+    /* Floor/ceiling per-row shade: perspective fog toward the horizon, so
+     * the ground plane recedes instead of blurring into one brown slab.
+     * Row distance ~ (eye height * H/2) / rows-from-horizon. */
+    uint8_t rowc[PEEK_H], rowf[PEEK_H];
+    for (int y = 0; y < PEEK_H; y++) {
+        int dy = y - (PEEK_H >> 1); if (dy < 0) dy = -dy;
+        if (dy < 1) dy = 1;
+        fx_t d = ((fx_t)(PEEK_H >> 1) << FX_SHIFT) / (dy * 2);   /* ~cells */
+        int sh = (hole_fog8(d) >> 8) + PEEK_DIM;
+        if (sh > 15) sh = 15;
+        rowc[y] = (uint8_t)(CEIL_BASE + sh);
+        rowf[y] = (uint8_t)(FLOOR_BASE + sh);
+    }
+    for (int col = 0; col < PEEK_W; col++) {
+        fx_t camX = ((fx_t)(2 * col - PEEK_W) << FX_SHIFT) / PEEK_W;
+        fx_t rdx = dirX + FX_MUL(planeX, camX);
+        fx_t rdy = dirY + FX_MUL(planeY, camX);
+        fx_t perp = FX(8);            /* fallback: degenerate ray = far wall */
+        int side = 0, hit = 1;
+        fx_t ax = rdx < 0 ? -rdx : rdx, ay = rdy < 0 ? -rdy : rdy;
+        if (ax > FX(0.02) || ay > FX(0.02)) {
+            int mapX = FX_INT(px), mapY = FX_INT(py);
+            fx_t dX = ax > FX(0.02) ? fx_div_hw(FX_ONE, ax) : FX(64);
+            fx_t dY = ay > FX(0.02) ? fx_div_hw(FX_ONE, ay) : FX(64);
+            int stepX = rdx < 0 ? -1 : 1, stepY = rdy < 0 ? -1 : 1;
+            fx_t sdX = rdx < 0 ? FX_MUL(px - ((fx_t)mapX << FX_SHIFT), dX)
+                               : FX_MUL(((fx_t)(mapX + 1) << FX_SHIFT) - px, dX);
+            fx_t sdY = rdy < 0 ? FX_MUL(py - ((fx_t)mapY << FX_SHIFT), dY)
+                               : FX_MUL(((fx_t)(mapY + 1) << FX_SHIFT) - py, dY);
+            for (int n = 0; n < 48; n++) {
+                if (sdX < sdY) { sdX += dX; mapX += stepX; side = 0; }
+                else           { sdY += dY; mapY += stepY; side = 1; }
+                if ((unsigned)mapX >= MAP_W || (unsigned)mapY >= MAP_H) break;
+                hit = world_map[mapY][mapX];
+                if (hit) {
+                    perp = side ? sdY - dY : sdX - dX;
+                    break;
+                }
+            }
+            if (perp < FX(0.05)) perp = FX(0.05);
+            if (perp > FX(12))   perp = FX(12);
+        }
+        /* Same fog curve as the hole's face shade, plus the peek dim. */
+        int sh;
+        if (perp < FX(2.5)) sh = (int)((perp * 2) / FX(2.5));
+        else { fx_t past = perp - FX(2.5);
+               sh = 2 + (int)((past * 13) / (FOG_RAMP_DIST - FX(2.5))); }
+        sh += PEEK_DIM + side;
+        if (hit == 2) sh = 15;                   /* void doorway: pure fog-dark */
+        if (sh > 15) sh = 15;
+        int lh = (int)divu_u32((uint32_t)(PEEK_H << FX_SHIFT), (uint32_t)perp);
+        int top = (PEEK_H - lh) >> 1, bot = (PEEK_H + lh) >> 1;
+        if (top < 0) top = 0;
+        if (bot > PEEK_H - 1) bot = PEEK_H - 1;
+        uint8_t cw = (uint8_t)(WALL_BASE + sh);
+        uint8_t *d = peek_buf + col;
+        int y = 0;
+        for (; y < top; y++, d += PEEK_W) *d = rowc[y];
+        for (; y <= bot; y++, d += PEEK_W) *d = cw;
+        for (; y < PEEK_H; y++, d += PEEK_W) *d = rowf[y];
+    }
+    purge_cache_range(peek_buf, PEEK_BYTES);   /* self-read is fresh; belt */
+    /* Nonzero = on, and it carries its birth frame so the blit can DISSOLVE
+     * the peek in over the first few frames instead of popping. */
+    g_hole_peek_on = (int)SHARED_UC->frame_count + 1;
+}
 
 void ceil_h_clear(void) {       /* CEIL_H_FULL lives in raycast.h (procgen reads it) */
     for (int y = 0; y < MAP_H; y++)
@@ -1067,6 +1227,13 @@ void raycast_purge_lowceil_cache(void) {
     purge_cache_range(&g_exit_hole_plane, sizeof g_exit_hole_plane);
     purge_cache_range(&g_exit_hole_c0,   sizeof g_exit_hole_c0);
     purge_cache_range(&g_exit_hole_dir,  sizeof g_exit_hole_dir);
+    /* Destination peek: the flag flips mid-map (climb commit), so it is
+     * purged every tail pass, and the bitmap only while it is live. The
+     * lit-side flag rides along -- the blit MIRRORS by it, and the
+     * secondary draws half the panel. */
+    purge_cache_range(&g_hole_peek_on,   sizeof g_hole_peek_on);
+    purge_cache_range(&g_corr_lit_left,  sizeof g_corr_lit_left);
+    if (g_hole_peek_on) purge_cache_range(peek_buf, PEEK_BYTES);
 }
 
 /* True if the cell holding world point (wx,wy) is a low crawlspace ceiling.
@@ -1510,6 +1677,11 @@ void raycast_set_brightness(int lvl) {
         static const uint8_t dk[4][3] = { {4,3,2}, {7,5,3}, {9,7,5}, {12,10,7} };
         for (int i = 0; i < 4; i++)
             Hw32xSetBGColor(DOOR_DARK_BASE + i, dk[i][0]*lvl/FADE_STEPS, dk[i][1]*lvl/FADE_STEPS, dk[i][2]*lvl/FADE_STEPS);
+        /* Exit-hole deep tail: hue bridge from the wall ramp's floor (9,9,8)
+         * down to DOOR_DARK+2 (9,7,5). Same luma trajectory, no hue step. */
+        static const uint8_t hd[4][3] = { {14,13,9}, {13,12,8}, {12,11,8}, {10,9,7} };
+        for (int i = 0; i < 4; i++)
+            Hw32xSetBGColor(HOLE_DEEP_BASE + i, hd[i][0]*lvl/FADE_STEPS, hd[i][1]*lvl/FADE_STEPS, hd[i][2]*lvl/FADE_STEPS);
         /* Soft stipple dapple shades (door ramp ~1-2 darker). */
         static const uint8_t sp[5][3] = { {13,11,8},{16,14,10},{20,17,13},{24,20,15},{28,24,18} };
         for (int i = 0; i < 5; i++)
@@ -1603,6 +1775,21 @@ static void build_palette(void) {
     Hw32xSetBGColor(DOOR_DARK_BASE + 1,  7,  5,  3);
     Hw32xSetBGColor(DOOR_DARK_BASE + 2,  9,  7,  5);
     Hw32xSetBGColor(DOOR_DARK_BASE + 3, 12, 10,  7);
+    /* Exit-hole cool run (see HOLE_DEEP_BASE): glow-bright, glow-dim,
+     * deep-mid, deepest. Light-to-dark so the back panel indexes it flat.
+     * LIFTED twice by hardware review: consumer CRTs crush the low end, so
+     * at play distance anything under ~luma 70 read as flat black. Deep-mid
+     * (most of the panel) now sits ~83 -- a grey shadow, plainly not black
+     * -- and the hue stays cool (B-R +16..24) so it still reads as another
+     * space, never as shadowed wallpaper. */
+    /* Hue: an UNLIT YELLOW WALL, darker side, flat -- the wallpaper's own
+     * hue family (B ~= 0.65 R) without its chevron or its light. The panel
+     * reads as the same paper in a room with no bulbs, not another
+     * material. (Was warm-grey; before that blue; Mike's call each step.) */
+    Hw32xSetBGColor(HOLE_DEEP_BASE + 0, 14, 13,  9);
+    Hw32xSetBGColor(HOLE_DEEP_BASE + 1, 13, 12,  8);
+    Hw32xSetBGColor(HOLE_DEEP_BASE + 2, 12, 11,  8);
+    Hw32xSetBGColor(HOLE_DEEP_BASE + 3, 10,  9,  7);
     /* EXIT-sign fog ramps (green letters + white plate, near->fog). */
     Hw32xSetBGColor(SIGN_GREEN_BASE + 0,  8, 19, 10);
     Hw32xSetBGColor(SIGN_GREEN_BASE + 1,  7, 15,  9);
@@ -1701,6 +1888,7 @@ void raycast_init(void) {
     build_palette();
     build_shading_tables();
     init_lights();
+    raycast_peek_clear();     /* every portal lands here; the peek is spent */
     SHARED_UC->eye_h = STAND_EYE;        /* standing until the player crouches */
     /* Precompute cameraX[col] = 2*col/SCREEN_W - 1 in FX. */
     for (int col = 0; col < SCREEN_W; col++) {
@@ -1823,6 +2011,8 @@ static void place_partitions_fixed(int target) {
 /* The hand-tuned 32x32 Backrooms map + its two dividers. */
 void raycast_load_fixed(void) {
     pedge_clear();                     /* fixed map: legacy partitions only */
+    g_exit_wall_cx = g_exit_wall_cy = -1;   /* no stale exits (see load_lobby) */
+    g_exit_hole_cx = g_exit_hole_cy = -1;
     /* Authored 32x32 map at the top-left of the live grid; rest is solid wall
      * (its own boundary seals the playable area, so the fill is never seen). */
     for (int r = 0; r < MAP_H; r++)
@@ -2153,6 +2343,11 @@ int raycast_door_portal_check(void) {
  * enter the chosen level. */
 void raycast_load_lobby(void) {
     pedge_clear();                     /* lobby: legacy partitions only (inc 3) */
+    /* The lobby has no exits of its own; a STALE hole/door from the previous
+     * map would keep draw_exit_hole live every frame AND arm the climb gate
+     * at a phantom cell. procgen/custom clear these; the lobby never did. */
+    g_exit_wall_cx = g_exit_wall_cy = -1;
+    g_exit_hole_cx = g_exit_hole_cy = -1;
     /* Authored 32x32 lobby at the top-left of the live grid; rest solid wall. */
     for (int r = 0; r < MAP_H; r++)
         for (int c = 0; c < MAP_W; c++)
@@ -2465,6 +2660,289 @@ void raycast_exit_pullup(int t, int total) {
     if (t >= total) pitch_smooth_y = 0;
 }
 
+/* TRAVEL CAMERA: while the corridor overlay draws the duct, the
+ * raycaster underneath renders the DESTINATION from a camera moving
+ * toward its spawn -- starting up to three open cells behind it (probed;
+ * fewer if the map is tight, zero collapses to a fixed viewpoint whose
+ * window-crop growth still reads as approach), at standing-plus eye, the
+ * height we crawled in at. The end window reveals this live render:
+ * travelling TO the spawn point, arriving ON it. */
+static fx_t g_trav_sx, g_trav_sy, g_trav_ex, g_trav_ey;
+static uint8_t g_trav_ang;
+#define TRAV_EYE 160              /* standing, raised a touch: duct height */
+#define CORR_VEIL_T 2             /* mirrors CORR_VEIL: held frames, no motion */
+void raycast_corridor_travel_init(fx_t sx, fx_t sy, uint8_t ang) {
+    fx_t dirx = COS_FX(ang), diry = SIN_FX(ang);
+    int n = 0;
+    for (int i = 1; i <= 3; i++) {
+        int cx = FX_INT(sx - dirx * i);
+        int cy = FX_INT(sy - diry * i);
+        if ((unsigned)cx >= MAP_W || (unsigned)cy >= MAP_H) break;
+        if (world_map[cy][cx] != 0) break;
+        n = i;
+    }
+    g_trav_ex = sx;               g_trav_ey = sy;
+    g_trav_sx = sx - dirx * n;    g_trav_sy = sy - diry * n;
+    g_trav_ang = ang;
+    player.x = g_trav_sx; player.y = g_trav_sy; player.angle = ang;
+    SHARED_UC->eye_h = TRAV_EYE;
+    SHARED_UC->pitch_y = 0;
+}
+void raycast_corridor_travel(int t, int total) {
+    if (total < 1) total = 1;
+    int p = 0;
+    if (t > CORR_VEIL_T) p = ((t - CORR_VEIL_T) << 8) / (total - CORR_VEIL_T);
+    if (p > 256) p = 256;
+    int p2 = (p * p) >> 9;
+    p2 += p >> 1;
+    if (p2 > 256) p2 = 256;
+    player.x = g_trav_sx
+             + (fx_t)(((int64_t)(g_trav_ex - g_trav_sx) * p2) >> 8);
+    player.y = g_trav_sy
+             + (fx_t)(((int64_t)(g_trav_ey - g_trav_sy) * p2) >> 8);
+    player.angle = g_trav_ang;
+    SHARED_UC->eye_h = TRAV_EYE;
+    is_walking = 0; is_running = 0;
+}
+
+/* CORRIDOR CRAWL: the interior of the wall, as a set piece. Replaces the
+ * old outside-the-plane camera slide: after the pullup, the view cuts to a
+ * scripted one-point-perspective duct THREE CELLS deep, crawled end to end.
+ * Drawn OVER the normal frame (raycast_render still runs underneath, which
+ * keeps both CPUs' pipeline and the audio pump alive) on the primary only.
+ *
+ * Everything is axis-aligned by construction -- a straight crawl down a
+ * square duct projects every surface to bands between concentric
+ * rectangles -- so the whole thing is rectangle fills: cheap enough that
+ * this is the smoothest-moving camera in the game. Depth reads from the
+ * ring shading (LIGHT LIVES AT THE EXIT: rings brighten toward the far
+ * end, per the enclosure rule) and from darker RIB rings at each cell
+ * seam, which is what makes it three cells of something rather than a
+ * tube. The destination peek fills the end plane, growing until it IS the
+ * frame -- the camera-push into the spawn point, made literal. */
+/* The duct's axial spans and per-segment base shades, shared by the
+ * polygon corridor, the through-panel preview, and anything else that
+ * must agree with them: cell, rib collar, cell, rib collar, cell. */
+static const fx_t corr_seg_z[6] = { 0, FX(0.94), FX(1.06),
+                                    FX(1.94), FX(2.06), FX(3.0) };
+static const int8_t corr_seg_base[5] = { 2, 6, 9, 8, 3 };  /* middle lifted:
+                                * 11/9 read too dark against black on hardware */
+/* Facet shade in 8.8, resolved through the hole's own 2x2 -- every duct
+ * surface is a live 50/50 weave of adjacent ramp entries (the half-step),
+ * the same dithered material the raycaster's interior and the panel
+ * preview wear. Flat single-index fills read as a different substance at
+ * the swap (Mike: keep the panel dithering through the tunnel). */
+static inline int corr_facet8(int sh) {
+    if (sh < 0) sh = 0; else if (sh > 14) sh = 14;
+    return (sh << 8) + 128;
+}
+/* Capture which duct wall is lit from the hole's orientation at the
+ * threshold (before the flush wipes it): the raycaster lights the side
+ * whose rays drift with rda < 0, so the corridor keeps the same wall lit
+ * across the swap and the asymmetry carries through. */
+void raycast_corridor_orient(void) {
+    if (g_exit_hole_cx < 0) { g_corr_lit_left = 1; return; }
+    uint8_t angle = (uint8_t)SHARED_UC->player.angle;
+    fx_t dirX = COS_FX(angle), dirY = SIN_FX(angle);
+    fx_t planeX = FX_MUL(-dirY, FX(0.66)), planeY = FX_MUL(dirX, FX(0.66));
+    fx_t rdx = dirX - planeX, rdy = dirY - planeY;   /* screen-left ray */
+    fx_t rda = g_exit_hole_axis ? rdx : rdy;
+    g_corr_lit_left = rda < 0;
+}
+/* Flat-fill a convex quad (screen coords, any winding) with scanline
+ * edge-walking. Coordinates may lie far outside the frame (near-clipped
+ * geometry projects huge); spans clamp per row. The box-renderer fill
+ * idea at its smallest. */
+static void corr_fill_quad(uint8_t *fb, const int *qx, const int *qy,
+                           int s8) {
+    int ymin = qy[0], ymax = qy[0];
+    for (int i = 1; i < 4; i++) {
+        if (qy[i] < ymin) ymin = qy[i];
+        if (qy[i] > ymax) ymax = qy[i];
+    }
+    if (ymin < 0) ymin = 0;
+    if (ymax > SCREEN_H - 1) ymax = SCREEN_H - 1;
+    if (ymin > ymax) return;
+    int16_t xl[SCREEN_H], xr[SCREEN_H];
+    for (int y = ymin; y <= ymax; y++) { xl[y] = SCREEN_W; xr[y] = -1; }
+    for (int i = 0; i < 4; i++) {
+        int x0 = qx[i], y0 = qy[i], x1 = qx[(i + 1) & 3], y1 = qy[(i + 1) & 3];
+        if (y0 == y1) {
+            if (y0 < ymin || y0 > ymax) continue;
+            int a = x0 < x1 ? x0 : x1, b = x0 < x1 ? x1 : x0;
+            if (a < xl[y0]) xl[y0] = (int16_t)(a < 0 ? 0 : a);
+            if (b > xr[y0]) xr[y0] = (int16_t)(b > SCREEN_W ? SCREEN_W : b);
+            continue;
+        }
+        if (y0 > y1) { int t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+        int dxdy = ((x1 - x0) << 12) / (y1 - y0);
+        int ys = y0 < ymin ? ymin : y0;
+        int ye = y1 > ymax ? ymax : y1;
+        int acc = (x0 << 12) + dxdy * (ys - y0);
+        for (int y = ys; y <= ye; y++, acc += dxdy) {
+            int x = acc >> 12;
+            int xc = x < 0 ? 0 : x > SCREEN_W ? SCREEN_W : x;
+            if (xc < xl[y]) xl[y] = (int16_t)xc;
+            if (xc > xr[y]) xr[y] = (int16_t)xc;
+        }
+    }
+    for (int y = ymin; y <= ymax; y++) {
+        uint8_t *row = fb + y * SCREEN_W;
+        uint8_t c0 = hole_shade(s8, hole_bayer[((y & 1) << 1) | 0]);
+        uint8_t c1 = hole_shade(s8, hole_bayer[((y & 1) << 1) | 1]);
+        for (int x = xl[y]; x < xr[y]; x++) row[x] = (x & 1) ? c1 : c0;
+    }
+}
+
+#define CORR_LEN   FX(3.0)     /* three cells of duct */
+#define CORR_STOP  FX(0.10)    /* camera all but touches the end plane: the
+                                * destination fills the frame before the fall */
+#define CORR_START (-FX(0.12)) /* camera BEGINS where the raycaster left it:
+                                * 0.12 outside the mouth, so the swap frame
+                                * is a geometric match (the box-intro rule) */
+#define CORR_VEIL  2           /* held frames at the swap (the panel already
+                                * opened during the pullup's dissolve) */
+#define CORR_HW    FX(0.30)    /* duct half-width  (the hole's aperture)   */
+#define CORR_HH    FX(0.22)    /* duct half-height (sill..head, halved)    */
+void raycast_crawl_corridor(int t, int total) {
+    if (total < 1) total = 1;
+    uint8_t *fb = fb_pixels();
+    /* THE BOX-INTRO GRAMMAR: swap on a matching still, THEN move. Frames
+     * 0..CORR_VEIL hold the camera at the raycaster's exact position while
+     * the back panel -- drawn intact over the duct -- dissolves open.
+     * Motion begins only once the panel has given way. */
+    int p = 0;
+    if (t > CORR_VEIL)
+        p = ((t - CORR_VEIL) << 8) / (total - CORR_VEIL);
+    if (p > 256) p = 256;
+    /* Ease-in: the first push off the sill is slow, then the crawl finds
+     * its rhythm. p2 = p eased toward constant speed. */
+    int p2 = (p * p) >> 9;              /* 0..128: slow half */
+    p2 += p >> 1;                       /* + linear: net accelerating 0..256 */
+    if (p2 > 256) p2 = 256;
+    fx_t cz = CORR_START
+            + (fx_t)(((int64_t)(CORR_LEN - CORR_STOP - CORR_START) * p2) >> 8);
+    /* Elbows-and-knees: two bob cycles over the length. The bob is a TRUE
+     * camera translation (applied to the quads below), so near geometry
+     * sways more than far -- real parallax, not a frame shift. */
+    uint8_t ph = (uint8_t)(p2 << 1);
+    int cxs = SCREEN_W >> 1;
+    int cys = SCREEN_H >> 1;
+    if (t == 1 || t == total / 2) SHARED_UC->slide_sfx = 1;   /* the scrapes */
+
+    /* POLYGONS, the box's own language: the duct is camera-space QUADS --
+     * four walls per axial segment, thin darker rib collars at the cell
+     * seams, the destination on the end quad -- near-clipped, projected,
+     * painter-ordered far-to-near, and FLAT-FILLED per facet. No
+     * gradients, no per-pixel tricks: each panel is one clean polygon of
+     * one shade, and the facet edges between segments are what read as
+     * built geometry, exactly like the title box's panels. The bob is a
+     * true camera translation, so every quad parallaxes properly. */
+    fx_t camx = (fx_t)(((int64_t)SIN_FX((uint8_t)(ph + 64)) * 4) >> 8);
+    fx_t camy = (fx_t)(((int64_t)SIN_FX(ph) * 6) >> 8);
+    const fx_t NEARZ = FX(0.05);
+    /* THE WINDOW IS LIVE. Nothing is painted inside the end rect: the
+     * raycaster underneath is rendering the REAL destination from the
+     * travel camera (see raycast_corridor_travel), so the opening shows
+     * the actual place, full resolution, growing as both cameras close.
+     * The duct's own quads occlude everything to the sides and behind. */
+    /* Wall quads, far segment to near. Each side of each segment is one
+     * flat facet; its shade is the bathtub at the segment's centre (the
+     * room lights the entrance, the destination the exit, dark between)
+     * with the hole's trim: head +1, sill -1, ribs +2. */
+    /* Per-segment BASE shades, colour-matched to what the raycaster's
+     * interior actually paints at the swap frame (its near shades are
+     * almost pure surface offsets -- fog is ~0 that close): entrance base
+     * 2, dark middle 11, exit lit by the destination, ribs proud of their
+     * neighbours. Surface trims are the raycaster's own: head +3 (the
+     * reveal), sill +0 (the lit ledge), lit wall +0, shadow wall +4. */
+    for (int s = 4; s >= 0; s--) {
+        fx_t z0 = corr_seg_z[s] - cz, z1 = corr_seg_z[s + 1] - cz;
+        if (z1 <= NEARZ) continue;                 /* fully behind us */
+        if (z0 < NEARZ) z0 = NEARZ;
+        int sh = corr_seg_base[s];
+        /* Projected corner columns/rows at both depths, camera-translated. */
+        int lx0 = cxs + (int)(((int64_t)(-CORR_HW - camx) * 242) / z0);
+        int rx0 = cxs + (int)(((int64_t)( CORR_HW - camx) * 242) / z0);
+        int ty0 = cys - (int)(((int64_t)( CORR_HH - camy) * 224) / z0);
+        int by0 = cys - (int)(((int64_t)(-CORR_HH - camy) * 224) / z0);
+        int lx1 = cxs + (int)(((int64_t)(-CORR_HW - camx) * 242) / z1);
+        int rx1 = cxs + (int)(((int64_t)( CORR_HW - camx) * 242) / z1);
+        int ty1 = cys - (int)(((int64_t)( CORR_HH - camy) * 224) / z1);
+        int by1 = cys - (int)(((int64_t)(-CORR_HH - camy) * 224) / z1);
+        int cx4[4], cy4[4];
+        int c;
+        c = corr_facet8(sh + 1);                   /* head: one step of reveal */
+        cx4[0] = lx0; cy4[0] = ty0; cx4[1] = rx0; cy4[1] = ty0;
+        cx4[2] = rx1; cy4[2] = ty1; cx4[3] = lx1; cy4[3] = ty1;
+        corr_fill_quad(fb, cx4, cy4, c);
+        c = corr_facet8(sh);                       /* sill: the lit ledge */
+        cx4[0] = lx1; cy4[0] = by1; cx4[1] = rx1; cy4[1] = by1;
+        cx4[2] = rx0; cy4[2] = by0; cx4[3] = lx0; cy4[3] = by0;
+        corr_fill_quad(fb, cx4, cy4, c);
+        c = corr_facet8(sh + (g_corr_lit_left ? 0 : 4));   /* left wall */
+        cx4[0] = lx0; cy4[0] = ty0; cx4[1] = lx1; cy4[1] = ty1;
+        cx4[2] = lx1; cy4[2] = by1; cx4[3] = lx0; cy4[3] = by0;
+        corr_fill_quad(fb, cx4, cy4, c);
+        c = corr_facet8(sh + (g_corr_lit_left ? 4 : 0));   /* right wall */
+        cx4[0] = rx1; cy4[0] = ty1; cx4[1] = rx0; cy4[1] = ty0;
+        cx4[2] = rx0; cy4[2] = by0; cx4[3] = rx1; cy4[3] = by1;
+        corr_fill_quad(fb, cx4, cy4, c);
+    }
+}
+
+/* THROUGH-PANEL DUCT PREVIEW -- the "dithered extension", visible from the
+ * MOMENT the climb is triggered. Renders the corridor's own facets (same
+ * segments, same bases, same lit side) as seen through the panel window
+ * into the peek bitmap; the back panel's existing 4-frame dissolve then
+ * opens the panel onto it during the pullup, while the raycaster still
+ * owns the frame. By the swap, the panel is already open onto the duct
+ * the polygon corridor will show -- no veil needed, no pop anywhere. */
+void raycast_duct_preview(void) {
+    /* A MINIATURE OF THE CORRIDOR'S OWN FRAME 0 -- not the literal
+     * through-window optics. The literal projection compresses the duct
+     * into flat horizontal bands at one cell of distance (correct, and
+     * wrong: it matches nothing the swap will show). What the panel should
+     * hold is the composition the corridor opens on -- converging
+     * trapezoids, visible side walls, rib collars -- so the dissolve, the
+     * pullup, and the swap are all one continuous framing. Same
+     * projection, same tables, scaled into peek space. */
+    fx_t dzx[PEEK_W]; fx_t dzy[PEEK_H];
+    for (int u = 0; u < PEEK_W; u++) {
+        int a = u - PEEK_W / 2; if (a < 0) a = -a;
+        dzx[u] = a < 1 ? FX(64)
+               : (fx_t)(((int64_t)CORR_HW * 73) / a);   /* 242 * 96/320 */
+    }
+    for (int v = 0; v < PEEK_H; v++) {
+        int a = v - PEEK_H / 2; if (a < 0) a = -a;
+        dzy[v] = a < 1 ? FX(64)
+               : (fx_t)(((int64_t)CORR_HH * 64) / a);   /* 224 * 64/224 */
+    }
+    /* Camera at the PANEL PLANE, not at the player: through a hole in a
+     * wall you see the duct from cell 1 onward -- dark rings, rib collars,
+     * the deep stretch (Mike's 45.png framing) -- never the near cell's
+     * lit walls, which made the preview read as a lit ROOM (and so as a
+     * spawn-point image) instead of a tunnel. */
+    const fx_t cz = FX(1.0), dend = CORR_LEN - FX(1.0);
+    for (int v = 0; v < PEEK_H; v++) {
+        uint8_t *dst = peek_buf + v * PEEK_W;
+        for (int u = 0; u < PEEK_W; u++) {
+            fx_t dx = dzx[u], dy = dzy[v];
+            if (dx > dend && dy > dend) { dst[u] = HOLE_DEEP_BASE + 2; continue; }
+            fx_t z = cz + (dx < dy ? dx : dy);
+            int s = 4;
+            while (s > 0 && z < corr_seg_z[s]) s--;
+            int sh = corr_seg_base[s];
+            if (dx < dy) sh += ((u < PEEK_W / 2) == (g_corr_lit_left != 0)) ? 0 : 4;
+            else         sh += (v < PEEK_H / 2) ? 1 : 0;
+            dst[u] = hole_shade(corr_facet8(sh),
+                                hole_bayer[((v & 1) << 1) | (u & 1)]);
+        }
+    }
+    purge_cache_range(peek_buf, PEEK_BYTES);
+    g_hole_peek_on = (int)SHARED_UC->frame_count + 1;   /* dissolve from NOW */
+}
+
 /* Eye height (8.8 fraction of room height), eased toward STAND/CROUCH as
  * the player holds X. STAND_EYE/CROUCH_EYE are #defined up by raycast_init. */
 static int     eye_smooth = STAND_EYE;
@@ -2500,6 +2978,16 @@ void raycast_arrival_drop(int t, int total) {
     }
     SHARED_UC->eye_h = (uint8_t)eye_smooth;
     is_walking = 0; is_running = 0;
+}
+
+/* Settle the eye to standing NOW. The arrival drop deliberately leaves
+ * eye_smooth compressed so gameplay's crouch-release plays the stand -- but
+ * the INTRO scripts its own stand-up, and without this the leftover
+ * compression replayed the bounce on the first frame of whatever level the
+ * start list launched. */
+void raycast_eye_settle(void) {
+    eye_smooth = STAND_EYE;
+    SHARED_UC->eye_h = STAND_EYE;
 }
 
 /* Read controller, advance player by one frame. Axis-separated collision
@@ -5551,6 +6039,24 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
     int eye = (int)SHARED_UC->eye_h;
     const fx_t PAR = FX(0.01);
     int jambs = SHARED_UC->hole_jamb;    /* TESTING>HOLEJAMB A/Bs the close-up work */
+    /* ENCLOSURE. Fog law says close = lit, which is exactly wrong INSIDE a
+     * shaft: as the camera closes on the plane the tunnel must wrap dark
+     * around you with the light concentrated at the exit. Within 0.15 cells
+     * of the face, the side/head/sill panels take up to +5 ramp steps of
+     * dark (the back panel and peek take none -- they ARE the exit), and
+     * the peek blit gains a centered ZOOM (up to ~1.9x) so the crawl reads
+     * as entering the destination's viewpoint, not approaching a poster.
+     * Both are zero at normal viewing distances. */
+    fx_t cam_pp = g_exit_hole_axis ? py : px;
+    fx_t cam_d = g_exit_hole_dir > 0 ? (g_exit_hole_plane - cam_pp)
+                                     : (cam_pp - g_exit_hole_plane);
+    int enc8 = 0, z256 = 256;
+    if (cam_d > 0 && cam_d < FX(0.15)) {
+        enc8 = (int)(((int64_t)(FX(0.15) - cam_d) * (5 * 256)) / FX(0.13));
+        if (enc8 > 5 * 256) enc8 = 5 * 256;
+        z256 = 256 + (int)(((int64_t)(FX(0.15) - cam_d) * 230) / FX(0.13));
+    }
+    int iz256 = (256 * 256) / z256;      /* peek zoom: sample window shrink */
 
     /* Column-clip: project the opening's two endpoints on the face plane. */
     fx_t det = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
@@ -5597,7 +6103,8 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         /* Far plane (one cell deep), clamped to the cavity side the ray
          * drifts into so shallow views don't tunnel past the hole's width. */
         int side_hit = 0;
-        fx_t t2 = fx_div_hw(g_exit_hole_plane + g_exit_hole_dir * FX_ONE - pp, rdp);
+        fx_t t2_back = fx_div_hw(g_exit_hole_plane + g_exit_hole_dir * FX_ONE - pp, rdp);
+        fx_t t2 = t2_back;
         if (rda > 64 || rda < -64) {
             fx_t adrift = rda < 0 ? -rda : rda;
             fx_t edge = (rda > 0) ? (HOLE_HW - off) : (off + HOLE_HW);
@@ -5619,128 +6126,207 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         if (t < FX(2.5)) bsh = (int)((t * 2) / FX(2.5));
         else { fx_t past = t - FX(2.5); fx_t span = FOG_RAMP_DIST - FX(2.5);
                bsh = 2 + (int)((past * 13) / span); }
-        /* CORE shade from the ray's TRAVERSAL DEPTH (t2 - t), fading to the
-         * back wall's murk register — but ASYMMETRICALLY, per the film
-         * reference: room light enters the opening from one side, so the
-         * LIT side wall starts near wall-bright and holds readable for a
-         * full cell of depth, while the SHADOW side starts deep and hits
-         * murk within a third of a cell. Which interior side a column
-         * shows is the ray's drift direction (rda sign). 8.8 for dither. */
-        /* The interior is UNLIT, so its darkness is ABSOLUTE, not "N steps
-         * below the face". The old relative murk (bsh + DARK_ROOM_SHADE + 2)
-         * meant a hole you were standing next to bottomed out mid-ramp and
-         * read as lit. Only haze between you and the opening lifts it now,
-         * hence the one small fog term. */
+        /* CRAWLSPACE LAW. The interior no longer eases toward a manufactured
+         * murk -- that spent the cavity's last third in a wide dithered
+         * transition whose front floated mid-panel, anchored to an easing
+         * curve instead of any edge (Mike's blue lines). Instead every
+         * interior surface shades by the SAME fog curve as the rest of the
+         * world, evaluated at its actual ray distance, with the film's
+         * asymmetry kept as flat offsets (lit side +1, shadow side +5, back
+         * run-in +2 -- rda sign picks the side). Steps land at fog-band
+         * depths like a crawlspace duct: the darkness reads as the same air,
+         * deeper. The only special dark left is the back panel's own. */
         int murk = HOLE_DARKEST - (bsh >> 2);
         if (murk < HOLE_DARKEST - 2) murk = HOLE_DARKEST - 2;
-        fx_t depth_in = t2 - t; if (depth_in < 0) depth_in = 0;
-        int s_start, reach;                   /* reach: fade span, <<8-scaled */
-        if (side_hit && rda < 0) { s_start = bsh + 1; reach = 9; }  /* lit side */
-        else if (side_hit)       { s_start = bsh + 5; reach = 10; } /* shadow side */
-        else                     { s_start = bsh + 2; reach = 9; }  /* back run-in */
-        if (s_start > murk) s_start = murk;
-        /* Fade measured from HOLE_FADE_START, not from the face — and one reach
-         * step faster all round to cover the same span in the half-depth left. */
-        fx_t fade_in = depth_in - HOLE_FADE_START; if (fade_in < 0) fade_in = 0;
-        int sv8 = (s_start << 8)
-                + (int)(((int64_t)fade_in * ((murk - s_start) << (reach - 8))
-                         << 8) >> FX_SHIFT);
-        /* Nothing but the BACK panel may reach murk: every other surface stops
-         * two steps short. Letting them all converge on the same dark left the
-         * corners dithering one murk into another — no edges, so the cavity
-         * read as a soft blob behind a lit frame rather than a box. */
-        if (sv8 > (murk - 2) << 8) sv8 = (murk - 2) << 8;
-        int sv = sv8 >> 8;
-
-        /* DITHERED fades, not band stacks: every gradient below resolves its
-         * 8.8 shade through a checker half-step ((y^col)&1) — the transition
-         * rows/columns interleave two adjacent ramp entries instead of
-         * stepping through them as visible stripes (the "rainbow" note). */
-        #define HOLE_DITH(acc8, y_) \
-            hole_ramp[((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8 > HOLE_DARKEST \
-                      ? HOLE_DARKEST : ((acc8) + ((((y_) ^ col) & 1) << 7)) >> 8]
+        /* Fog in 8.8: the continuous value BETWEEN the world's fog bands.
+         * Where it sits between two bands, the 2x2 dither resolves it -- so
+         * the mixing starts at the OUTER EDGE where the hole begins and
+         * spreads evenly with depth (linear in the fog law, no ease), never
+         * bunching into a floating front. The in-between Mike asked for:
+         * crawlspace endpoints, dithered continuum across them. */
+        int f0_8 = hole_fog8(t);               /* at the lip */
+        int f2_8 = hole_fog8(t2);              /* at this column's far hit */
+        int s_off = (side_hit && rda < 0) ? 1 : side_hit ? 5 : 2;
+        int sv8 = f2_8 + (s_off << 8) + enc8;   /* enclosure wraps the shaft */
+        /* Nothing but the BACK panel may reach murk: every other surface
+         * stops short, so the corners around it stay corners. Enclosure
+         * raises the ceiling of the fall along with the values. */
+        int cap8 = ((murk - 3) << 8) + enc8;
+        if (cap8 > 15 << 8) cap8 = 15 << 8;
+        if (sv8 > cap8) sv8 = cap8;
+        /* The head/sill fall toward fog at THIS COLUMN's far distance (t2:
+         * the side exit over a side panel, the back plane over the back).
+         * t2 is continuous across that column boundary, so the bands carry
+         * no seam onto the panels below them -- one global back-plane
+         * target with per-class clamps put a vertical shade cliff down the
+         * head exactly at the back panel's corner column. The old seam rule
+         * is now structural: over a side panel the band lands at the side's
+         * own fog, one offset step apart, by construction. */
+        const uint8_t *bay = hole_bayer + (col & 1);   /* this column's rows */
+        #define HOLE_BAY(y_)  bay[((y_) & 1) << 1]
         uint8_t *base = fb + col;
         int y0, y1;
         /* Head underside: shadowed from the lip (film ref: the top reveal
-         * gets no room light), core-dark at depth. */
+         * gets no room light) -- a +3-step reveal shadow at the lip decaying
+         * to the +2 run-in by the back, over the fog lerp. */
         {
-            /* HOLD then fall, the same rule the side walls follow. Ramping
-             * across the whole band made the head one long soft gradient, and
-             * with the sill doing it too the opening read as a dark FRAME —
-             * four blurs meeting — instead of two lit surfaces going into a
-             * cavity. The near half stays lit; the fall happens at the back. */
-            int s0 = bsh + 4; if (s0 > sv) s0 = sv;
-            int h = head_hi - head_lo;
-            int hold = h >> 1, run = h - hold;
-            int step = (run > 0)
-                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)run) : 0;
+            int h = head_hi - head_lo; if (h < 1) h = 1;
+            int kstep = (int)divu_u32((uint32_t)(256 << 8), (uint32_t)h);
             y0 = head_lo < 0 ? 0 : head_lo;
             y1 = head_hi > SCREEN_H - 1 ? SCREEN_H - 1 : head_hi;
-            int k = y0 - head_lo - hold;            /* clamped-top catch-up */
-            int acc = (s0 << 8) + (k > 0 ? step * k : 0);
-            for (int y = y0; y <= y1; y++, k++) {
-                base[y * SCREEN_W] = HOLE_DITH(acc, y);
-                if (k >= 0) acc += step;
+            int kacc = kstep * (y0 - head_lo);      /* clamped-top catch-up */
+            for (int y = y0; y <= y1; y++, kacc += kstep) {
+                int k = kacc >> 8;                  /* 0..256 lip -> back */
+                int s8 = f0_8 + (((f2_8 - f0_8) * k) >> 8)
+                       + (2 << 8) + 3 * (256 - k) + enc8;
+                if (s8 > cap8) s8 = cap8;
+                base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
             }
         }
         y0 = head_hi + 1 < 0 ? 0 : head_hi + 1;    /* the core */
         y1 = sill_lo - 1 > SCREEN_H - 1 ? SCREEN_H - 1 : sill_lo - 1;
-        if (jambs && side_hit && depth_in < HOLE_REVEAL_D) {
-            /* VERTICAL JAMB — the wall's cut thickness, the door recess's
-             * DOOR_REVEAL_D band done for a hole. Starts one step off the face
-             * shade so the rim reads CONTINUOUS with the wallpaper it was cut
-             * out of (that continuity is the whole illusion), then darkens
-             * inward across the thickness — depth AO — with a contact step
-             * where it meets the head above and the sill below. */
-            int q = (int)(((int64_t)depth_in * (4 * FX_ONE / HOLE_REVEAL_D))
-                          >> FX_SHIFT);
-            if (q < 0) q = 0; else if (q > 3) q = 3;
-            int ja = bsh + 1 + (q >> 1);
-            int jb = ja + (q & 1);                 /* dither partner */
-            int span = sill_lo - head_hi; if (span < 1) span = 1;
-            int edge = span >> 3; if (edge < 1) edge = 1;
-            uint8_t ca = hole_ramp[ja > HOLE_DARKEST ? HOLE_DARKEST : ja];
-            uint8_t cb = hole_ramp[jb > HOLE_DARKEST ? HOLE_DARKEST : jb];
-            uint8_t cc = hole_ramp[ja + 1 > HOLE_DARKEST ? HOLE_DARKEST : ja + 1];
-            for (int y = y0; y <= y1; y++)
-                base[y * SCREEN_W] =
-                    (y - head_hi < edge || sill_lo - y < edge) ? cc
-                    : (((y ^ col) & 1) ? cb : ca);
-        } else if (!side_hit && y0 <= y1) {
+        /* (The old VERTICAL JAMB branch is gone: its flat stepped strip ran a
+         * visible vertical seam against the fog-continuum side panels (Mike's
+         * blue lines). The side-panel formula already evaluates correctly at
+         * jamb depths -- fog8 of a shallow ts is nearly the face shade -- so
+         * one formula now covers the panel from the cut edge inward.) */
+        if (!side_hit && y0 <= y1) {
             /* BACK WALL: no wallpaper — MYSTERY. Textureless gloom at the tail
              * of hole_ramp, checker-dithered against the step above it. The
              * only surface allowed this deep, which is what makes the corners
              * around it read as corners. */
-            uint8_t ca = hole_ramp[murk];
-            uint8_t cb = hole_ramp[murk > 0 ? murk - 1 : 0];
-            for (int y = y0; y <= y1; y++)
-                base[y * SCREEN_W] = ((y ^ col) & 1) ? cb : ca;
+            /* Not a flat oblong. Deepest in shadow at the top, lifted where
+             * the sill bounces into its foot, and darker toward the side the
+             * room's light does NOT come from — signed by the ray's own offset
+             * across the aperture, the same quantity the side panels take
+             * their lit/shadow sense from. Two steps of range in total, but
+             * they are the steps that make it a SURFACE instead of a sticker. */
+            int span = sill_lo - head_hi; if (span < 1) span = 1;
+            int hx = (int)((off << 8) / HOLE_HW);       /* -256..+256 */
+            /* DESTINATION PEEK: once the climb is committed the next map is
+             * real and rendered, and the back panel becomes a window onto its
+             * spawn POV -- the faint light below resolving into the place it
+             * was hinting at. Scaled straight onto the far plane's projected
+             * rect (hf..sf), so it swells as the crawl closes the distance. */
+            /* GLOW accumulators run regardless: the glow is both the normal
+             * look and the DISSOLVE floor the peek fades up from. The back
+             * panel draws ONLY the hole's own cool run (140..143) -- never
+             * the wall ramp. Deepest at the top, a FAINT interior light at
+             * the foot biased to one side: light from something you cannot
+             * see, the hint that the hole goes somewhere. */
+            /* LIGHTER than it was: the panel's darkest is now deep-mid (142),
+             * not the near-black 143 -- a shadowed room, not a void. The
+             * deepest entry stays the ramp tail's business. */
+            int lift = (1 << 8) + (((hx + 256) * 160) >> 9);   /* 256..416 */
+            int kstep = (int)divu_u32((uint32_t)(256 << 8), (uint32_t)span);
+            int kacc = kstep * (y0 - head_hi);
+            /* DESTINATION PEEK: once the climb commits the next map is real
+             * and rendered, and the back panel becomes a window onto its
+             * spawn POV -- the glow resolving into the place it hinted at.
+             * Scaled onto the far plane's rect (hf..sf) so it swells as the
+             * crawl closes. It DISSOLVES in over the glow across its first
+             * 4 frames (the flag carries its birth frame) -- the cut from
+             * dark to image was too stark as a single-frame pop. */
+            int plvl = 0;
+            if (g_hole_peek_on) {
+                plvl = (int)SHARED_UC->frame_count - (g_hole_peek_on - 1);
+                if (plvl > 4) plvl = 4; else if (plvl < 0) plvl = 0;
+            }
+            if (plvl > 0) {
+                /* Sample u by the ray's position on the BACK plane, not the
+                 * face: from the room, only the centre of the aperture's
+                 * rays reach the panel (the rest go side-wall), so a
+                 * face-plane mapping only ever showed the bitmap's middle
+                 * strip -- the centre column stretched wide, which is why
+                 * every preview collapsed into horizontal bands. */
+                fx_t offb = off + FX_MUL(t2_back - t, rda);
+                int u = (int)(((offb + HOLE_HW) * PEEK_W) / (2 * HOLE_HW));
+                /* off is WORLD lateral; for half the hole orientations
+                 * world-left lands on screen-right, mirroring the bitmap
+                 * against the (screen-space) corridor -- the lit wall
+                 * flipped sides at the swap. The mirror condition is the
+                 * complement of the captured lit-left flag. */
+                if (!g_corr_lit_left) u = PEEK_W - 1 - u;
+                /* Camera-push: zoom the sample toward the image's center --
+                 * the destination view's own axis -- as the crawl closes. */
+                u = (PEEK_W >> 1) + (((u - (PEEK_W >> 1)) * iz256) >> 8);
+                if (u < 0) u = 0; else if (u > PEEK_W - 1) u = PEEK_W - 1;
+                int denom = sf - hf; if (denom < 1) denom = 1;
+                int vstep = (int)divu_u32((uint32_t)(PEEK_H << 8),
+                                          (uint32_t)denom);
+                int vacc = vstep * (y0 - hf);
+                const uint8_t *pcol = peek_buf + u;
+                for (int y = y0; y <= y1; y++, vacc += vstep, kacc += kstep) {
+                    if (plvl >= 4 || ((y + (col << 1)) & 3) < plvl) {
+                        int v = vacc >> 8;
+                        v = (PEEK_H >> 1) + (((v - (PEEK_H >> 1)) * iz256) >> 8);
+                        if (v < 0) v = 0; else if (v > PEEK_H - 1) v = PEEK_H - 1;
+                        base[y * SCREEN_W] = pcol[v * PEEK_W];
+                    } else {
+                        int kk = (kacc >> 8) * (kacc >> 8) >> 8;
+                        int v = ((2 << 8) - ((kk * lift) >> 8) + 128) >> 8;
+                        if (v < 0) v = 0; else if (v > 3) v = 3;
+                        base[y * SCREEN_W] = (uint8_t)(HOLE_DEEP_BASE + v);
+                    }
+                }
+                goto back_done;
+            }
+            /* FOG HONOR. The panel's cool run is fixed CRAM, so distance fog
+             * never touched it -- at range the hole glowed through the murk
+             * as a blue patch. Crossfade (dithered, graded) into the plain
+             * fogged tunnel tone starting around 3 cells; by ~3.6 the panel
+             * IS fog. The cool-room look stays pure in the near zone. */
+            int fogmix = f0_8 - (4 << 8);
+            fogmix = fogmix <= 0 ? 0 : (fogmix >> 7);
+            if (fogmix > 4) fogmix = 4;
+            for (int y = y0; y <= y1; y++, kacc += kstep) {
+                if (fogmix && ((y + (col << 1)) & 3) < fogmix) {
+                    int s8 = f2_8 + (2 << 8); if (s8 > cap8) s8 = cap8;
+                    base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
+                    continue;
+                }
+                int kk = (kacc >> 8) * (kacc >> 8) >> 8;   /* 0..256, eased */
+                int v = ((2 << 8) - ((kk * lift) >> 8) + 128) >> 8;
+                if (v < 0) v = 0; else if (v > 3) v = 3;
+                base[y * SCREEN_W] = (uint8_t)(HOLE_DEEP_BASE + v);
+            }
+            back_done:;
         } else {
             /* CAVITY SIDE WALL: the same fade, one step darker so the
              * side/back junction reads as a corner. No wallpaper — the chevron
              * belongs to the room's skin, and inside the cut it read as a
-             * pattern that had no business being there. */
+             * pattern that had no business being there. Plus the vertical AO,
+             * without which this panel is one flat value top to bottom. */
             int acc = sv8 + (jambs ? (1 << 8) : 0);
-            for (int y = y0; y <= y1; y++)
-                base[y * SCREEN_W] = HOLE_DITH(acc, y);
-        }
-        /* Sill: lit at the near lip (sill_hi), core-dark by sill_lo. */
-        {
-            int s0 = bsh + 1; if (s0 > sv) s0 = sv;
-            int h = sill_hi - sill_lo;
-            int hold = h >> 1, run = h - hold;     /* near half stays lit */
-            int step = (run > 0)
-                ? (int)divu_u32((uint32_t)(sv8 - (s0 << 8)), (uint32_t)run) : 0;
-            y0 = sill_lo < 0 ? 0 : sill_lo;
-            y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
-            int k = sill_hi - y0 - hold;           /* rows left before the hold */
-            int acc = (s0 << 8) + (k > 0 ? step * k : 0);
-            for (int y = y0; y <= y1; y++, k--) {  /* far (top) -> near (bottom) */
-                base[y * SCREEN_W] = HOLE_DITH(acc, y);
-                if (k > 0) acc -= step;
+            if (jambs) {
+                int span = sill_lo - head_hi; if (span < 1) span = 1;
+                int astep = -(int)divu_u32((uint32_t)((AO_TOP - AO_BOT) << 8),
+                                           (uint32_t)span);
+                acc += (AO_TOP << 8) + astep * (y0 - head_hi);
+                for (int y = y0; y <= y1; y++, acc += astep)
+                    base[y * SCREEN_W] = hole_shade(acc, HOLE_BAY(y));
+            } else {
+                for (int y = y0; y <= y1; y++)
+                    base[y * SCREEN_W] = hole_shade(acc, HOLE_BAY(y));
             }
         }
-        #undef HOLE_DITH
+        /* Sill: lit at the near lip (sill_hi), fog-dark by sill_lo — the
+         * same fog lerp as the head, minus the reveal shadow (the ledge
+         * catches the room's light). */
+        {
+            int h = sill_hi - sill_lo; if (h < 1) h = 1;
+            int kstep = (int)divu_u32((uint32_t)(256 << 8), (uint32_t)h);
+            y0 = sill_lo < 0 ? 0 : sill_lo;
+            y1 = sill_hi > SCREEN_H - 1 ? SCREEN_H - 1 : sill_hi;
+            int kacc = kstep * (sill_hi - y0);     /* 0 at the near lip */
+            for (int y = y0; y <= y1; y++, kacc -= kstep) {
+                int k = kacc >> 8;                 /* 0..256 lip -> back */
+                int s8 = f0_8 + (((f2_8 - f0_8) * k) >> 8) + (2 << 8) + enc8;
+                if (s8 > cap8) s8 = cap8;
+                base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
+            }
+        }
+        #undef HOLE_BAY
     }
 }
 
@@ -5856,6 +6442,14 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
         if (sy < 0)         sy = 0;
         if (sy >= SCREEN_H) sy = SCREEN_H - 1;
         int base_shade = row_color[sy] - FLOOR_BASE;   /* shifted: stain brightness */
+        /* The row the vertical LOD is about to skip, or 0 when it isn't
+         * skipping. The STAIN pass below is happy to be thinned — sparser dots
+         * just read as lighter wear. A SOLID zone fill is not: the skipped row
+         * keeps the lit gradient underneath and the whole zone stripes from the
+         * LOD band outward. So the two zone fills paint the pair. Only the
+         * stores double; the per-row DIVU and setup the LOD exists to skip are
+         * still skipped. */
+        int lod_pair = (cystep > vstep && y + vstep < SCREEN_H) ? vstep : 0;
 
         int p = y - horizon_y;
         /* rowDist always positive (y > horizon_y); DIVU. */
@@ -5944,6 +6538,8 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                 for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
                     if (test_dark && !cell_is_dark(dwx, dwy)) continue;
                     *(uint16_t *)(drow + col) = WDUP(ddk);
+                    if (lod_pair)
+                        *(uint16_t *)(drow + lod_pair * SCREEN_W + col) = WDUP(ddk);
                 }
             }
         }
@@ -5999,7 +6595,10 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                         int hwy = (int)(fwy >> 13) & 0xFF;
                         if (((hwx * 73 + hwy * 31) & 0xF) < 6) cv = fst;   /* same hash as the carpet */
                     }
-                    *(uint16_t *)(frow + col) = ((uint16_t)cv << 8) | cv;  /* col & col+1 */
+                    uint16_t fv = ((uint16_t)cv << 8) | cv;   /* col & col+1 */
+                    *(uint16_t *)(frow + col) = fv;
+                    if (lod_pair)                             /* see lod_pair above */
+                        *(uint16_t *)(frow + lod_pair * SCREEN_W + col) = fv;
                 }
             }
         }
@@ -8265,18 +8864,26 @@ void raycast_render(void) {
              * frame_ema>16000 (~F:11 or worse), disarm once it eases below 13000.
              * Requires we're already at half (auto_hr==1); the overlay's 70KB of
              * stack headroom makes quarter safe everywhere now. */
-            /* QUARTER NERFED OUT OF AUTO (measured 2026-08-06). AUTO now floors
-             * at half. Same-ROM A/B in the test corridor: quarter+dither tied
-             * half at F:10 while looking worse, and quarter-no-dither bought one
-             * fps for the chunkiest image on the board. The premise above --
-             * "the 4px chunk is masked by motion" -- held up visually, but the
-             * frames it was buying were not there. The deadband and its
-             * thresholds stay so this is a one-line revert if carpet LOD or
-             * another win later moves the frame into a band where quarter pays. */
+            /* QUARTER was nerfed out of AUTO on 2026-08-06 and is back as a
+             * RUNTIME toggle (TESTING>AUTOQTR, default off = the shipped
+             * behaviour), because the measurement that removed it did not
+             * cover the case it existed for.
+             *
+             * That A/B was the test corridor, standing, WALLS pinned, F:07-11:
+             * quarter+dither tied half at F:10, so it looked worse for nothing.
+             * But the rung only ever arms at frame_ema > AUTO_QTR_ON (~F:09 or
+             * worse) AND while moving, which is a regime the capture never
+             * entered. And "tied" is what 1,467 saved ticks looks like when the
+             * frame is vblank-locked at ~2,800 a vblank and is not sitting near
+             * a boundary — the same 1,467 is a whole vblank when it is.
+             *
+             * So: same binary, flip it mid-scene, and trust the feel of a heavy
+             * moving frame over a standing corridor number. */
             static int auto_q = 0;
             if      (frame_ema > AUTO_QTR_ON)  auto_q = 1;
             else if (frame_ema < AUTO_QTR_OFF) auto_q = 0;
-            (void)auto_q;   /* was: if (auto_q && auto_hr == 1 && is_walking) eff_hr = 2; */
+            if (SHARED_UC->auto_qtr && auto_q && auto_hr == 1 && is_walking)
+                eff_hr = 2;
             /* STILLNESS RATCHET (Mike): motion masks the chunk, so AUTO happily
              * sits at half/quarter while you move through a busy room. But the
              * instant you STOP to take stock, judder can't hide anything and fps

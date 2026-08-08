@@ -1070,31 +1070,98 @@ static void asset_viewer_screen(void) {
 /* Set by the exit-hole climb only: the arrival on the far side is a FALL, not
  * a cut. Doors and menu warps leave it clear and get the plain fade. */
 static int g_arrive_drop = 0;
+/* Seed decided at climb COMMIT, not at the fade: the destination peek rendered
+ * the next map through the hole during the crawl, so the map generated at the
+ * blackout must be THE SAME map. climb_commit captures it; the portal spends
+ * it. Door portals never set it and keep the at-fade formula. */
+static uint32_t g_next_seed = 0;
+static int g_next_seed_set = 0;
+/* Set when corridor_enter already generated the destination: the portal
+ * must not generate it a second time. */
+static int g_map_pregen = 0;
+/* Climb phases, file-scope so the commit helper and the post-render shadow
+ * pass can both see them: pullup beats, then the crawl across the cavity. */
+#define PULLUP_FRAMES 10   /* was 16: the whole entry still dragged after the
+                            * crawl halved -- ~60% faster passage overall */
+#define CRAWL_FRAMES  16   /* now the CORRIDOR: three rendered cells of duct,
+                            * drawn over the frame (see raycast_crawl_corridor).
+                            * Cheap fills, so these frames run fast. */
+static int g_pullup = 0;
+static int g_crawl = 0;
 
 static void portal_to_procgen(void) {
     g_custom_current = -1;
-    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
-    g_procgen_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
-    procgen_run(g_procgen_seed);
+    /* Hole exit: NO blackout at all. The window has been showing the LIVE
+     * destination the whole crawl; emerging is a straight cut from
+     * tunnel-view to falling in the same scene, full brightness. Door
+     * portals keep the plain dissolve. */
+    if (!g_arrive_drop) {
+        for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+    }
+    if (g_next_seed_set) { g_procgen_seed = g_next_seed; g_next_seed_set = 0; }
+    else g_procgen_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
+    if (!g_map_pregen) procgen_run(g_procgen_seed);   /* corridor pre-generated */
+    g_map_pregen = 0;
     player.x = FX(16.5); player.y = FX(28.5); player.angle = 192;
-    raycast_init();                 /* rebuilds full-bright palette... */
-    raycast_set_brightness(0);      /* ...held black until the fade-in */
+    raycast_init();                 /* rebuilds full-bright palette */
     if (g_arrive_drop) {
-        /* You come out of the black already falling, and the picture is up
-         * before you land — the room arrives around you rather than being
-         * revealed. Nothing is behind you when you turn around. */
-        #define DROP_FRAMES 12
+        /* Already lit, already there: the crawl's window WAS this scene.
+         * The fall plays at full brightness -- no black between the tunnel
+         * and the floor. Nothing is behind you when you turn around. */
+        #define DROP_FRAMES 6   /* was 12: fall at double speed (Mike) */
         g_arrive_drop = 0;
         for (int i = 1; i <= DROP_FRAMES; i++) {
             raycast_arrival_drop(i, DROP_FRAMES);
-            int lvl = (i * FADE_STEPS * 3) / (DROP_FRAMES * 2);  /* lit by the landing */
-            fade_step(lvl > FADE_STEPS ? FADE_STEPS : lvl);
+            fade_step(FADE_STEPS);
         }
         /* Left compressed on purpose: player_update's crouch-release stands
          * the player up from here, floor-glance and all. */
     } else {
+        raycast_set_brightness(0);      /* held black until the fade-in */
         for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
     }
+}
+
+/* Climb COMMIT: the seed is decided the moment the player commits -- that
+ * is ALL that happens here. The old world stays whole through the pullup
+ * (the back panel shows the glow: the mystery holds until you're inside). */
+static void climb_commit(void) {
+    g_next_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
+    g_next_seed_set = 1;
+    /* The dithered EXTENSION, from the moment of commitment: the corridor's
+     * facets appear through the back panel via the peek dissolve, while the
+     * raycaster still owns the frame. The swap later lands on a duct the
+     * player has already been looking down. */
+    raycast_corridor_orient();
+    raycast_duct_preview();
+    g_pullup = PULLUP_FRAMES;
+}
+
+/* CORRIDOR ENTER -- Mike's trigger: crossing into the wall IS the flush.
+ * The corridor owns every pixel from here to the fade, so the old map's
+ * last frame has already been seen; generate the destination NOW (once --
+ * no restore, no byte-identical dance, no double procgen), render its
+ * spawn peek for the corridor's end plane, and let the frames underneath
+ * render garbage that is never visible. The corridor is not a cutscene
+ * between maps; it is the ENTRANCE HALLWAY of the next one. The secondary
+ * keeps its stale map cache through the corridor (its half is overdrawn
+ * too); the portal's normal init path makes it coherent at arrival. */
+static void corridor_enter(void) {
+    if (!g_next_seed_set) {            /* belt: gate always sets it */
+        g_next_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
+        g_next_seed_set = 1;
+    }
+    raycast_corridor_orient();         /* lit-side capture, pre-flush */
+    procgen_run(g_next_seed);
+    /* Full load sequence: init_lights bumps the map generation, which is
+     * what makes the SECONDARY purge its cached grid -- its half of the
+     * live window must render the NEW map, not ghost the old one. */
+    raycast_init();
+    /* Spawn literals: keep in sync with portal_to_procgen above. The live
+     * camera starts up to three open cells behind the spawn and rides the
+     * crawl in -- the end window shows the real place approaching. */
+    raycast_corridor_travel_init(FX(16.5), FX(28.5), 192);
+    g_map_pregen = 1;
 }
 
 /* Pause-menu MAPS-tab warp: the same fade/load/fade as the procgen portal, but
@@ -1153,34 +1220,33 @@ int m_main(void) {
      * starts pumping from the top of the loop now). */
     amb_set_active(1);
 
-    /* ---- Landing reveal --------------------------------------------- *
-     * You fell through the box into darkness; now you come to from the
-     * floor. Fade up looking straight DOWN at the carpet, hold a beat so
-     * the floor perspective reads, then STAND UP — ease the camera from
-     * face-down to the level photo view, decelerating into standing. */
-    SHARED_UC->pitch_y = 80;                 /* face-down at the carpet */
-    for (int lvl = 0; lvl <= FADE_STEPS; lvl++) {     /* fade up from black */
-        SHARED_UC->frame_count++;
-        raycast_render();
-        while (lastTick == MARS_SYS_COMM12);
-        raycast_set_brightness(lvl);
-        MARS_VDP_FBCTL = currentFB ^ 1;
-        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
-        currentFB ^= 1;
-        lastTick = MARS_SYS_COMM12;
+    /* ---- Landing: the SAME fall the exit hole delivers ---------------- *
+     * You fell through the box's trap door; now the lobby arrives around
+     * you MID-FALL -- identical choreography to the hole's far side, so
+     * the game opens with the transition it teaches you later. The fade
+     * rides the fall (picture up before you land); the landing leaves you
+     * compressed, and the stand-up ease below is the same crouch-release
+     * beat the game loop plays after any arrival. */
+    raycast_set_brightness(0);               /* held black until the fall */
+    #define INTRO_DROP 6
+    for (int i = 1; i <= INTRO_DROP; i++) {
+        raycast_arrival_drop(i, INTRO_DROP);
+        int lvl = (i * FADE_STEPS * 3) / (INTRO_DROP * 2);  /* lit by landing */
+        fade_step(lvl > FADE_STEPS ? FADE_STEPS : lvl);
     }
-    for (int i = 0; i < 14; i++) {                    /* hold on the carpet */
-        SHARED_UC->frame_count++;
-        raycast_render();
-        swapBuffers();
-    }
-    while (SHARED_UC->pitch_y > 0) {                  /* stand up */
-        int p = SHARED_UC->pitch_y; p -= (p >> 3) + 1; if (p < 0) p = 0;
-        SHARED_UC->pitch_y = (int8_t)p;
+    raycast_exit_pullup(0, 1);               /* zero the fall-pitch channel */
+    for (int e = AD_IMPACT_EYE; e < 128; ) {              /* stand up */
+        /* ~60% FASTER than the first cut (>>3): up and moving, about
+         * seven frames sill to standing. */
+        e += ((128 - e) >> 2) + 2; if (e > 128) e = 128;
+        SHARED_UC->eye_h = (uint8_t)e;
         SHARED_UC->frame_count++;
         raycast_render();
         swapBuffers();
     }
+    raycast_eye_settle();   /* the stand played HERE; without this the drop's
+                             * compression replayed as a second bounce on the
+                             * first frame of the level the start list picks */
 
     /* ---- SESSION loop: lobby start list -> level -> game; the GAME tab's
      * EXIT TO LOBBY breaks the game loop and lands back here. The landing
@@ -1699,16 +1765,26 @@ int m_main(void) {
             /* EXIT-HOLE climb: input frozen while raycast_exit_pullup drives
              * the four POV beats (plant, haul, hang, shimmy) over
              * PULLUP_FRAMES rendered frames — it owns pitch, eye height AND
-             * position. Then the portal fade fires with the hole's walls
-             * surrounding the view. These are RENDERED frames, not vblanks, so
-             * at ~11fps 21 of them ran close to two seconds and the climb
-             * dragged; 16 lands nearer a second and a half. */
-            #define PULLUP_FRAMES 16
-            static int g_pullup = 0;
+             * position. Then the CRAWL beat crosses the cavity toward the
+             * back panel (and the destination peek on it), and only then the
+             * portal fires — with the hole's walls past the frame edges.
+             * These are RENDERED frames, not vblanks, so at ~11fps 21 of
+             * them ran close to two seconds and the climb dragged; 16 + 10
+             * lands the whole passage around two and a half. */
             if (g_pullup > 0) {
                 g_pullup--;
                 raycast_exit_pullup(PULLUP_FRAMES - g_pullup, PULLUP_FRAMES);
                 if (g_pullup == 0) {
+                    corridor_enter();      /* the FLUSH: old world ends here */
+                    g_crawl = CRAWL_FRAMES;
+                }
+            } else if (g_crawl > 0) {
+                /* CORRIDOR beat: the overlay draws the duct after the
+                 * render; HERE the live camera underneath advances toward
+                 * the spawn, so the end window approaches the real place. */
+                g_crawl--;
+                raycast_corridor_travel(CRAWL_FRAMES - g_crawl, CRAWL_FRAMES);
+                if (g_crawl == 0) {
                     SHARED_UC->eye_h = 128;
                     g_arrive_drop = 1;     /* far side is a fall, not a cut */
                     portal_to_procgen();                   /* holes are procgen-only */
@@ -1730,14 +1806,30 @@ int m_main(void) {
                 else                                  portal_to_procgen();
                 continue;
             }
-            /* Standing centered under the EXIT HOLE: start the climb-out. */
-            if (raycast_exit_hole_check()) g_pullup = PULLUP_FRAMES;
+            /* At the EXIT HOLE, facing it: the climb is COMMITTED, never
+             * stumbled into. From a stop, a fresh forward tap or a fresh A
+             * (the interaction button) starts it. Held UP walking in gives
+             * no edge, so you bump the sill and stand there; MODE and B are
+             * combo modifiers (automap zoom, A+B crouch) and never commit. */
+            {
+                static uint16_t hole_prev = 0;
+                uint16_t fresh = (uint16_t)(pad & ~hole_prev);
+                hole_prev = pad;
+                if (raycast_exit_hole_check()
+                    && !(pad & (SEGA_CTRL_MODE | SEGA_CTRL_B))
+                    && (fresh & (SEGA_CTRL_A | SEGA_CTRL_UP)))
+                    climb_commit();
+            }
             }
         }
         /* Tick the shared frame counter before render so both CPUs
          * read the same value when computing the distant-wall strobe. */
         SHARED_UC->frame_count++;
         raycast_render();
+        /* Corridor set piece paints over the whole frame (the render above
+         * still ran: it keeps both CPUs' pipeline and the audio pump fed). */
+        if (g_crawl > 0)
+            raycast_crawl_corridor(CRAWL_FRAMES - g_crawl, CRAWL_FRAMES);
         uint16_t t_post = prof_read_frt();          /* render done; HU starts */
         uint8_t *fb_text = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
         if (g_automap_on) automap_draw(fb_text);   /* red vectors under the text */

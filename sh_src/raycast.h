@@ -161,7 +161,24 @@ void raycast_place_exit_door(void);
 void raycast_place_exit_hole(void);   /* alternate exit: dark 1-cell ceiling hole */
 int  raycast_exit_hole_check(void);   /* 1 = standing centered under the hole */
 void raycast_exit_pullup(int t, int total);  /* climb-out camera, progress t/total */
+void raycast_crawl_corridor(int t, int total); /* interior duct set piece: draws
+                                * OVER the frame, three cells to the peek */
+void raycast_corridor_orient(void); /* capture the hole's lit side for the
+                                * corridor; call BEFORE the map flush */
+void raycast_corridor_travel_init(fx_t sx, fx_t sy, uint8_t ang); /* park the
+                                * live camera behind the spawn (post-flush) */
+void raycast_corridor_travel(int t, int total); /* advance it with the crawl */
+void raycast_duct_preview(void); /* through-panel duct facets into the peek
+                                * bitmap + dissolve; call at climb commit */
 void raycast_arrival_drop(int t, int total); /* fall-in camera on the far side */
+#define AD_IMPACT_EYE 56   /* eye_h the drop lands compressed at (raycast.c) */
+void raycast_eye_settle(void); /* stand NOW: clears the drop's compression
+                                * when a scripted stand-up already played */
+/* Destination peek: one low-res walls-only frame from (px,py,angle) into the
+ * peek bitmap; the exit hole's back panel blits it until the next portal.
+ * Call with the NEXT map live (see climb_commit's generate/peek/restore). */
+void raycast_peek_render(fx_t px, fx_t py, uint8_t angle);
+void raycast_peek_clear(void);
 void raycast_shimmer(void);
 void raycast_draw_ceiling_grid(int col_start, int col_end);
 void raycast_draw_carpet(int col_start, int col_end);

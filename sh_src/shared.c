@@ -25,5 +25,6 @@ shared_t shared = {
     .wall_lod = 0,        /* WALLS=LOD prototype off by default */
     .carpet_vlod = 1,     /* carpet vertical depth LOD on; TESTING>CARPETLOD A/Bs it */
     .hole_jamb = 1,       /* exit-hole jamb + cavity skin on; TESTING>HOLEJAMB A/Bs it */
+    .auto_qtr = 0,        /* AUTO floors at half (shipped); TESTING>AUTOQTR re-arms quarter */
     .hero_dying = 0,      /* caveman alive until knocked down */
 };

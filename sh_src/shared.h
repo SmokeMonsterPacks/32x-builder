@@ -186,6 +186,13 @@ typedef struct {
      * the hole's own width and vanishes past ~2 cells where the jamb goes
      * sub-pixel. Same-binary A/B lives in TESTING>HOLEJAMB. */
     volatile uint8_t hole_jamb;
+    /* AUTO's motion-gated QUARTER rung. Off = the shipped behaviour (AUTO
+     * floors at half). On = drop to quarter while MOVING on a very heavy frame
+     * (frame_ema past AUTO_QTR_ON), snapping back the instant you stand still.
+     * A toggle rather than a decision because the A/B that removed it measured
+     * a standing corridor at F:07-11 and the rung only arms moving at ~F:09 or
+     * worse -- it never entered its own trigger condition. TESTING>AUTOQTR. */
+    volatile uint8_t auto_qtr;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to
