@@ -7020,6 +7020,12 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * so a dense-decal map stops taxing every column for outlets off-screen. */
     int8_t active_decal[16];
     int    n_active = 0;
+    /* Screen span of any visible DOOR decal (union), for the LOD veto below.
+     * The door is the one wall surface dense with 1-2 texel features (sign
+     * glyphs, handle, jamb slivers); at the LOD near-band's half res those
+     * alias and CRAWL as the sampling phase slides with each step — the EXIT
+     * sign garbled into a different word every frame of the approach. */
+    int door_lo = SCREEN_W, door_hi = -1;
     if (num_decals > 0) {
         fx_t det = FX_MUL(planeX, dirY) - FX_MUL(dirX, planeY);
         if (det != 0) {
@@ -7039,6 +7045,10 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                 fx_t dhw = decals[d].kind ? DECAL_DOOR_HW : DECAL_OUTLET_HW;
                 int sHW = (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(dhw, depth)) >> FX_SHIFT);
                 if (sX + sHW < col_start || sX - sHW >= col_end) continue;  /* span off this half */
+                if (decals[d].kind == 1) {
+                    if (sX - sHW - 2 < door_lo) door_lo = sX - sHW - 2;
+                    if (sX + sHW + 2 > door_hi) door_hi = sX + sHW + 2;
+                }
                 active_decal[n_active++] = (int8_t)d;
             }
         }
@@ -7084,11 +7094,23 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
             if (lod_prev_pt < PART_SHARP_D && !SHARED_UC->is_walking
                 && !SHARED_UC->is_turning) cstep_q = 1;
         }
+        /* DOOR veto — BOTH adaptive styles, not just LOD. AUTO=SCALE drops
+         * the whole frame to half/quarter via hr0/cstep0, which the first cut
+         * of this veto (inside the lod branch) never touched — the door kept
+         * garbling and the fix looked like a no-op on the testbed. Quads
+         * across a visible door render full-res at any depth, moving or not:
+         * the span is a handful of quads, the payoff is a sign you can read
+         * and a handle that holds its shape while you walk at it. */
+        if (door_hi >= 0 && qcol <= door_hi && qcol + 3 >= door_lo)
+            cstep_q = 1;
         fx_t quad_depth = 0x7FFFFFFF;
         fx_t quad_pt = 0x7FFFFFFF;   /* nearest see-over slab in THIS quad */
         for (int col = qcol; col < qcol + 4 && col < col_end; col += cstep_q) {
         int cstep = cstep_q;
-        int hr = lod ? ((cstep_q >= 4) ? 2 : (cstep_q >= 2) ? 1 : 0) : hr0;
+        /* hr must track the ACTUAL step (not hr0): a door-vetoed column at
+         * cstep 1 inside a global-half frame must byte-write — word-writing
+         * from every column would land misaligned stores on the odd ones. */
+        int hr = (cstep_q >= 4) ? 2 : (cstep_q >= 2) ? 1 : 0;
         WALL_DIST(col) = 0x7FFFFFFF;
         for (int j = 1; j < cstep; j++) WALL_DIST(col + j) = 0x7FFFFFFF;
         PART_TOP(col) = 0;
@@ -8673,6 +8695,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         static const uint8_t dith4[4] = { 0, 2, 1, 3 };
         for (int x = col_start; x + 1 < col_end; x += 2) {
             if (!SEAM_VALID(x)) continue;
+            if (door_hi >= 0 && x <= door_hi && x + 1 >= door_lo)
+                continue;                        /* door stays sharp through the pull */
             if (dith4[(x >> 1) & 3] >= dissolve) continue;   /* this pair stays full */
             int y0 = seam_top[x], y1 = seam_bot[x];
             uint8_t *sx = fb + x;
@@ -8707,6 +8731,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
     if (qdither) {
         for (int ac = col_start; ac + 4 < col_end; ac += 4) {
             if (!SEAM_VALID(ac)) continue;
+            if (door_hi >= 0 && ac <= door_hi && ac + 4 >= door_lo)
+                continue;                        /* door columns are real — don't smear */
             int y0 = seam_top[ac], y1 = seam_bot[ac];
             uint8_t *row = fb + ac + y0 * SCREEN_W;
             for (int y = y0; y <= y1; y++, row += SCREEN_W)
