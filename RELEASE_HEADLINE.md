@@ -1,11 +1,22 @@
-## The Passage
+## The Monitor
 
-Leaving a level is no longer a cut. Commit to the exit hole and the wall opens onto a duct; you crawl through the inside of the wall while the next level renders live in the opening ahead. Then the floor gives out and you drop into it, standing up where you landed. One continuous camera, no fades, no loading screen. The game now opens the same way: falling out of the title into the first level.
+Every level now has a PVM monitor standing somewhere in the yellow. You find it dead. Press A and it wakes to static. Cycle the power again and the static gives way to something else: a low, smeared picture of somewhere. Somewhere in this level? What is it showing you, and why? That part is yours.
+
+Monitors are deliberately scarce: procedural levels place exactly one, authored maps are capped at two. The power switch is audible now too, a degauss thunk on the way on, and the same recording played backwards on the way off.
+
+## The Broadcast
+
+The tape-death hello grew into the real thing: the full 4 minute 25 second Voyager Golden Record greeting, all 55 languages, decoding live on the cartridge while you play. There is a HELLO toggle in the menu if you would rather the backrooms stay quiet.
 
 ## Quality of life
 
-This build is a sweep of the details you stare at most.
+- **The asset viewer is a lit room now.** Wallpaper-yellow backdrop, brown ink, and every control reachable on a 3-button pad: B holds for zoom and model type, C holds for wireframe, C taps to reset, START leaves. The old high-poly viewer chair retired from the ROM.
+- **Fades are fast and complete.** Map picks and door transitions dissolve in a third of the time, and the fade finally takes everything with it: the HUD text, the community sprites, the monitor, and on real hardware, the border that used to pulse grey forever.
+- **Doors stay sharp, for real this time.** The last build's door fix aimed 34% narrow; the frame and jamb kept shimmering while the sign held still. The veto now covers the whole door at every distance.
+- **The exit passage sits in shade.** Overhead light falls past the hole, not into it: the aperture reads shadowed against the lit wallpaper and the crawl is one continuous dark material instead of a bright entrance with a black band in the middle.
+- **Crouching at the exit hole** no longer hallucinates the ledge through the wall below it.
+- **The map editor** now shows live budget counts for desks and PVMs alongside chairs.
 
-- **Doors stay sharp.** The adaptive renderer now carves doors out of every resolution drop, so the EXIT sign reads as a word while you walk at it instead of shimmering into noise, and the handle holds its shape mid-stride.
-- **The desk seam is gone.** The far desk sprite now matches its 3D pop-in in orientation, fog, size, and camera angle. Walking up to a desk no longer flips it, brightens it, or grows it at the swap line.
-- **Imports are repeatable.** Billboard bakes derive their camera from the model itself, so the next imported object lands correct on the first bake.
+## Known
+
+Mid-crawl, the opening at the end of the duct can show a band of garbage pixels. We know, we are on it, and we would love to hear exactly when it happens for you.
