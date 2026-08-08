@@ -3609,13 +3609,23 @@ typedef struct {
     const dirview_t *views;
     const uint8_t   *sect_v, *sect_view, *sect_mirror;
     uint16_t         nsect, h, wmax;
+    uint16_t         vspan;   /* 8.8: image band height / model front height */
 } dirset_t;
+
+/* Sets baked before the shared-band bake crop each view to its own content,
+ * which already includes the pitched camera's top-face rows — 1.0 keeps them
+ * drawing exactly as shipped. A re-bake emits the real constant. */
+#ifndef CHAIR_DIR_VSPAN
+#define CHAIR_DIR_VSPAN 256
+#endif
 
 static const dirset_t dirsets[] = {
     { (const dirview_t *)chair_dir_views, chair_dir_sect_v, chair_dir_sect_view,
-      chair_dir_sect_mirror, CHAIR_DIR_SECTORS, CHAIR_DIR_H, CHAIR_DIR_WMAX },
+      chair_dir_sect_mirror, CHAIR_DIR_SECTORS, CHAIR_DIR_H, CHAIR_DIR_WMAX,
+      CHAIR_DIR_VSPAN },
     { (const dirview_t *)desk_dir_views,  desk_dir_sect_v,  desk_dir_sect_view,
-      desk_dir_sect_mirror,  DESK_DIR_SECTORS,  DESK_DIR_H,  DESK_DIR_WMAX  },
+      desk_dir_sect_mirror,  DESK_DIR_SECTORS,  DESK_DIR_H,  DESK_DIR_WMAX,
+      DESK_DIR_VSPAN },
 };
 static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND };
 #define DIRSET_COUNT (int)(sizeof dirsets / sizeof dirsets[0])
@@ -4603,10 +4613,25 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
             chair_view = fds->sect_view[best]; mirror = fds->sect_mirror[best];
             /* Height from sprite_defs so the far billboard matches the near 3D
              * model exactly (the LOD swap must not change size); width from the
-             * chosen view's own aspect. */
+             * chosen view's own aspect.
+             *
+             * vspan: the bake's image band is taller than the model's front
+             * elevation (the pitched camera sees the top face), so H rows
+             * cover MORE world height than world_h. Inflate the blit by the
+             * bake-emitted ratio and the body lands at exactly world_h; the
+             * extra top-face rows draw above it, like the 3D model's top.
+             *
+             * Width gets the engine's own lateral scale on top of the view
+             * aspect: the projection maps one world unit to (SCREEN_W/2)/0.66
+             * px across vs SCREEN_H px down (the 0.66 camera plane), so a
+             * width derived purely from the height scale drew every
+             * directional billboard 8% narrower than its 3D model. 277 =
+             * round(256 * (SCREEN_W/2) / (0.66 * SCREEN_H)). */
             spriteHeight = (int)(((int64_t)SCREEN_H * sprite_defs[standups[i].kind].world_h)
                                  / transformY);
-            spriteWidth  = spriteHeight * fds->views[chair_view].w / fds->h;
+            spriteHeight = (spriteHeight * fds->vspan) >> 8;
+            spriteWidth  = (int)(((int32_t)spriteHeight * fds->views[chair_view].w * 277)
+                                 / ((int32_t)fds->h << 8));
         } else {
             spriteHeight = (int)((((int32_t)SCREEN_H * 2) << FX_SHIFT) / (transformY * 3));
             spriteWidth  = spriteHeight >> 1;
@@ -4717,15 +4742,19 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
         fx_t texY_step    = ((fx_t)tex_h << FX_SHIFT) / spriteHeight;
         fx_t texY_start_v = (fx_t)(drawStartY - drawStartY_u) * texY_step;
 
-        /* Per-sprite value map: fold front/back/silhouette AND (for the chair)
-         * distance fog into a tiny LUT so the inner loop is one table lookup.
-         * Chair: v>0 -> DOOR_BASE + (v-1) - fog, so the far billboard sits in
-         * the SAME dark 0..2 band as the near 3D chair and fades with distance
-         * like the walls (the generic base+v path left it a shade too light AND
-         * un-fogged — a bright tan floating in the fog). Fog matches draw_chair_3d. */
+        /* Per-sprite value map: fold front/back/silhouette AND (for box-model
+         * billboards) distance fog into a tiny LUT so the inner loop is one
+         * table lookup. Directional set: v>0 -> CHAIR_BASE + (v-1) - fog, so
+         * the far billboard sits in the SAME dark wood band as the near 3D
+         * model and fades with distance like the walls (the generic base+v
+         * path left it a shade too light AND un-fogged — a bright tan floating
+         * in the fog). Fog matches draw_chair_3d. Keyed off the dirset, not
+         * CHAIR_SPRITE_KIND: the desk's bake encodes the same face-shade
+         * values, and routing it through the standee path drew it bright tan
+         * while its 3D pop-in wore fogged wood. */
         uint8_t vmap[8];
         {
-            int is_chair = (standups[i].kind == CHAIR_SPRITE_KIND);
+            int is_chair = (fds != 0);
             /* Distance + dark-room fog, shared by the chair AND the neanderthal
              * (front figure). Baked into the value-LUT so the inner loop stays a
              * single table read -- fog is effectively free per pixel. */

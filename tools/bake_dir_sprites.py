@@ -7,8 +7,14 @@ transform math, quantizes to the door-brown ramp, and emits
 sh_src/chair_dir_tex.h plus a validation strip PNG to eyeball BEFORE any
 ROM build.
 
-The workflow: pick a pose in the in-ROM asset viewer (GAME variant), read
-the Y/X coordinates off the screen, and run:
+The workflow for an import (repeatable, nothing eyeballed):
+
+    tools/bake_dir_sprites.py --sprite <registry-id> \
+        --header sh_src/<model>3d.h --symbol <model>_boxes --prefix <MODEL>
+
+Pitch derives from the sprite's registry world_h (the player's look-down
+angle at the 4-cell LOD swap); pass --pitch <n> only to reproduce a
+legacy eyeballed bake (the chair's 246). Example legacy form:
 
     tools/bake_dir_sprites.py --pitch 246 --yaws 0,238,218,194,180,156,128
 
@@ -124,7 +130,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--yaws", default="0,238,218,194,180,156,128",
                     help="comma list of model yaws (engine 0..255), front..back half circle")
-    ap.add_argument("--pitch", type=int, default=246, help="camera pitch (engine 0..255)")
+    ap.add_argument("--pitch", default="auto",
+                    help="camera pitch (engine 0..255), or 'auto' (default): "
+                         "derived from the sprite's world_h so the bake camera "
+                         "matches the player's real look-down angle at the "
+                         "4-cell LOD swap — needs --sprite or --world-h")
+    ap.add_argument("--sprite", default="",
+                    help="registry.json assets.sprites id — source of world_h for auto pitch")
+    ap.add_argument("--world-h", type=float, default=0.0,
+                    help="model world height in cells (overrides --sprite lookup)")
     ap.add_argument("--height", type=int, default=56, help="sprite height in pixels")
     ap.add_argument("--out", default="")
     ap.add_argument("--strip", default="", help="optional validation strip PNG path")
@@ -134,6 +148,28 @@ def main():
     ap.add_argument("--symbol", default="chair_boxes", help="box array symbol in --header")
     ap.add_argument("--prefix", default="CHAIR", help="emitted macro/symbol prefix")
     args = ap.parse_args()
+    # Pose provenance: pitch is DERIVED, not eyeballed, so every import bakes
+    # the same way. The player's eye (STAND_EYE 128 = 0.5 cell) looks down at
+    # the model's top by atan((eye - world_h) / 4) at the 4-cell LOD swap
+    # (CHAIR_CULL_D2) — bake from that angle and the billboard sits on the
+    # walking plane like the 3D pop-in (a taller-than-eye model gets a
+    # slight look-UP, which is equally correct). Desk: world_h 0.31 -> 254.
+    if args.pitch == "auto":
+        wh = args.world_h
+        if not wh and args.sprite:
+            import json
+            reg = json.load(open(os.path.join(REPO, "registry.json")))
+            hits = [s for s in reg["assets"]["sprites"] if s["id"] == args.sprite]
+            if not hits:
+                sys.exit("--sprite %r not in registry.json assets.sprites" % args.sprite)
+            wh = hits[0]["world_h"]
+        if not wh:
+            sys.exit("--pitch auto needs --sprite <id> or --world-h <cells>")
+        EYE, SWAP = 0.5, 4.0
+        pitch = (256 - round(math.atan2(EYE - wh, SWAP) * 256 / (2 * math.pi))) % 256
+        print("auto pitch: world_h %.3f -> pitch %d" % (wh, pitch))
+    else:
+        pitch = int(args.pitch) & 255
     yaws = [int(y) & 255 for y in args.yaws.split(",")]
     H = args.height
     PRE = args.prefix.upper()
@@ -143,21 +179,47 @@ def main():
 
     verts, tris = build_mesh(load_boxes(args.header, args.symbol))
     BIG = 448
-    zoom = fit_zoom(verts, yaws, args.pitch, BIG)
-    views = []
-    for yw in yaws:
-        im = render_idx(verts, tris, yw, args.pitch, BIG, zoom)
+    # RENDER at the NEGATED yaw. draw_chair_3d's facing rotation is the exact
+    # x-mirror of this baker's raw rotation (rx = wx*fc + wz*fs with
+    # fs = -sin), so the in-game 3D model at facing yaw t looks like the raw
+    # bake at -t. Baking each labeled yaw from its negation makes the far
+    # billboard agree with the near 3D render; sector tables are unchanged.
+    # The chair never showed the difference (x-symmetric); the desk's LOD
+    # swap visibly x-flipped.
+    rend = [(256 - yw) & 255 for yw in yaws]
+    zoom = fit_zoom(verts, rend, pitch, BIG)
+    # All views share ONE vertical band (the union of every pose's content
+    # rows). Cropping each view to its own content made H rows mean a
+    # different world height per view — and always MORE than the model's
+    # front elevation, because the pitched camera adds top-face rows. The
+    # engine sizes the blit as world_h == H rows, so every view drew small,
+    # by a view-dependent factor (desk: 9%..21%). With a shared band, H rows
+    # = one world span, emitted below as VSPAN so the engine can inflate the
+    # blit and land the model's BODY at exactly world_h on screen.
+    renders = []
+    y0g, y1g = BIG, 0
+    for yw, rw in zip(yaws, rend):
+        im = render_idx(verts, tris, rw, pitch, BIG, zoom)
         bb = im.getbbox()
         if bb is None:
             sys.exit("pose %d rendered empty" % yw)
-        im = im.crop(bb)
-        w = max(1, round(H*im.width/im.height))
+        renders.append((yw, im, bb))
+        y0g, y1g = min(y0g, bb[1]), max(y1g, bb[3])
+    band_h = y1g - y0g
+    # Projected front-elevation height: model y-span is 1.0 by convention,
+    # foreshortened only by the camera pitch (see project()).
+    front_px = math.cos(pitch * 2 * math.pi / 256) * zoom
+    vspan = max(1, round(band_h / front_px * 256))
+    views = []
+    for yw, im, bb in renders:
+        im = im.crop((bb[0], y0g, bb[2], y1g))
+        w = max(1, round(H * im.width / im.height))
         views.append((yw, w, im.resize((w, H), Image.NEAREST)))
 
     out = os.path.join(REPO, args.out)
     with open(out, "w") as f:
         f.write("/* Auto-generated by tools/bake_dir_sprites.py from the in-game box model\n")
-        f.write(" * (%s). Poses: pitch %d, yaws %s. Do not edit.\n" % (args.header, args.pitch, yaws))
+        f.write(" * (%s). Poses: pitch %d, yaws %s. Do not edit.\n" % (args.header, pitch, yaws))
         f.write(" * Values: 0 transparent, 1..5 -> DOOR_BASE+(v-1) via the sprite vmap\n")
         f.write(" * (distance fog applies). ROW-MAJOR tex[y][x]; X-mirror covers the\n")
         f.write(" * other half circle in the engine's 12-sector picker. */\n")
@@ -166,7 +228,12 @@ def main():
         f.write("#define %s_DIR_VIEWS  %d\n#define %s_DIR_H      %d\n" % (PRE, len(views), PRE, H))
         f.write("/* Widest view — the engine sizes its decode scratch from this so a\n")
         f.write(" * re-bake at any --height stays in bounds (no fixed-40 overflow). */\n")
-        f.write("#define %s_DIR_WMAX   %d\n\n" % (PRE, wmax))
+        f.write("#define %s_DIR_WMAX   %d\n" % (PRE, wmax))
+        f.write("/* 8.8: shared image band height / model front-elevation height. The\n")
+        f.write(" * engine multiplies the blit height by this so the model BODY spans\n")
+        f.write(" * exactly world_h on screen (the band's extra rows are the pitched\n")
+        f.write(" * camera's view of the top face, drawn above). */\n")
+        f.write("#define %s_DIR_VSPAN  %d\n\n" % (PRE, vspan))
         for i, (yw, w, im) in enumerate(views):
             f.write("/* view %d: model yaw %d */\n" % (i, yw))
             f.write("#define %s_DIR_W%d %d\n" % (PRE, i, w))
