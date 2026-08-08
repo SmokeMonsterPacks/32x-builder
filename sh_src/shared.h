@@ -85,6 +85,33 @@ typedef struct {
      * to 1; the secondary's pump latches it at the next buffer fill, plays
      * amb_slide once, and writes 0 back. */
     volatile uint8_t slide_sfx;
+    /* ONE-SHOT CRT power SFX request (the PVM's A toggle). Primary sets
+     * 1 = power-on clip, 2 = power-off clip; the mixer starts the chosen
+     * bake once and writes 0 back. */
+    volatile uint8_t crt_sfx;
+    /* 1 while the primary sits in swapBuffers' vblank-tick wait — the
+     * only window where BOTH CPUs are off the ROM/SDRAM bus. The
+     * secondary gates Speex hello decode on this: decode is bus-heavy
+     * (code fetches thrash the 4 KB cache, every write-through store
+     * hits SDRAM), so running it while the primary still renders slows
+     * the PRIMARY — measured as ~2,800 ticks (one vblank, 9→7 fps)
+     * near the neanderthal even though the secondary itself was idle. */
+    volatile uint8_t primary_vwait;
+    /* 1 = kill the Speex hello decode entirely (AUDIO menu, HELLO row).
+     * The same-binary A/B knob for the decode's true cost: toppling the
+     * neanderthal is NOT a valid A/B — it also removes a screen-filling
+     * sprite worth multiple fps on its own. Toggle this at a fixed
+     * standing spot and read T/F with nothing else changing. */
+    volatile uint8_t voice_off;
+    /* Speex decode profiling (secondary writes, primary HUD reads):
+     * ticks of the LAST frame decode on the secondary's FRT (same
+     * prescaler as secondary_render_ticks) and a cumulative decoded-
+     * frame counter (wraps; the HUD reader shows its climb rate).
+     * Real-time playback needs 50 decodes/s — if DX climbs slower
+     * than ~50/s while the hello is audible, the ring is starving
+     * and you hear snippets. DT x 50 = ticks/second of decode load. */
+    volatile uint16_t spx_dec_ticks;
+    volatile uint16_t spx_dec_count;
     /* Profile counter: secondary's own FRT ticks spent processing CMD_HALF.
      * Secondary initializes its FRT to match primary's prescaler (Φ/32) and
      * writes its render delta here at the end of each command. Primary

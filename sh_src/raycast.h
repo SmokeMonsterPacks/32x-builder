@@ -99,6 +99,7 @@ void raycast_init(void);
  * the lobby->map fade. Call inside vblank. */
 #define FADE_STEPS 16
 void raycast_set_brightness(int lvl);
+void raycast_backdrop_wall(int on);   /* CRAM 0: tuned wall yellow / back to black */
 void raycast_paint_chair_ramp(void);   /* chair CRAM entries, full bright */
 
 /* Live-tunable palette (COLOR menu tab). flush() repaints in vblank when dirty;
@@ -136,6 +137,7 @@ void        raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist);
  * variant and always draw boxes. Caller clears the background. */
 #define MODEL_CHAIR 0
 #define MODEL_DESK  1
+#define MODEL_PVM   2
 /* sprite_defs[] is indexed BY KIND and is sparse — retired kinds leave null
  * padding rows. Must match registry.json assets.sprites[].kind. */
 /* The ONLY topple-able asset. Everything else is furniture or scenery and
@@ -146,6 +148,7 @@ void        raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist);
 #define NEANDER_ASSET_KIND 2
 #define CHAIR_ASSET_KIND 3
 #define DESK_ASSET_KIND  5
+#define PVM_ASSET_KIND   10
 /* 0 for a padding row (no texture): the viewer skips these when cycling. */
 int         raycast_asset_valid(int sel);
 /* Directional billboard set: which baked view `yaw` resolves to, and how many
@@ -160,6 +163,7 @@ int  raycast_door_portal_check(void);
 void raycast_place_exit_door(void);
 void raycast_place_exit_hole(void);   /* alternate exit: dark 1-cell ceiling hole */
 int  raycast_exit_hole_check(void);   /* 1 = standing centered under the hole */
+int  raycast_pvm_use(void);           /* A near a PVM: toggle its power; 1 = toggled */
 void raycast_exit_pullup(int t, int total);  /* climb-out camera, progress t/total */
 void raycast_crawl_corridor(int t, int total); /* interior duct set piece: draws
                                 * OVER the frame, three cells to the peek */

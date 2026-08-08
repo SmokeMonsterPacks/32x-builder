@@ -108,7 +108,55 @@ def fit_zoom(verts, yaws, rotX, big, margin=0.94):
     return min(legacy, (big*margin*0.5)/worst)
 
 
-def render_idx(verts, tris, rotY, rotX, big=448, zoom=None):
+def load_face_tex(header):
+    """Parse a bake_face_tex.py header: (rows, W, H), values 1..4."""
+    src = open(os.path.join(REPO, header)).read()
+    W = int(re.search(r"_TEX_W (\d+)", src).group(1))
+    H = int(re.search(r"_TEX_H (\d+)", src).group(1))
+    rows = [[int(v) for v in m.group(1).split(",")]
+            for m in re.finditer(r"\{([\d,]+)\},", src)]
+    assert len(rows) == H and all(len(r) == W for r in rows), header
+    return rows, W, H
+
+
+def paint_face_tex(img, quad_pts, tex):
+    """Affine-texture one projected quad (bl, tl, tr, br screen points) with
+    corner-identity UVs — the same assignment the engine's tex_tri_lut uses,
+    so the baked panel and the near 3D face agree pixel-for-pixel in spirit.
+    Two barycentric triangles; covered pixels overwrite whatever the painter
+    has laid down so far, exactly like the flat polygon fill it replaces."""
+    rows, TW, TH = tex
+    px = img.load()
+    W, H = img.size
+    uv = [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]   # bl tl tr br
+    for tri in ((0, 1, 2), (0, 2, 3)):
+        (x0, y0), (x1, y1), (x2, y2) = (quad_pts[k] for k in tri)
+        (u0, v0), (u1, v1), (u2, v2) = (uv[k] for k in tri)
+        det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+        if abs(det) < 1e-9:
+            continue
+        xmin = max(0, int(min(x0, x1, x2))); xmax = min(W - 1, int(max(x0, x1, x2)) + 1)
+        ymin = max(0, int(min(y0, y1, y2))); ymax = min(H - 1, int(max(y0, y1, y2)) + 1)
+        for y in range(ymin, ymax + 1):
+            for x in range(xmin, xmax + 1):
+                w1 = ((x - x0) * (y2 - y0) - (x2 - x0) * (y - y0)) / det
+                w2 = ((x1 - x0) * (y - y0) - (x - x0) * (y1 - y0)) / det
+                if w1 < 0 or w2 < 0 or w1 + w2 > 1:
+                    continue
+                u = u0 + w1 * (u1 - u0) + w2 * (u2 - u0)
+                v = v0 + w1 * (v1 - v0) + w2 * (v2 - v0)
+                tx = min(TW - 1, max(0, int(u * TW)))
+                ty = min(TH - 1, max(0, int(v * TH)))
+                px[x, y] = rows[ty][tx]
+
+
+# The -z face of box 0: FACES order puts it 6th (index 5), and build_mesh
+# emits box 0's quads first. Must track FACES/chair_face_v.
+FRONT_QUAD = 5
+
+
+def render_idx(verts, tris, rotY, rotX, big=448, zoom=None, front_tex=None,
+               stand_bias=0):
     """Ramp-index image: 0 transparent, 1..5 = door ramp index+1. Same
     yaw/pitch/ortho/painter math as raycast_model_view."""
     from PIL import Image, ImageDraw
@@ -120,7 +168,14 @@ def render_idx(verts, tris, rotY, rotX, big=448, zoom=None):
                     key=lambda t: -(Z[quads[t][0]] + Z[quads[t][1]]
                                   + Z[quads[t][2]] + Z[quads[t][3]])):
         a, b, c, e, s = quads[t]
+        if front_tex is not None and t == FRONT_QUAD:
+            # Face-5 vertex order (0,1,3,2) = bl, br, tr, tl in model space;
+            # reorder to paint_face_tex's bl, tl, tr, br.
+            paint_face_tex(img, [P[a], P[e], P[c], P[b]], front_tex)
+            continue
         r = max(0, min(4, (s-1)*5//7))
+        if t // 6 > 0:                 # 6 quads per box; box 0 keeps its tone
+            r = max(0, r - stand_bias)
         d.polygon([P[a], P[b], P[c], P[e]], fill=r+1)
     return img
 
@@ -147,6 +202,24 @@ def main():
                     help="model header holding the cbox_t list")
     ap.add_argument("--symbol", default="chair_boxes", help="box array symbol in --header")
     ap.add_argument("--prefix", default="CHAIR", help="emitted macro/symbol prefix")
+    ap.add_argument("--front-tex", default="",
+                    help="bake_face_tex.py header to composite onto box 0's -z "
+                         "(front) face — keeps the far billboard's panel in "
+                         "step with the engine's textured near face. NOTE: the "
+                         "engine x-mirrors half the circle, so an asymmetric "
+                         "panel bakes mirrored on mirrored sectors.")
+    ap.add_argument("--stand-bias", type=int, default=0,
+                    help="shade steps subtracted from every box except box 0 "
+                         "— must match the model's boxmodels[] stand_bias in "
+                         "raycast.c or the LOD swap pops tone (PVM: 2)")
+    ap.add_argument("--sprite-pose", default="",
+                    help="also emit sh_src/spr_<sprite>_tex.h from this yaw's "
+                         "baked view, verbatim — the flat standee (editor, "
+                         "asset preview) then shows the exact engine pose on "
+                         "the exact ramp, instead of a re-render re-quantized "
+                         "through bake_sprite. Values carry over unchanged: "
+                         "standee decode base+v lands on the same CRAM rows "
+                         "as the dir decode ramp+(v-1). Needs --sprite.")
     args = ap.parse_args()
     # Pose provenance: pitch is DERIVED, not eyeballed, so every import bakes
     # the same way. The player's eye (STAND_EYE 128 = 0.5 cell) looks down at
@@ -196,10 +269,12 @@ def main():
     # by a view-dependent factor (desk: 9%..21%). With a shared band, H rows
     # = one world span, emitted below as VSPAN so the engine can inflate the
     # blit and land the model's BODY at exactly world_h on screen.
+    ftex = load_face_tex(args.front_tex) if args.front_tex else None
     renders = []
     y0g, y1g = BIG, 0
     for yw, rw in zip(yaws, rend):
-        im = render_idx(verts, tris, rw, pitch, BIG, zoom)
+        im = render_idx(verts, tris, rw, pitch, BIG, zoom, front_tex=ftex,
+                        stand_bias=args.stand_bias)
         bb = im.getbbox()
         if bb is None:
             sys.exit("pose %d rendered empty" % yw)
@@ -267,6 +342,52 @@ def main():
                 % (pre, PRE, ",".join(str(m) for v, s, m in sectors)))
         f.write("\n#endif\n")
     print("wrote %s  views: %s" % (args.out, [(yw, w) for yw, w, _ in views]))
+
+    if args.sprite_pose:
+        if not args.sprite:
+            sys.exit("--sprite-pose needs --sprite <id>")
+        want = int(args.sprite_pose) & 255
+        hit = [(yw, w, im) for yw, w, im in views if yw == want]
+        if not hit:
+            sys.exit("--sprite-pose %d is not one of the baked yaws %s"
+                     % (want, [yw for yw, _, _ in views]))
+        yw, w, im = hit[0]
+        sid = args.sprite
+        SID = sid.upper()
+        sp = os.path.join(REPO, "sh_src", "spr_%s_tex.h" % sid)
+        with open(sp, "w") as f:
+            f.write("#ifndef SPR_%s_TEX_H_INCLUDED\n#define SPR_%s_TEX_H_INCLUDED\n\n"
+                    % (SID, SID))
+            f.write("#include <stdint.h>\n\n")
+            f.write("/* AUTO-GENERATED by tools/bake_dir_sprites.py --sprite-pose %d —\n"
+                    " * the yaw-%d directional view emitted as the flat standee, so the\n"
+                    " * editor/asset-preview sprite is the engine pose on the engine ramp.\n"
+                    " * 0 = transparent, v -> CRAM base + v. Row-major. Do not edit. */\n"
+                    % (yw, yw))
+            f.write("#define SPR_%s_TEX_WIDTH  %d\n" % (SID, w))
+            f.write("#define SPR_%s_TEX_HEIGHT %d\n\n" % (SID, H))
+            f.write("static const uint8_t spr_%s_tex[SPR_%s_TEX_HEIGHT][SPR_%s_TEX_WIDTH] = {\n"
+                    % (sid, SID, SID))
+            # The standee is a still, so it ships the POWERED-OFF look: glass
+            # core (5) stays the dark-glass marker, rim texels (6..9) collapse
+            # back to their albedo — the corner shading that reads as curved
+            # glass. Also keeps every value <= 5 for the editor's decode.
+            for y in range(H):
+                f.write("    {" + ",".join(
+                    str(v - 5 if v > 5 else v)
+                    for v in (im.getpixel((x, y)) for x in range(w))) + "},\n")
+            f.write("};\n\n#endif\n")
+        # world_hw derives from the standee texture's aspect, same formula as
+        # bake_sprite's registry_entries.
+        import json as _json
+        regp = os.path.join(REPO, "registry.json")
+        reg2 = _json.load(open(regp))
+        ent = [s for s in reg2["assets"]["sprites"] if s["id"] == sid][0]
+        ent["world_hw"] = round(ent["world_h"] * (w / float(H)) / 2.0, 4)
+        _json.dump(reg2, open(regp, "w"), indent=1, ensure_ascii=False)
+        open(regp, "a").write("\n")
+        print("wrote %s (%dx%d, yaw %d) + world_hw %.4f"
+              % (sp, w, H, yw, ent["world_hw"]))
 
     if args.png:
         # Emit each pose as an RGBA PNG in the door ramp, so the SAME box model

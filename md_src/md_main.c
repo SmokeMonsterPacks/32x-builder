@@ -55,11 +55,14 @@ void do_commands(void) {
 		*vdp_data_port = *mars_comm2;
 		vramOffset += 2;
 		break;
+	case 8: // Set MD CRAM color: index in cmd low byte, BGR word in COMM2.
+		// The SH-2 fade only reaches 32X CRAM; this is its handle on the
+		// MD layer's colors (HUD text, backdrop) so fades take them too.
+		vdp_color(cmd & 0xFF, *mars_comm2);
+		break;
 	}
 	*mars_comm0 = 0;
 }
-
-const uint16_t color_cycle[10] = { 0xEEE, 0xCCC, 0xAAA, 0x888, 0x666, 0x444, 0x666, 0x888, 0xAAA, 0xCCC };
 
 // Sticky six-button latch. read_joypad returns bit 0x1000 set when the pad
 // validated the six-button signature THIS frame, with M X Y Z in 0x0F00.
@@ -83,14 +86,12 @@ uint16_t pad_sticky(uint8_t n, uint16_t p) {
 
 __attribute__((section(".data")))
 void main(void) {
-	uint16_t ticks = 0, col = 0;
+	// Backdrop/border stays BLACK. The marsdev demo's grey color-cycle
+	// lived here for the project's whole life: Ares crops the overscan so
+	// nobody saw it, but a CRT shows the border pulsing grey at full
+	// brightness through every dark scene and fade. Boot already set CRAM
+	// 0 black; nothing may write it again.
 	while(1) {
-		// Cycle background/border color
-		if(++ticks >= 8) {
-			ticks = 0;
-			if(++col >= 10) col = 0;
-		}
-		vdp_color(0, color_cycle[col]);
 		// TODO: Remove this after fixing _vblank
 		while(*vdp_ctrl_port & 8) do_commands();
 		while(!(*vdp_ctrl_port & 8)) do_commands();

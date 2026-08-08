@@ -54,7 +54,7 @@ void    m_main_automap_zoom(int dir);
 #define NUM_TABS     8
 
 #define GAME_CONTENT_ROWS     4   /* MAP, ZOOM, 3D VIEWER, EXIT TO LOBBY */
-#define AUDIO_CONTENT_ROWS    4   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE */
+#define AUDIO_CONTENT_ROWS    5   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE, HELLO */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
 #define TESTING_CONTENT_ROWS  6   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR */
@@ -250,6 +250,14 @@ void menu_update(uint16_t pad) {
             /* VOICE: Voyager-hello playback speed (hardware pitch trim).
              * RIGHT faster/higher, LEFT slower; buzz/steps untouched. */
             amb_voice_speed_adjust(dir);
+            return;
+        }
+        if (menu_row == 5) {
+            /* HELLO: same-binary A/B for the Speex decode cost — the
+             * ONLY honest way to measure it (toppling the neanderthal
+             * also removes a screen-filling sprite, which is its own
+             * multi-fps cost; see the world-quad 7fps floor). */
+            SHARED_UC->voice_off ^= 1;
             return;
         }
         volatile uint8_t *target =
@@ -453,6 +461,8 @@ void menu_render(uint8_t *fb) {
             pc[4] = 0;
             draw_row(fb, 56, menu_row == 4, "VOICE", pc);
         }
+        draw_row(fb, 64, menu_row == 5, "HELLO",
+                 SHARED_UC->voice_off ? "  OFF" : "   ON");
     } else if (menu_tab == TAB_LIGHTING) {
         uint8_t f = SHARED_UC->lighting_flags;
         draw_row(fb, 32, menu_row == 1, "FLICKER",

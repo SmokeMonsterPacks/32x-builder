@@ -10,7 +10,12 @@ static const comm_pal_t comm_pal[] = {
     { 146, 18, 15, 11 },   /* desk [1] */
     { 147, 21, 17, 13 },   /* desk [2] */
     { 148, 23, 19, 14 },   /* desk [3] */
+    { 185, 2, 2, 3 },   /* pvm [0] */
+    { 186, 6, 6, 7 },   /* pvm [1] */
+    { 187, 15, 15, 16 },   /* pvm [2] */
+    { 188, 21, 21, 22 },   /* pvm [3] */
+    { 189, 25, 25, 26 },   /* pvm [4] */
 };
-#define COMM_PAL_COUNT 4
+#define COMM_PAL_COUNT 9
 
 #endif

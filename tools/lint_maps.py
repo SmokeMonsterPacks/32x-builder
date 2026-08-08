@@ -178,6 +178,17 @@ def lint_model(m, base, folder, reg, seen_names, errs):
           "standup table with chairs and neanderthals; the budget leaves 4 "
           "slots spare for the next imported asset)"
           % (n_desks, lim["max_desks"], lim.get("max_standups", 36)))
+    # The PVM cart is the import those 4 spare slots were reserved for
+    # (6 boxes / 36 faces — carved lighter than the chair after the first
+    # 11-box cut showed on the frame counters). The cap stays at the
+    # spare-slot count rather than growing the standup table: 8 desks +
+    # 21 chairs + 3 neanderthals + 4 PVMs = max_standups 36.
+    n_pvms = sum(1 for d in m["decals"] if d.get("kind") == "pvm")
+    if "max_pvms" in lim and n_pvms > lim["max_pvms"]:
+        e("%d PVMs exceed max_pvms %d (PVM carts fill the last %d spare "
+          "slots of the engine's %d-slot standup table)"
+          % (n_pvms, lim["max_pvms"], lim["max_pvms"],
+             lim.get("max_standups", 36)))
     # EVERY free-standing object shares one engine array (raycast.c MAX_STANDUPS),
     # and the loader fills it in decal order then silently drops the rest. The
     # testbed lost all 7 of its desks that way: 3 neanderthals + 21 chairs filled

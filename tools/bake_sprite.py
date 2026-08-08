@@ -424,6 +424,18 @@ def main():
     ap.add_argument("--mirror", action="store_true",
                     help="flip the source left/right before baking")
     ap.add_argument("--no-dither", action="store_true")
+    ap.add_argument("--rebake", action="store_true",
+                    help="re-emit the texture of an EXISTING sprite, quantized "
+                         "to its registry palette (pal stays untouched — the "
+                         "engine's box ramp may alias its CRAM rows, so a "
+                         "re-median-cut would recolor the 3D model). Updates "
+                         "world_hw if the crop changed; everything else in the "
+                         "registry is left alone")
+    ap.add_argument("--auto-level", action="store_true",
+                    help="stretch the source's 5th..95th luminance percentiles "
+                         "to full range before quantizing — for renders lit by "
+                         "render_glb.py, whose dim front lighting otherwise "
+                         "lands every texel in the palette's dark half")
     ap.add_argument("--dry", action="store_true",
                     help="print what would be written, touch nothing")
     args = ap.parse_args()
@@ -440,11 +452,31 @@ def main():
     reg = json.load(open(reg_path))
     ids = ([s["id"] for s in reg["assets"]["sprites"]] +
            [k["id"] for k in reg["decals"]["kinds"]])
-    if args.id in ids:
-        sys.exit("id %r already exists in the registry" % args.id)
+    existing = None
+    if args.rebake:
+        hits = [s for s in reg["assets"]["sprites"] if s["id"] == args.id]
+        if not hits:
+            sys.exit("--rebake: id %r not in the registry" % args.id)
+        existing = hits[0]
+    elif args.id in ids:
+        sys.exit("id %r already exists in the registry (use --rebake to "
+                 "re-emit its texture)" % args.id)
 
     from PIL import Image
     src_img = orient(Image.open(args.src), args.rotate, args.mirror)
+    if args.auto_level:
+        a = src_img.convert("RGBA")
+        px = a.load()
+        ls = sorted((r * 299 + g * 587 + b * 114) // 1000
+                    for x in range(a.width) for y in range(a.height)
+                    for (r, g, b, al) in [px[x, y]] if al >= 128)
+        if ls:
+            lo = ls[len(ls) * 5 // 100]
+            hi = max(lo + 1, ls[len(ls) * 95 // 100])
+            lut = [min(255, max(0, (v - lo) * 255 // (hi - lo)))
+                   for v in range(256)]
+            src_img = Image.merge("RGBA", [ch.point(lut) for ch in
+                                           a.split()[:3]] + [a.split()[3]])
     marks = find_marks(src_img)
     if args.mark:
         if not (1 <= args.mark <= len(marks)):
@@ -464,9 +496,13 @@ def main():
         src_img, max_w=(MAX_W_WALL if wall else MAX_W),
         max_h=(MAX_H_WALL if wall else MAX_H),
         budget=(MAX_TEXELS_WALL if wall else MAX_TEXELS))
+    reuse_pal8 = None
+    if existing:
+        reuse_pal8 = [tuple(c * 255 // 31 for c in e) for e in existing["pal"]]
     rows, W, H, pal31, pal8 = bake_image(src_img, out_w,
                                          dither=not args.no_dither,
-                                         max_h=(MAX_H_WALL if wall else MAX_H))
+                                         max_h=(MAX_H_WALL if wall else MAX_H),
+                                         pal8=reuse_pal8)
     if W * H > (MAX_TEXELS_WALL if wall else MAX_TEXELS):
         sys.exit("baked %dx%d = %d texels exceeds the %d budget — "
                  "use a smaller --width" % (W, H, W * H, MAX_TEXELS))
@@ -477,9 +513,15 @@ def main():
             src_img, W * 2, dither=not args.no_dither,
             max_h=MAX_H * 2, pal8=pal8)      # SAME palette as the lo-res
     tex_path = os.path.join(ROOT, "sh_src", "spr_%s_tex.h" % args.id)
-    sprite, kindent = registry_entries(reg, args.id, W, H, args.height,
-                                       pal31, args.author, args.mount,
-                                       args.z, hi)
+    if existing:
+        # Texture only: keep the entry's palette/base/tier/flags. world_hw is
+        # the one field derived from the baked aspect, so track it.
+        sprite, kindent = existing, None
+        sprite["world_hw"] = round(sprite["world_h"] * (W / float(H)) / 2.0, 4)
+    else:
+        sprite, kindent = registry_entries(reg, args.id, W, H, args.height,
+                                           pal31, args.author, args.mount,
+                                           args.z, hi)
     base = sprite["base"]
     header = emit_header(args.id, rows, W, H, base)
     if args.dry:
@@ -493,8 +535,9 @@ def main():
     if hi:
         open(os.path.join(ROOT, "sh_src", "spr_%s_tex_hi.h" % args.id),
              "w").write(emit_header(args.id, rows_hi, W_hi, H_hi, base, hi=True))
-    reg["assets"]["sprites"].append(sprite)
-    reg["decals"]["kinds"].append(kindent)
+    if not existing:
+        reg["assets"]["sprites"].append(sprite)
+        reg["decals"]["kinds"].append(kindent)
     json.dump(reg, open(reg_path, "w"), indent=1, ensure_ascii=False)
     print("baked %s (%dx%d, kind %d) + registry entries — run `make` and the"
           " standee is placeable in maps and the editor" % (tex_path, W, H,

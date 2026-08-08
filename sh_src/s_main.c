@@ -44,8 +44,11 @@ void s_main(void) {
         if (cmd == MARS_CMD_NONE) {
             /* Service audio first — keep the PWM ping-pong fed.
              * amb_pump() is cheap (~150 μs when a fill is needed,
-             * instant return otherwise). */
+             * instant return otherwise). amb_audio_idle() decodes at
+             * most ONE 20 ms Speex frame per visit and belongs ONLY
+             * here — in the vblank slack, never at render checkpoints. */
             amb_pump();
+            amb_audio_idle();
             /* Throttle bumped 64→256 because primary got faster after
              * the DIVU/sine LUT optimizations, shifting the bus-
              * contention balance enough that controller-input stalls

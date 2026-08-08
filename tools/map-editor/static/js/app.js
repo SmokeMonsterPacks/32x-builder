@@ -118,6 +118,8 @@ const BUDGET_ROWS = [
   ['decals',     'Decals',     'max_decals',
                  m => m.decals.filter(d => !isStandaloneKind(d.kind)).length],
   ['chairs',     'Chairs','max_chairs',     m => m.decals.filter(d => d.kind === 'chair').length],
+  ['desks',      'Desks', 'max_desks',      m => m.decals.filter(d => d.kind === 'desk').length],
+  ['pvms',       'PVMs',  'max_pvms',       m => m.decals.filter(d => d.kind === 'pvm').length],
   ['crawls',     'Crawl runs', 'max_crawl_runs', m => m.crawls.length],
   ['lights',     'Lights',     'max_lights',     m => (m.lights || []).length],
   ['dark',       'Dark rooms', 'max_dark_rooms', m => (m.dark || []).length],

@@ -88,8 +88,10 @@ chair 20.5,24.5 face=W
 # Distant pair: watch the view index change as you strafe, then approach.
 chair 24.5,17.5 face=N
 chair 22.5,14.5 face=E
-# STRESS BLOCK: cafeteria grid, 15 chairs at mixed facings — up to ~15 visible
-# at once from the south. Fills standups to the engine cap (24 total).
+# STRESS BLOCK: cafeteria grid, 12 chairs at mixed facings — up to ~12 visible
+# at once from the south. Was 15; the 3 east-edge stragglers went to the PVM
+# carts below (the map sits at the max_decals 32 engine cap, so every new
+# test object is a trade).
 chair 6.5,20.5 face=E
 chair 9.5,20.5 face=S
 chair 12.5,20.0 face=W
@@ -102,9 +104,6 @@ chair 15.5,22.0 face=E
 chair 18.5,22.0 face=S
 chair 6.5,23.5 face=W
 chair 9.5,23.5 face=N
-chair 21.5,21.5 face=W
-chair 21.5,23.0 face=S
-chair 18.5,23.5 face=N
 
 # DESK (first GLB import: tools/bake_boxes.py -> 3 disjoint boxes, 18 faces).
 # Cardinal row for circling, same idea as the chair row above — walk around each
@@ -118,6 +117,16 @@ desk 25.5,16.5 face=W
 # and the pair at different depths shows the near/far read side by side.
 desk 16.5,26.0 face=S
 desk 19.5,25.0 face=W
+
+# PVM CART (second GLB import: monitor + open-frame stand, 6 boxes / 36
+# faces — cheaper than the chair. The legs are hand-added BAKE_EXTRA posts,
+# so eyeball them from a low crouch: they must meet the bottom shelf and the
+# monitor with no float gap). One beside the spawn desk for the first look,
+# two more for near/far and circling.
+# Budget is 2 per map now (registry max_pvms — Mike: they feel expensive);
+# the third tester lost its seat.
+pvm 14.5,26.0 face=S
+pvm 24.5,26.5 face=E
 # Against the chair row, for a scale check: a desk should read taller-topped and
 # much wider than the chair beside it.
 desk 24.5,20.5 face=N

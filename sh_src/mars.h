@@ -168,6 +168,7 @@ extern void Hw32xFlipWait(void);
 
 extern void HwMdReadPad(uint8_t port);
 extern void HwMdClearScreen(void);
+extern void HwMdSetColor(unsigned short index, unsigned short color);
 extern void HwMdSetOffset(unsigned short offset);
 extern void HwMdSetNTable(unsigned short word);
 extern void HwMdSetVram(unsigned short word);

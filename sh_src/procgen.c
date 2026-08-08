@@ -212,6 +212,25 @@ static void place_neanderthals(int count) {
     }
 }
 
+/* EXACTLY ONE PVM per generated level (Mike: every procedural level has the
+ * monitor, but they FEEL expensive — budget is a hard 2 per map, lint-side,
+ * and procgen spends just 1 of it). Faces a random cardinal like the rest of
+ * the furniture; the exit corridor stays clear so it never blocks the way. */
+static void place_pvms(int count) {
+    int placed = 0, attempts = count * 32;   /* one MUST land: try harder */
+    while (attempts-- > 0 && placed < count) {
+        int x = xs32_range(2, MAP_W - 3);
+        int y = xs32_range(2, MAP_H - 3);
+        if (!footprint_clear(x, y, 1, 1)) continue;
+        if (raycast_standup_in_cell(x, y)) continue;
+        if (raycast_exit_path_cell(x, y)) continue;
+        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
+        raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, PVM_ASSET_KIND);
+        placed++;
+    }
+}
+
 /* Scatter live-3D chairs on clear floor. The engine's render guard only draws
  * the nearest few, so a couple per level reads as furniture without crating
  * the frame. kind 3 = CHAIR_SPRITE_KIND. */
@@ -640,6 +659,10 @@ void procgen_run(uint32_t seed) {
      * let them squat the knee cells and starve the pairings. 2-4 keeps a
      * generated floor sparse (authored maps may go to max_desks 8) and leaves
      * room in the 36-slot standup table for the chairs below. */
+    /* The monitor first: it's the guaranteed set-piece (one per level, hard
+     * budget 2) and the rarest, so it picks its floor before desks and
+     * chairs crowd the cells. */
+    place_pvms(1);
     place_desks(2 + xs32_range(0, 2));
     place_chairs(6 + xs32_range(0, 3));
     /* Structure exists now, so a walled corridor can be found: a stretch of

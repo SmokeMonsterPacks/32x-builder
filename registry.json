@@ -173,6 +173,16 @@
     "color": "#b8b0a4",
     "label": "stopsign (community standee)",
     "standalone": true
+   },
+   {
+    "id": "pvm",
+    "kind": 10,
+    "z": 0.2,
+    "glyph": "▤",
+    "color": "#3a3f44",
+    "label": "PVM monitor on stand (live 3D, free-standing)",
+    "standalone": true,
+    "box_model": true
    }
   ]
  },
@@ -459,6 +469,51 @@
     ],
     "tier": "community",
     "author": "Double K"
+   },
+   {
+    "id": "pvm",
+    "kind": 10,
+    "mount": "billboard",
+    "tex": "spr_pvm_tex.h",
+    "sym": "spr_pvm_tex",
+    "base": 184,
+    "pal": [
+     [
+      2,
+      2,
+      3
+     ],
+     [
+      6,
+      6,
+      7
+     ],
+     [
+      15,
+      15,
+      16
+     ],
+     [
+      21,
+      21,
+      22
+     ],
+     [
+      25,
+      25,
+      26
+     ]
+    ],
+    "world_h": 0.4,
+    "world_hw": 0.0821,
+    "z": 0.0,
+    "transparent": 1,
+    "decode": "offset",
+    "flags": [
+     "standalone"
+    ],
+    "tier": "core",
+    "author": "Poring"
    }
   ]
  },
@@ -523,7 +578,7 @@
   "doublek": "doublek"
  },
  "limits": {
-  "_doc": "must match the engine caps (max_standups tracks raycast.c MAX_STANDUPS — the loader silently drops standalone decals past it); the codegen rejects maps that exceed these. max_desks 8 + max_chairs 21 + 3 neanderthals = 32, leaving 4 of max_standups 36 spare for the next imported asset. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
+  "_doc": "must match the engine caps (max_standups tracks raycast.c MAX_STANDUPS — the loader silently drops standalone decals past it); the codegen rejects maps that exceed these. max_desks 8 + max_chairs 21 + 3 neanderthals + max_pvms 2 = 34 of max_standups 36, two slots spare. PVM budget is DELIBERATELY 2 (Mike 2026-08-08: they feel expensive); procgen guarantees exactly 1 per generated level. max_dim tracks the ENGINE grid (raycast.h MAP_W/H) — 64x64 was tried and reverted (too sparse to walk), so authored maps cap at 32 until the engine grid grows again.",
   "max_dim": 32,
   "max_partitions": 64,
   "max_decals": 32,
@@ -533,7 +588,8 @@
   "max_partition_edges": 255,
   "max_chairs": 21,
   "max_desks": 8,
-  "max_standups": 36
+  "max_standups": 36,
+  "max_pvms": 2
  },
  "playability": {
   "_doc": "MEASURED partition-edge -> fps bands (half-res, real hardware). Total edges is a PROXY: dense/aligned sightlines run slower than the total implies, so walk-test to be sure. The frame is vblank-locked, so 15fps needs roughly <=70 edges.",

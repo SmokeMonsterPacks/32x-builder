@@ -238,10 +238,16 @@ uint8_t world_map[MAP_H][MAP_W];
 #include "sprite_defs.h"
 #include "comm_pal.h"     /* community CRAM arena (generated) */
 #include "chair3d.h"
-#include "chair_model.h"    /* baked GLB tri-mesh for the live 3D asset viewer */
+/* chair_model.h (the baked 1,692-tri hero GLB mesh) is no longer compiled
+ * in: it shipped only as the viewer's MESH variant, which nothing in the
+ * game used, and it crawled even wireframed. The file stays on disk as the
+ * bake reference; every model view now renders its box list. */
 #include "desk3d.h"         /* tools/bake_boxes.py output — imported GLB as boxes */
+#include "pvm3d.h"          /* same, for the PVM monitor + stand */
+#include "pvm_front_tex.h"  /* screen + control panel, mapped onto box 0's front face */
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
 #include "desk_dir_tex.h"      /* same, for the imported desk (tools/bake_dir_sprites.py) */
+#include "pvm_dir_tex.h"       /* same, for the PVM monitor + stand */
 #include "chair_shadow_tex.h"  /* plan-silhouette floor-shadow stencils, feet-anchored */
 
 
@@ -465,6 +471,18 @@ static uint8_t standup_fall_dir[MAX_STANDUPS];
  * full speed-up / reverse / fade tape-death of the Voyager hello. */
 #define HERO_DYING_RATE  6
 static uint8_t standup_fall_prog[MAX_STANDUPS];
+/* Power state of a screen-bearing box model (the PVM): 1 = on, screen shows
+ * live static; 0 = off, dark glass. Toggled by raycast_pvm_use (the A
+ * interaction). Read by the secondary for its draw half, so it rides the
+ * sprite-cache purge. Default ON at map load — a wall of dead TVs is a
+ * choice someone has to make, not a boot state. */
+static uint8_t standup_power[MAX_STANDUPS];
+/* Screen CONTENT of a powered PVM: 0 = live static, 1 = the EXIT TELEGRAPH
+ * (the tiny POV frame captured from the level's exit at map load). Flips on
+ * every power-ON, so cycling the set with A alternates the two — the A
+ * button is the whole interface. Read by the secondary for its draw half,
+ * so it rides the sprite-cache purge. */
+static uint8_t standup_scr_mode[MAX_STANDUPS];
 /* Which side hit the floor: 1 = pushed from the FRONT, figure lands face up
  * (the printed side shows); 0 = pushed from BEHIND, lands face down — the
  * blank cardboard back shows, mirrored. Set at the shove from the same
@@ -487,6 +505,12 @@ void standups_clear(void) {
         standup_fall_dir[i] = 0; standup_fall_prog[i] = 0;
         standup_fall_face[i] = 1;
         standup_fall_len_q[i] = 0;
+        /* Found DEAD (Mike's call, reversing the old boot-state note): a
+         * room of running TVs nobody started was the wrong kind of wrong.
+         * The A press is what wakes one — and the first wake shows STATIC
+         * (mode 0); the telegraph is the second cycle's reveal. */
+        standup_power[i] = 0;
+        standup_scr_mode[i] = 0;
     }
 }
 
@@ -1092,24 +1116,28 @@ static int g_hole_peek_on = 0;
 static int g_corr_lit_left = 1;
 void raycast_peek_clear(void) { g_hole_peek_on = 0; }
 
-void raycast_peek_render(fx_t px, fx_t py, uint8_t angle) {
+/* Generic tiny walls-only POV render — the peek's engine, parameterized so
+ * the PVM exit-telegraph can capture at screen-glass resolution. W/H up to
+ * 96x64 (the row-shade scratch). dim = extra fog steps. */
+static void pov_render(uint8_t *buf, int W, int H, fx_t px, fx_t py,
+                       uint8_t angle, int dim) {
     fx_t dirX = COS_FX(angle), dirY = SIN_FX(angle);
     fx_t planeX = FX_MUL(-dirY, FX(0.66)), planeY = FX_MUL(dirX, FX(0.66));
     /* Floor/ceiling per-row shade: perspective fog toward the horizon, so
      * the ground plane recedes instead of blurring into one brown slab.
      * Row distance ~ (eye height * H/2) / rows-from-horizon. */
-    uint8_t rowc[PEEK_H], rowf[PEEK_H];
-    for (int y = 0; y < PEEK_H; y++) {
-        int dy = y - (PEEK_H >> 1); if (dy < 0) dy = -dy;
+    uint8_t rowc[64], rowf[64];
+    for (int y = 0; y < H; y++) {
+        int dy = y - (H >> 1); if (dy < 0) dy = -dy;
         if (dy < 1) dy = 1;
-        fx_t d = ((fx_t)(PEEK_H >> 1) << FX_SHIFT) / (dy * 2);   /* ~cells */
-        int sh = (hole_fog8(d) >> 8) + PEEK_DIM;
+        fx_t d = ((fx_t)(H >> 1) << FX_SHIFT) / (dy * 2);   /* ~cells */
+        int sh = (hole_fog8(d) >> 8) + dim;
         if (sh > 15) sh = 15;
         rowc[y] = (uint8_t)(CEIL_BASE + sh);
         rowf[y] = (uint8_t)(FLOOR_BASE + sh);
     }
-    for (int col = 0; col < PEEK_W; col++) {
-        fx_t camX = ((fx_t)(2 * col - PEEK_W) << FX_SHIFT) / PEEK_W;
+    for (int col = 0; col < W; col++) {
+        fx_t camX = ((fx_t)(2 * col - W) << FX_SHIFT) / W;
         fx_t rdx = dirX + FX_MUL(planeX, camX);
         fx_t rdy = dirY + FX_MUL(planeY, camX);
         fx_t perp = FX(8);            /* fallback: degenerate ray = far wall */
@@ -1142,21 +1170,25 @@ void raycast_peek_render(fx_t px, fx_t py, uint8_t angle) {
         if (perp < FX(2.5)) sh = (int)((perp * 2) / FX(2.5));
         else { fx_t past = perp - FX(2.5);
                sh = 2 + (int)((past * 13) / (FOG_RAMP_DIST - FX(2.5))); }
-        sh += PEEK_DIM + side;
+        sh += dim + side;
         if (hit == 2) sh = 15;                   /* void doorway: pure fog-dark */
         if (sh > 15) sh = 15;
-        int lh = (int)divu_u32((uint32_t)(PEEK_H << FX_SHIFT), (uint32_t)perp);
-        int top = (PEEK_H - lh) >> 1, bot = (PEEK_H + lh) >> 1;
+        int lh = (int)divu_u32((uint32_t)(H << FX_SHIFT), (uint32_t)perp);
+        int top = (H - lh) >> 1, bot = (H + lh) >> 1;
         if (top < 0) top = 0;
-        if (bot > PEEK_H - 1) bot = PEEK_H - 1;
+        if (bot > H - 1) bot = H - 1;
         uint8_t cw = (uint8_t)(WALL_BASE + sh);
-        uint8_t *d = peek_buf + col;
+        uint8_t *d = buf + col;
         int y = 0;
-        for (; y < top; y++, d += PEEK_W) *d = rowc[y];
-        for (; y <= bot; y++, d += PEEK_W) *d = cw;
-        for (; y < PEEK_H; y++, d += PEEK_W) *d = rowf[y];
+        for (; y < top; y++, d += W) *d = rowc[y];
+        for (; y <= bot; y++, d += W) *d = cw;
+        for (; y < H; y++, d += W) *d = rowf[y];
     }
-    purge_cache_range(peek_buf, PEEK_BYTES);   /* self-read is fresh; belt */
+    purge_cache_range(buf, (unsigned)(W * H));   /* self-read is fresh; belt */
+}
+
+void raycast_peek_render(fx_t px, fx_t py, uint8_t angle) {
+    pov_render(peek_buf, PEEK_W, PEEK_H, px, py, angle, PEEK_DIM);
     /* Nonzero = on, and it carries its birth frame so the blit can DISSOLVE
      * the peek in over the first few frames instead of popping. */
     g_hole_peek_on = (int)SHARED_UC->frame_count + 1;
@@ -1452,6 +1484,13 @@ static void init_lights(void) {
  * secondary renders the PREVIOUS map's grid on its screen half until the lines
  * happen to evict — most visibly the lobby's black-void (==2) cells bleeding
  * into the next procgen level. */
+/* Exit-telegraph storage (capture logic lives with the exit code below):
+ * the tiny POV frame each powered PVM can show, captured once per map load
+ * at the resolution of the PVM's glass. Defined here so the gen purge can
+ * size it. */
+static uint8_t tg_buf[PVM_FRONT_TEX_W * PVM_FRONT_TEX_H];
+static int tg_valid = 0;
+static int tg_bx0, tg_by0, tg_bw, tg_bh;   /* glass bbox in pvm_front_tex */
 void raycast_purge_cell_light(void) {
     static uint8_t seen_gen = 0xFF;
     uint8_t g = SHARED_UC->cell_light_gen;
@@ -1466,6 +1505,12 @@ void raycast_purge_cell_light(void) {
         purge_cache_range(prun_hi_w, sizeof prun_hi_w);
         purge_cache_range(prun_lo_n, sizeof prun_lo_n);
         purge_cache_range(prun_hi_n, sizeof prun_hi_n);
+        purge_cache_range(tg_buf,   sizeof tg_buf);      /* exit telegraph:   */
+        purge_cache_range(&tg_valid, sizeof tg_valid);   /* captured once per */
+        purge_cache_range(&tg_bx0,  sizeof tg_bx0);      /* map load by the   */
+        purge_cache_range(&tg_by0,  sizeof tg_by0);      /* primary           */
+        purge_cache_range(&tg_bw,   sizeof tg_bw);
+        purge_cache_range(&tg_bh,   sizeof tg_bh);
         seen_gen = g;
     }
 }
@@ -1713,6 +1758,16 @@ void raycast_set_brightness(int lvl) {
         Hw32xSetBGColor(PARTITION_BASE + i,
             MIX(24,FOG_R,i)*lvl/FADE_STEPS, MIX(25,FOG_G,i)*lvl/FADE_STEPS, MIX(15,FOG_B,i)*lvl/FADE_STEPS);
     }
+    /* COMMUNITY ARENA (144..255) fades too. build_palette stamps comm_pal
+     * once at full brightness and nothing rescaled it, so every community
+     * sprite — and the PVM, whose ramp lives in the arena — sat lit at
+     * full white through the blackout while the world went dark around it
+     * (Mike's fade-out screenshot: glowing monitor in a black room). */
+    for (int i = 0; i < COMM_PAL_COUNT; i++)
+        Hw32xSetBGColor(comm_pal[i].idx,
+                        comm_pal[i].r * lvl / FADE_STEPS,
+                        comm_pal[i].g * lvl / FADE_STEPS,
+                        comm_pal[i].b * lvl / FADE_STEPS);
 }
 
 static void build_palette(void) {
@@ -1883,6 +1938,7 @@ static void stage_textures_to_sdram(void) {
     n = (int)sizeof(door_tex);      for (i = 0; i < n; i++) d[i] = s[i];
 }
 
+static void raycast_capture_exit_view(void);   /* exit telegraph (below) */
 void raycast_init(void) {
     stage_textures_to_sdram();
     build_palette();
@@ -1894,6 +1950,11 @@ void raycast_init(void) {
     for (int col = 0; col < SCREEN_W; col++) {
         cameraX_table[col] = ((fx_t)col << (FX_SHIFT + 1)) / SCREEN_W - FX_ONE;
     }
+    /* EXIT TELEGRAPH: capture the tiny POV frame from this map's exit —
+     * AFTER init_lights bumped cell_light_gen, so the secondary's gen purge
+     * (which also covers tg_*) fires on its next frame and both halves show
+     * the same picture. */
+    raycast_capture_exit_view();
 }
 
 /* --- Map loaders --------------------------------------------------- *
@@ -1913,6 +1974,126 @@ static int g_exit_wall_cx = -1, g_exit_wall_cy = -1;   /* the door's wall cell *
 
 int raycast_exit_path_cell(int x, int y) {
     return (int)((exit_path_bits[y] >> x) & 1u);
+}
+
+/* ── EXIT TELEGRAPH ─────────────────────────────────────────────────────
+ * Every powered PVM can show a tiny POV frame captured FROM the level's
+ * exit, looking back down the way a player would approach — the monitors
+ * whisper the way out. Captured ONCE at map load (pov_render, walls-only,
+ * real palette indices) at the resolution of the PVM's glass, so display
+ * is a straight texel-for-texel read in tex_tri_lut's screen branch.
+ * tg_* geometry is load-constant; the secondary purges it with the other
+ * map-gen state so its screen half reads the same picture. */
+
+
+/* Glass bbox scan, lazy, per-CPU (ROM texture -> both CPUs converge on the
+ * same answer without sharing). Texel >= 5 is the screen region — the same
+ * test tex_tri_lut's decode uses. */
+static void tg_scan_glass(void) {
+    if (tg_bw > 0) return;
+    int x0 = PVM_FRONT_TEX_W, y0 = PVM_FRONT_TEX_H, x1 = -1, y1 = -1;
+    for (int y = 0; y < PVM_FRONT_TEX_H; y++)
+        for (int x = 0; x < PVM_FRONT_TEX_W; x++)
+            if (pvm_front_tex[y][x] >= 5) {
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+            }
+    if (x1 < 0) { x0 = y0 = 0; x1 = PVM_FRONT_TEX_W - 1; y1 = PVM_FRONT_TEX_H - 1; }
+    tg_bx0 = x0; tg_by0 = y0; tg_bw = x1 - x0 + 1; tg_bh = y1 - y0 + 1;
+}
+
+/* Nearest of 8 compass angles to the vector (dx, dy) — argmax of dots, the
+ * same no-atan2 trick the directional sprites use. */
+static uint8_t tg_angle8(fx_t dx, fx_t dy) {
+    uint8_t best = 0; int64_t bestd = (int64_t)1 << 62; bestd = -bestd;
+    for (int k = 0; k < 8; k++) {
+        uint8_t a = (uint8_t)(k * 32);
+        int64_t d = (int64_t)COS_FX(a) * dx + (int64_t)SIN_FX(a) * dy;
+        if (d > bestd) { bestd = d; best = a; }
+    }
+    return best;
+}
+
+/* Capture the telegraph at map load. Camera: the exit's APPROACH cell, aimed
+ * back along the protected spawn->exit corridor (walk the path bits a few
+ * cells for a bearing); authored maps without path bits fall back to the
+ * exit door's inward normal. No exit at all -> tg_valid stays 0 and the
+ * telegraph mode shows plain static. */
+static void raycast_capture_exit_view(void) {
+    tg_valid = 0;
+    tg_scan_glass();
+    int wx = -1, wy = -1, ax = -1, ay = -1;
+    if (g_exit_wall_cx >= 0) {
+        wx = g_exit_wall_cx; wy = g_exit_wall_cy;
+    } else if (g_exit_hole_cx >= 0) {
+        wx = g_exit_hole_cx; wy = g_exit_hole_cy;
+        ax = g_exit_hole_ax; ay = g_exit_hole_ay;
+    } else {
+        /* Authored map: the exit is a door decal (kind 1). Its wall cell is
+         * the cell the decal plane borders on the SOLID side. */
+        for (int d = 0; d < num_decals; d++) {
+            if (decals[d].kind != 1) continue;
+            int cx = FX_INT(decals[d].x), cy = FX_INT(decals[d].y);
+            /* Probe both sides of the plane for the open approach cell. */
+            int px_ = cx, py_ = cy, qx = cx, qy = cy;
+            if (decals[d].axis) { py_ = FX_INT(decals[d].y - (FX_ONE >> 1));
+                                  qy  = FX_INT(decals[d].y + (FX_ONE >> 1)); }
+            else                { px_ = FX_INT(decals[d].x - (FX_ONE >> 1));
+                                  qx  = FX_INT(decals[d].x + (FX_ONE >> 1)); }
+            if ((unsigned)px_ < MAP_W && (unsigned)py_ < MAP_H &&
+                world_map[py_][px_] == 0) { ax = px_; ay = py_; wx = qx; wy = qy; }
+            else if ((unsigned)qx < MAP_W && (unsigned)qy < MAP_H &&
+                     world_map[qy][qx] == 0) { ax = qx; ay = qy; wx = px_; wy = py_; }
+            break;
+        }
+        if (ax < 0) return;
+    }
+    if (ax < 0) {
+        /* Door exits: approach = the open orthogonal neighbour of the wall
+         * cell, exit-path cell preferred (that's the protected corridor). */
+        static const int nb[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+        for (int pass = 0; pass < 2 && ax < 0; pass++)
+            for (int k = 0; k < 4; k++) {
+                int nx = wx + nb[k][0], ny = wy + nb[k][1];
+                if ((unsigned)nx >= MAP_W || (unsigned)ny >= MAP_H) continue;
+                if (world_map[ny][nx] != 0) continue;
+                if (pass == 0 && !raycast_exit_path_cell(nx, ny)) continue;
+                ax = nx; ay = ny; break;
+            }
+        if (ax < 0) return;
+    }
+    /* Bearing: walk the exit path AWAY from the exit for a few cells so the
+     * camera looks down the corridor, not at the first wall of a turn. */
+    int bx = ax, by = ay, px2 = wx, py2 = wy;
+    for (int step = 0; step < 5; step++) {
+        static const int nb[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+        int nx = -1, ny = -1;
+        for (int k = 0; k < 4; k++) {
+            int tx = bx + nb[k][0], ty = by + nb[k][1];
+            if (tx == px2 && ty == py2) continue;
+            if ((unsigned)tx >= MAP_W || (unsigned)ty >= MAP_H) continue;
+            if (!raycast_exit_path_cell(tx, ty)) continue;
+            nx = tx; ny = ty; break;
+        }
+        if (nx < 0) break;
+        px2 = bx; py2 = by; bx = nx; by = ny;
+    }
+    fx_t ex = ((fx_t)ax << FX_SHIFT) + (FX_ONE >> 1);
+    fx_t ey = ((fx_t)ay << FX_SHIFT) + (FX_ONE >> 1);
+    uint8_t ang;
+    if (bx != ax || by != ay)
+        ang = tg_angle8(((fx_t)bx << FX_SHIFT) + (FX_ONE >> 1) - ex,
+                        ((fx_t)by << FX_SHIFT) + (FX_ONE >> 1) - ey);
+    else
+        ang = tg_angle8(ex - (((fx_t)wx << FX_SHIFT) + (FX_ONE >> 1)),
+                        ey - (((fx_t)wy << FX_SHIFT) + (FX_ONE >> 1)));
+    pov_render(tg_buf, tg_bw, tg_bh, ex, ey, ang, 0);
+    tg_valid = 1;
+    purge_cache_range(&tg_valid, sizeof tg_valid);
+    purge_cache_range(&tg_bx0, sizeof tg_bx0);
+    purge_cache_range(&tg_by0, sizeof tg_by0);
+    purge_cache_range(&tg_bw, sizeof tg_bw);
+    purge_cache_range(&tg_bh, sizeof tg_bh);
 }
 
 /* Pepper outlets across the live world_map's visible wall faces (a wall cell
@@ -2312,6 +2493,35 @@ int raycast_exit_hole_check(void) {
 }
 
 
+/* The A interaction on a PVM: toggle the nearest powered screen within reach.
+ * Reach is a 1.2-cell box plus a front-hemisphere dot test — same spirit as
+ * the exit-hole check (committed, never stumbled into: the caller only calls
+ * on a FRESH A press). Returns 1 if a set was toggled, so the caller can gate
+ * any competing A action behind it. */
+int raycast_pvm_use(void) {
+    int best = -1;
+    fx_t bestm = 0;
+    fx_t pdx = COS_FX(player.angle), pdy = SIN_FX(player.angle);
+    for (int i = 0; i < num_standups; i++) {
+        if (standups[i].kind != PVM_ASSET_KIND || standup_down[i]) continue;
+        fx_t dx = standups[i].x - player.x, dy = standups[i].y - player.y;
+        if (FX_ABS(dx) >= FX(1.2) || FX_ABS(dy) >= FX(1.2)) continue;
+        if (FX_MUL(pdx, dx) + FX_MUL(pdy, dy) <= 0) continue;   /* behind us */
+        fx_t m = FX_ABS(dx) + FX_ABS(dy);
+        if (best < 0 || m < bestm) { best = i; bestm = m; }
+    }
+    if (best < 0) return 0;
+    standup_power[best] ^= 1;
+    /* Every power CYCLE alternates the screen: static, telegraph, static...
+     * Flipped on the OFF edge, so the FIRST wake of a found-dead set shows
+     * plain static and the telegraph is the next cycle's reveal. */
+    if (!standup_power[best]) standup_scr_mode[best] ^= 1;
+    /* The switch is audible: degauss thunk on power-on, dying whine on off
+     * (one-shot request to the mixer, same channel style as the climb). */
+    SHARED_UC->crt_sfx = standup_power[best] ? 1 : 2;
+    return 1;
+}
+
 /* Portal check: returns 1 when the EXIT door is open far enough AND the player
  * has stepped into its doorway — the cue for the game loop to fade through into
  * a fresh procedurally generated map. The "exit" only loops you deeper in. */
@@ -2416,6 +2626,22 @@ void raycast_shimmer(void) {
     #undef SUB
 }
 
+/* Asset-viewer backdrop: park the TUNED bright wallpaper yellow in CRAM 0
+ * for the viewer's lifetime, restore black on exit. Index 0 is the one slot
+ * nothing else will fight over — texel 0 is transparency system-wide (the
+ * FB drops zero byte-writes), so no asset ever draws it, and the shimmer
+ * only ever rewrites WALL_BASE/CEIL_BASE. Filling the screen with WALL_BASE
+ * itself made the whole backdrop strobe with the fluorescent flicker. */
+void raycast_backdrop_wall(int on) {
+    if (on) {
+        int wr, wg, wb;
+        pal_effective(PSURF_WALL, &wr, &wg, &wb);
+        Hw32xSetBGColor(0, wr, wg, wb);
+    } else {
+        Hw32xSetBGColor(0, 0, 0, 0);
+    }
+}
+
 
 /* Returns 1 if cell (x, y) is walkable, 0 if blocked or out of bounds. A void
  * EXIT cell (==2) is an opening you walk out through, so it's walkable — the
@@ -2447,7 +2673,21 @@ static int cell_passable(int x, int y) {
                                        * not their shoulders — bump face-on, slip the edge. */
 /* Box models are declared further down (they need cbox_t + the model headers);
  * collision needs them here. */
-typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; } boxmodel_t;
+/* base: the 4-deep CRAM shade ramp the model's faces paint (base + shade 0..3,
+ * fog walks it down). The chair and desk both shipped on the chair's dark wood
+ * ramp — the flat fill and the far-billboard vmap hardcoded CHAIR_BASE — so
+ * their rows pin that look on purpose; a new import brings its OWN ramp (the
+ * gray PVM was the tell: it rendered wood-brown). ftex: optional face texture
+ * painted on box 0's -z (front) face instead of the flat fill, same 1..4 ramp
+ * values, 0 nowhere (a box face is opaque). */
+/* stand_bias: shade steps subtracted from every box EXCEPT box 0 (the carve's
+ * primary mass) — a two-tone model on one ramp: the PVM's monitor stays case
+ * gray while its cart drops to the ramp's near-black end. Costs nothing per
+ * pixel (same fill, darker index); the dir bake applies the same bias
+ * (bake_dir_sprites.py --stand-bias), so near/far/viewer agree. */
+typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base;
+                 const uint8_t *ftex; uint8_t ftw, fth;
+                 uint8_t stand_bias; } boxmodel_t;
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
 
@@ -2725,8 +2965,13 @@ void raycast_corridor_travel(int t, int total) {
  * must agree with them: cell, rib collar, cell, rib collar, cell. */
 static const fx_t corr_seg_z[6] = { 0, FX(0.94), FX(1.06),
                                     FX(1.94), FX(2.06), FX(3.0) };
-static const int8_t corr_seg_base[5] = { 2, 6, 9, 8, 3 };  /* middle lifted:
-                                * 11/9 read too dark against black on hardware */
+/* Overhead-light story (Mike): the room's ceiling light falls PAST the
+ * hole, not into it — the whole duct sits in shade, entrance included,
+ * and the old mid-tunnel plunge (9 against entrance 2) read as a black
+ * BAND rather than depth. Darker ends, gentler middle: one continuous
+ * shaded material, exit segment left a shade lighter where the
+ * destination's light reaches in. */
+static const int8_t corr_seg_base[5] = { 4, 6, 7, 6, 4 };
 /* Facet shade in 8.8, resolved through the hole's own 2x2 -- every duct
  * surface is a live 50/50 weave of adjacent ramp entries (the half-step),
  * the same dithered material the raycaster's interior and the panel
@@ -3626,8 +3871,12 @@ static const dirset_t dirsets[] = {
     { (const dirview_t *)desk_dir_views,  desk_dir_sect_v,  desk_dir_sect_view,
       desk_dir_sect_mirror,  DESK_DIR_SECTORS,  DESK_DIR_H,  DESK_DIR_WMAX,
       DESK_DIR_VSPAN },
+    { (const dirview_t *)pvm_dir_views,   pvm_dir_sect_v,   pvm_dir_sect_view,
+      pvm_dir_sect_mirror,   PVM_DIR_SECTORS,   PVM_DIR_H,   PVM_DIR_WMAX,
+      PVM_DIR_VSPAN },
 };
-static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND };
+static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND,
+                                       PVM_ASSET_KIND };
 #define DIRSET_COUNT (int)(sizeof dirsets / sizeof dirsets[0])
 
 /* Decode scratch is shared, so it must fit the WIDEST view of ANY set — the
@@ -3635,7 +3884,9 @@ static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND };
  * the desk's decode off the end of the buffer. */
 #define DIRSET_PV_A (CHAIR_DIR_WMAX * CHAIR_DIR_H)
 #define DIRSET_PV_B (DESK_DIR_WMAX  * DESK_DIR_H)
-#define DIRSET_PV_MAX (DIRSET_PV_A > DIRSET_PV_B ? DIRSET_PV_A : DIRSET_PV_B)
+#define DIRSET_PV_C (PVM_DIR_WMAX   * PVM_DIR_H)
+#define DIRSET_PV_AB (DIRSET_PV_A > DIRSET_PV_B ? DIRSET_PV_A : DIRSET_PV_B)
+#define DIRSET_PV_MAX (DIRSET_PV_AB > DIRSET_PV_C ? DIRSET_PV_AB : DIRSET_PV_C)
 /* This scratch is .bss and RAM here is nearly full — the desk's first bake at
  * --height 56 made it 6,384 B and overflowed the ram region by 2,336. Re-baking
  * the set shorter is the fix (a wide, short object needs rows, not height), so
@@ -3661,12 +3912,18 @@ static const dirset_t *dirset_for_kind(int kind) {
  * reach either path must be counted here — otherwise an oversized import runs
  * off the end of a stack array in the hot render loop. */
 #define BX_MAXBOXES CHAIR_NBOXES
-_Static_assert(DESK_NBOXES <= BX_MAXBOXES,
+_Static_assert(DESK_NBOXES <= BX_MAXBOXES && PVM_NBOXES <= BX_MAXBOXES,
                "imported box model exceeds the box-render arrays — raise BX_MAXBOXES");
 
+/* PVM ramp: the comm_pal arena rows for registry pal[0..3] (base 184 -> CRAM
+ * 185..188, dark charcoal to light case gray). Kept in lockstep with
+ * registry.json assets.sprites[pvm] by the comm_pal.h codegen. */
+#define PVM_RAMP_BASE 185
 static const boxmodel_t boxmodels[] = {
-    { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND },
-    { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND  },
+    { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND, CHAIR_BASE, 0, 0, 0, 0 },
+    { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND,  CHAIR_BASE, 0, 0, 0, 0 },
+    { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
+      (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2 },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
 
@@ -3759,11 +4016,108 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
         uint8_t front_base, uint8_t back_c, int is_front,
         int ax, int ay, fx_t au, fx_t av, int bx, int by, fx_t bu, fx_t bv,
         int cx, int cy, fx_t cu, fx_t cv);
+/* Opaque box-face texture fill (the PVM's screen/control panel). Own routine
+ * rather than a tex_tri mode: tex_tri's inner loop is the screen-filling
+ * neanderthal quad's, and a per-pixel LUT branch there taxes the 7fps-floor
+ * scene for a face it never draws. Texels are 1..4 ramp values decoded through
+ * lut[] (fog/flicker/dark folded in by the caller), never 0 — no transparency
+ * test, every covered pixel paints.
+ * Texels 5..9 are the SCREEN (bake_face_tex): 5 = the elliptical glass core,
+ * 6..9 = the bezel-opening rim carrying its albedo (v-5). Powered off
+ * (noise_seed 0) the core paints lut[5] dark and the rim paints its albedo —
+ * the corner shading that reads as CRT glass curvature. Powered on, the WHOLE
+ * opening floods with per-pixel static from lut[10..13] — the RAW ramp, no
+ * fog/dark walk: a CRT emits light, so the static glows full-contrast in the
+ * gloom instead of collapsing like a lit surface. */
+static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
+        const uint8_t *tex, int tw, int th, int do_z, const uint8_t *lut,
+        unsigned noise_seed, const uint8_t *scr,
+        int ax, int ay, fx_t au, fx_t av, int bx, int by, fx_t bu, fx_t bv,
+        int cx, int cy, fx_t cu, fx_t cv);
+
+/* Decorrelated 2-bit noise for the static. The first cut hashed x*13 + y*29,
+ * and the linear form showed exactly as you'd fear: diagonal banding that
+ * read as a waveform crawling the glass. Table-scramble instead: the row
+ * lookup perturbs the column index, so no linear structure survives.
+ * xorshift32(0x32583258), generated once — content is arbitrary, stability
+ * is not (both CPUs and the bake must agree it's ROM const). */
+static const uint8_t static_tbl[256] = {
+    113,205,254,235,  3,131,130,121,128, 88,140,203,  9, 72,105, 70,
+    235,158,152, 70, 50, 79,229,161,103,151,254,169,234,172, 19,227,
+    185,211,191,226,226, 31,182, 61,181, 66,206,  1,191,141,104,  4,
+     26,141,168,148, 94, 71, 20,154,147,214, 13, 80,243, 21, 81, 89,
+    137, 15,159, 62, 17,122,150, 18,179, 13,187,110,150,191, 52,162,
+     21,150, 60,125,167,232,172, 23,184,121,213, 82,105,108, 27,126,
+     28,179, 72, 67,198, 85,188,211, 81,165, 32,143, 99,215, 91,231,
+    142, 18,198, 59,219,159,160,182,193,141,249, 36, 44,153, 60, 76,
+     18, 48, 99,194,  9,194, 91,  8,235,167, 56,229, 44,117, 76,150,
+    137, 50, 91,186,199,107,146, 25,189,137,  3,136, 68,243,168,193,
+     75,192, 75,186,113,170,235,246,171, 90,105, 15,134, 56,158, 16,
+     17, 99,153,145,128,  5,173,241, 74, 24, 60, 43,  7, 78,251,156,
+    154,126,213, 15, 35, 24, 76, 53, 76,205,190,124,192,126,  4,247,
+     92,  5, 81, 43,200,191,123,242,  7, 80, 25, 20,220, 74,135, 89,
+    224, 40,105,175,248, 68,164, 85, 15,130,194, 80,127,153,255,116,
+    251,137,104,164,101,197,  8,216,175,177,230, 18,  3,255,  6,175,
+};
+#define STATIC_NOISE(x, y, seed) \
+    (static_tbl[((x) + static_tbl[((y) + (seed)) & 255] + ((seed) >> 8)) & 255] & 3)
+
+/* One projected box face, shared by draw_chair_3d and draw_panel_face. */
+typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade;
+                 uint8_t ftex; } cface_t;
+
+/* The textured front face, LUT build included. Split out of draw_chair_3d and
+ * noinline for the same RAM reason as draw_boxmodel_shadow: inlined, this
+ * (two 15-arg call setups plus the fog math) grew the RAMTEXT draw_standups
+ * blob past the ram region — as a ROM call the hot path keeps only the
+ * per-face flag test. */
+__attribute__((noinline))
+static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
+        const cface_t *fc, const boxmodel_t *bm,
+        fx_t center_depth, int chair_dark, int dark, int zt, int power,
+        const uint8_t *scr) {
+    /* Same fog + flicker + dark-room walk the flat faces get, applied to ramp
+     * values 1..4 so the textured face dims in lockstep and the LOD swap
+     * stays seamless. 5 = dark glass (screen, power off). 6..9 = the RAW ramp
+     * for the static hash — emissive, so it cuts through fog and dark rooms. */
+    uint8_t flut[14];
+    int fog_c = 0;
+    fx_t fdc = center_depth - FX(2);
+    if (fdc > 0) fog_c = (int)(((int64_t)fdc * 5) / (FOG_RAMP_DIST - FX(2)));
+    for (int v = 1; v <= 4; v++) {
+        int sh = (v - 1) - fog_c - chair_dark;
+        if (sh < 0 || dark) sh = 0;
+        flut[v] = (uint8_t)(bm->base + sh);          /* panel + off-rim (v-5) */
+        flut[9 + v] = (uint8_t)(bm->base + (v - 1)); /* raw ramp: static */
+    }
+    flut[5] = (uint8_t)(bm->base + 0);               /* dark glass core */
+    flut[6] = flut[1]; flut[7] = flut[2];            /* unused by the decode,  */
+    flut[8] = flut[3]; flut[9] = flut[4];            /* set so nothing floats  */
+    unsigned seed = (power && !scr)
+        ? (((unsigned)SHARED_UC->frame_count * 2654435761u) | 1) : 0;
+    if (!power) scr = 0;                 /* dark glass wins over telegraph */
+    /* UVs by corner identity (face-5 vi order is bl,tl,tr,br; texture row 0 =
+     * top), in texel units for the shift-sampling. Same two-triangle split as
+     * the flat fill. */
+    fx_t TW = FX(bm->ftw), TH = FX(bm->fth);
+    tex_tri_lut(fb, col_start, col_end, fc->depth,
+            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr,
+            fc->sx[0],fc->sy[0], 0,  TH,
+            fc->sx[1],fc->sy[1], 0,  0,
+            fc->sx[2],fc->sy[2], TW, 0);
+    tex_tri_lut(fb, col_start, col_end, fc->depth,
+            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr,
+            fc->sx[0],fc->sy[0], 0,  TH,
+            fc->sx[2],fc->sy[2], TW, 0,
+            fc->sx[3],fc->sy[3], TW, TH);
+}
 
 static void draw_chair_3d(int i, int col_start, int col_end,
         fx_t px, fx_t py, fx_t dirX, fx_t dirY, fx_t planeX, fx_t planeY,
         fx_t inv_det, int horizon_y, uint8_t *fb,
-        const cbox_t *mboxes, int mnboxes, fx_t world_h) {
+        const boxmodel_t *bm, fx_t world_h) {
+    const cbox_t *mboxes = bm->boxes;
+    int mnboxes = bm->nboxes;
     fx_t cx = standups[i].x, cy = standups[i].y;
     uint8_t facing = standups[i].facing_angle;
     /* Rotate so the model's FRONT (-z, the open seat side) points along the
@@ -3786,7 +4140,6 @@ static void draw_chair_3d(int i, int col_start, int col_end,
      * projected corner to well under +/-1000, so int16 is lossless and takes
      * ~864 B off the deep render stack (the high-water probe found the Master
      * OVER budget in crawlspace scenes). */
-    typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade; } cface_t;
     cface_t faces[BX_MAXBOXES * 6];
     int nf = 0;
 
@@ -3845,7 +4198,15 @@ static void draw_chair_3d(int i, int col_start, int col_end,
              * NOT the desk bug — that is the seam test on the next line. */
             if (ax * by - ay * bx2 >= 0) continue;
             faces[nf].depth = (cdep[vi[0]]+cdep[vi[1]]+cdep[vi[2]]+cdep[vi[3]]) >> 2;
-            faces[nf].shade = chair_face_shade(f, fc, fs);
+            {
+                int fsh = chair_face_shade(f, fc, fs);
+                if (b > 0) fsh = (fsh > bm->stand_bias) ? fsh - bm->stand_bias : 0;
+                faces[nf].shade = (uint8_t)fsh;
+            }
+            /* Face 5 is -z, the model front (the facing rotation points it
+             * along the decal dir) — the face a ftex model paints its panel
+             * texture on. Only box 0 (the carve's primary mass) carries it. */
+            faces[nf].ftex = (bm->ftex != 0 && b == 0 && f == 5);
             for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
             nf++;
         }
@@ -3896,7 +4257,14 @@ static void draw_chair_3d(int i, int col_start, int col_end,
         /* A chair standing in a dark room honors the dark: collapse to the
          * deepest brown so it reads as a shape in the gloom, like the walls. */
         if (cell_is_dark(cx, cy)) shade = 0;
-        uint8_t c = (uint8_t)(CHAIR_BASE + shade);
+        uint8_t c = (uint8_t)(bm->base + shade);
+        if (faces[q].ftex) {
+            draw_panel_face(fb, col_start, col_end, &faces[q], bm,
+                            center_depth, chair_dark, cell_is_dark(cx, cy), zt,
+                            standup_power[i],
+                            (standup_scr_mode[i] && tg_valid) ? tg_buf : 0);
+            continue;
+        }
         if (SHARED_UC->chair_tex) {
             /* MODE+A A/B: route the two face triangles through the shipping
              * textured rasterizer (tex_tri), sampling wall_tex (16x16,
@@ -3989,6 +4357,87 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
                     if ((x ^ y) & 1) row[x] = front_base;
                 } else {
                     row[x] = is_front ? (uint8_t)(front_base + s) : back_c;
+                }
+            }
+        }
+        xL += dxL; uL += duL; vL += dvL;
+        xS += dxS; uS += duS; vS += dvS;
+    }
+}
+
+/* See the forward decl above draw_chair_3d for why this is not a tex_tri
+ * mode. Same edge-walk; the inner loop is smaller: row-major only, opaque
+ * (texels 1..4, never 0), paint = lut[texel].
+ * noinline and not RAMTEXT on purpose (same call as draw_boxmodel_shadow):
+ * LTO folding it into the RAMTEXT draw_standups blob overflowed the ram
+ * region, and one panel face a frame does not earn RAM-resident code. */
+__attribute__((noinline))
+static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
+        const uint8_t *tex, int tw, int th, int do_z, const uint8_t *lut,
+        unsigned noise_seed, const uint8_t *scr,
+        int ax, int ay, fx_t au, fx_t av, int bx, int by, fx_t bu, fx_t bv,
+        int cx, int cy, fx_t cu, fx_t cv) {
+    int X[3] = {ax,bx,cx}, Y[3] = {ay,by,cy};
+    fx_t U[3] = {au,bu,cu}, V[3] = {av,bv,cv};
+    for (int i = 0; i < 2; i++) for (int j = i+1; j < 3; j++) if (Y[j] < Y[i]) {
+        int t; t=X[i];X[i]=X[j];X[j]=t; t=Y[i];Y[i]=Y[j];Y[j]=t;
+        fx_t f; f=U[i];U[i]=U[j];U[j]=f; f=V[i];V[i]=V[j];V[j]=f;
+    }
+    if (Y[2] == Y[0]) return;
+    int dyL = Y[2] - Y[0];
+    fx_t xL = (fx_t)X[0] << FX_SHIFT, dxL = ((fx_t)(X[2]-X[0]) << FX_SHIFT) / dyL;
+    fx_t uL = U[0], duL = (U[2]-U[0]) / dyL;
+    fx_t vL = V[0], dvL = (V[2]-V[0]) / dyL;
+    int dyS0 = Y[1] - Y[0];
+    fx_t xS, dxS, uS, duS, vS, dvS;
+    if (dyS0 > 0) {
+        xS = (fx_t)X[0] << FX_SHIFT; dxS = ((fx_t)(X[1]-X[0]) << FX_SHIFT) / dyS0;
+        uS = U[0]; duS = (U[1]-U[0]) / dyS0; vS = V[0]; dvS = (V[1]-V[0]) / dyS0;
+    } else {
+        int dyS1 = Y[2] - Y[1];
+        xS = (fx_t)X[1] << FX_SHIFT; dxS = dyS1>0 ? ((fx_t)(X[2]-X[1]) << FX_SHIFT)/dyS1 : 0;
+        uS = U[1]; duS = dyS1>0 ? (U[2]-U[1])/dyS1 : 0; vS = V[1]; dvS = dyS1>0 ? (V[2]-V[1])/dyS1 : 0;
+    }
+    for (int y = Y[0]; y < Y[2]; y++) {
+        if (y == Y[1] && dyS0 > 0) {
+            int dyS1 = Y[2] - Y[1];
+            xS = (fx_t)X[1] << FX_SHIFT; dxS = dyS1>0 ? ((fx_t)(X[2]-X[1]) << FX_SHIFT)/dyS1 : 0;
+            uS = U[1]; duS = dyS1>0 ? (U[2]-U[1])/dyS1 : 0; vS = V[1]; dvS = dyS1>0 ? (V[2]-V[1])/dyS1 : 0;
+        }
+        if (y >= 0 && y < SCREEN_H) {
+            int xa = xL >> FX_SHIFT, xb = xS >> FX_SHIFT;
+            fx_t ua = uL, ub = uS, va = vL, vb = vS;
+            if (xa > xb) { int t=xa;xa=xb;xb=t; fx_t f=ua;ua=ub;ub=f; f=va;va=vb;vb=f; }
+            int span = xb - xa; if (span < 1) span = 1;
+            fx_t du = (ub - ua) / span, dv = (vb - va) / span;
+            fx_t u = ua, v = va;
+            if (xa < col_start) { u += du*(col_start-xa); v += dv*(col_start-xa); xa = col_start; }
+            if (xb > col_end - 1) xb = col_end - 1;
+            uint8_t *row = fb + (uintptr_t)y * SCREEN_W;
+            for (int x = xa; x <= xb; x++, u += du, v += dv) {
+                if (do_z && depth >= WALL_DIST(x)) continue;
+                int tx = u >> FX_SHIFT, ty = v >> FX_SHIFT;
+                if (tx < 0) tx = 0; else if (tx >= tw) tx = tw - 1;
+                if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+                uint8_t s = tex[ty * tw + tx];
+                if (s >= 5) {
+                    /* Screen. The TELEGRAPH samples by texture coords — the
+                     * image must stick to the glass like a picture, unlike
+                     * the noise, which hashes SCREEN space (at a distance
+                     * several pixels share a texel, and texel-space noise
+                     * reads as static behind frosted glass). scr bytes are
+                     * final palette indices, emissive — no lut fold. */
+                    if (scr) {
+                        int ix = tx - tg_bx0, iy = ty - tg_by0;
+                        if (ix < 0) ix = 0; else if (ix >= tg_bw) ix = tg_bw - 1;
+                        if (iy < 0) iy = 0; else if (iy >= tg_bh) iy = tg_bh - 1;
+                        row[x] = scr[iy * tg_bw + ix];
+                    } else if (noise_seed)
+                        row[x] = lut[10 + STATIC_NOISE(x, y, noise_seed)];
+                    else
+                        row[x] = (s == 5) ? lut[5] : lut[s - 5];
+                } else {
+                    row[x] = lut[s];
                 }
             }
         }
@@ -4382,6 +4831,91 @@ static void draw_standup_shadow(int i, int col_start, int col_end,
             csx[0],csy[0],QU[0],QV[0], csx[2],csy[2],QU[2],QV[2], csx[3],csy[3],QU[3],QV[3]);
 }
 
+/* Per-sprite value map: fold front/back/silhouette AND (for box-model
+ * billboards) distance fog into a tiny LUT so the inner loop is one table
+ * lookup. Split out of draw_standups and noinline for the same RAM reason as
+ * draw_boxmodel_shadow: once-per-sprite setup (an int64 fog divide and a
+ * 4-way branch loop) that was inlined into the RAMTEXT blob, and the PVM
+ * import's per-kind ramp lookup tipped the ram region over. */
+__attribute__((noinline))
+static void build_standup_vmap(int i, fx_t transformY, const dirset_t *fds,
+        const sprite_def_t *sd, int is_silhouette, uint8_t silhouette_color,
+        int is_front, uint8_t back_color, uint8_t *vmap) {
+    int is_chair = (fds != 0);
+    /* Distance + dark-room fog, shared by the chair AND the neanderthal
+     * (front figure). Baked into the value-LUT so the inner loop stays a
+     * single table read -- fog is effectively free per pixel. */
+    int fog = 0;
+    {
+        fx_t fd = transformY - FX(2);
+        if (fd > 0) fog = (int)(((int64_t)fd * 5) / (FOG_RAMP_DIST - FX(2)));
+        /* Dark-room: full fog -- a silhouette in the gloom, like the
+         * walls around it (mirrors draw_chair_3d's dark clamp). */
+        if (cell_is_dark(standups[i].x, standups[i].y)) fog = 5;
+    }
+    /* Per-kind ramp: chair and desk pin the chair's wood (their
+     * boxmodels[] rows carry CHAIR_BASE — the shipped look); an
+     * import with its own ramp (PVM gray) decodes into that instead.
+     * Must match draw_chair_3d's flat fill or the LOD swap pops. */
+    uint8_t rbase = CHAIR_BASE;
+    const boxmodel_t *bmr = is_chair ? boxmodel_for_kind(standups[i].kind) : 0;
+    if (bmr) rbase = bmr->base;
+    for (int k = 1; k < 8; k++) {
+        if (is_chair) {
+            /* Dark ramp is 4 deep; sprite texels run 1..5, so the
+             * brightest collapses into the ramp top. */
+            int sh = (k - 1) - fog;
+            if (sh < 0) sh = 0; else if (sh > 3) sh = 3;
+            vmap[k] = (uint8_t)(rbase + sh);
+        } else if (is_silhouette) {
+            vmap[k] = silhouette_color;
+        } else if (is_front) {
+            /* Neanderthal parity: fog the figure toward its dark end as
+             * it recedes (shades run 1..7) so it stops floating as a
+             * bright cutout in the fog. Hands off to the silhouette at
+             * far LOD. If this reads BRIGHTER with distance the ramp is
+             * reversed -- flip to (sd->base + (8 - sh)).
+             *
+             * SPRITE_F_ARTPAL sits this out: a community sprite's 7
+             * entries are the artist's COLOURS, so walking them swaps
+             * hues rather than dimming them (a red stop sign would fog
+             * toward whatever its darkest entry happens to be). Keep
+             * the art's own colours until real gloom, then let the
+             * dark end carry it. */
+            int sh;
+            if (sd->flags & SPRITE_F_ARTPAL)
+                sh = (fog >= 5) ? 1 : k;
+            else
+                sh = k - fog;
+            if (sh < 1) sh = 1; else if (sh > 7) sh = 7;
+            vmap[k] = (uint8_t)(sd->base + sh);
+        } else {
+            vmap[k] = back_color;
+        }
+    }
+    /* Texels 5..9 are the SCREEN of a panel-textured model (only its bake
+     * emits them — flat box faces top out at 4): 5 = glass core, 6..9 = the
+     * bezel-opening rim carrying albedo v-5. Too far for per-pixel static, so
+     * powered ON the whole opening rides one value — a two-frame shimmer on
+     * the RAW ramp (emissive, no fog/dark walk), phase-offset by i so a row
+     * of sets never blinks in unison. OFF: core goes dark glass, the rim
+     * keeps its fogged albedo — the corner shading that reads as curved
+     * glass. The caller's vmap must span 10 entries. */
+    if (bmr && bmr->ftex) {
+        if (standup_power[i]) {
+            int sh = 1 + (((SHARED_UC->frame_count >> 1) + (unsigned)i) & 2);
+            for (int k = 5; k <= 9; k++) vmap[k] = (uint8_t)(rbase + sh);
+        } else {
+            vmap[5] = (uint8_t)(rbase + 0);
+            for (int k = 6; k <= 9; k++) {
+                int sh = (k - 5 - 1) - fog;
+                if (sh < 0) sh = 0;
+                vmap[k] = (uint8_t)(rbase + sh);
+            }
+        }
+    }
+}
+
 RAMTEXT static void draw_standups(int col_start, int col_end) {
     /* Self-contained for the dual-CPU split: read the player snapshot and
      * derive the camera basis locally (same as the ceiling/carpet passes) so
@@ -4512,8 +5046,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 uint16_t _cf0 = prof_frt_read();
                 draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
                               planeX, planeY, inv_det, horizon_y, fb,
-                              bm->boxes, bm->nboxes,
-                              sprite_defs[standups[i].kind].world_h);
+                              bm, sprite_defs[standups[i].kind].world_h);
                 chair_ticks = (uint16_t)(chair_ticks + (prof_frt_read() - _cf0));
                 continue;
             }
@@ -4752,54 +5285,9 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * CHAIR_SPRITE_KIND: the desk's bake encodes the same face-shade
          * values, and routing it through the standee path drew it bright tan
          * while its 3D pop-in wore fogged wood. */
-        uint8_t vmap[8];
-        {
-            int is_chair = (fds != 0);
-            /* Distance + dark-room fog, shared by the chair AND the neanderthal
-             * (front figure). Baked into the value-LUT so the inner loop stays a
-             * single table read -- fog is effectively free per pixel. */
-            int fog = 0;
-            {
-                fx_t fd = transformY - FX(2);
-                if (fd > 0) fog = (int)(((int64_t)fd * 5) / (FOG_RAMP_DIST - FX(2)));
-                /* Dark-room: full fog -- a silhouette in the gloom, like the
-                 * walls around it (mirrors draw_chair_3d's dark clamp). */
-                if (cell_is_dark(standups[i].x, standups[i].y)) fog = 5;
-            }
-            for (int k = 1; k < 8; k++) {
-                if (is_chair) {
-                    /* Dark ramp is 4 deep; sprite texels run 1..5, so the
-                     * brightest collapses into the ramp top. */
-                    int sh = (k - 1) - fog;
-                    if (sh < 0) sh = 0; else if (sh > 3) sh = 3;
-                    vmap[k] = (uint8_t)(CHAIR_BASE + sh);
-                } else if (is_silhouette) {
-                    vmap[k] = silhouette_color;
-                } else if (is_front) {
-                    /* Neanderthal parity: fog the figure toward its dark end as
-                     * it recedes (shades run 1..7) so it stops floating as a
-                     * bright cutout in the fog. Hands off to the silhouette at
-                     * far LOD. If this reads BRIGHTER with distance the ramp is
-                     * reversed -- flip to (sd->base + (8 - sh)).
-                     *
-                     * SPRITE_F_ARTPAL sits this out: a community sprite's 7
-                     * entries are the artist's COLOURS, so walking them swaps
-                     * hues rather than dimming them (a red stop sign would fog
-                     * toward whatever its darkest entry happens to be). Keep
-                     * the art's own colours until real gloom, then let the
-                     * dark end carry it. */
-                    int sh;
-                    if (sd->flags & SPRITE_F_ARTPAL)
-                        sh = (fog >= 5) ? 1 : k;
-                    else
-                        sh = k - fog;
-                    if (sh < 1) sh = 1; else if (sh > 7) sh = 7;
-                    vmap[k] = (uint8_t)(sd->base + sh);
-                } else {
-                    vmap[k] = back_color;
-                }
-            }
-        }
+        uint8_t vmap[10];   /* texels 0..9: a screen-bearing bake emits 5..9 */
+        build_standup_vmap(i, transformY, fds, sd, is_silhouette,
+                           silhouette_color, is_front, back_color, vmap);
 
         /* Big near figure: word-pair columns (2px blocks). A close standee
          * covers most of the screen height, and on the 32X a byte FB write
@@ -5012,11 +5500,27 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
         chair_mir = ds->sect_mirror[best];
         const uint8_t *vt = ds->views[view].tex;
         int vw = ds->views[view].w;
+        /* Per-kind ramp, same as build_standup_vmap: the chair/desk rows pin
+         * CHAIR_BASE, an import with its own ramp (PVM gray) decodes into
+         * that — hardcoded CHAIR_BASE painted the PVM's frames chair-brown. */
+        uint8_t rbase = CHAIR_BASE;
+        {
+            const boxmodel_t *bmr = boxmodel_for_kind(sel);
+            if (bmr) rbase = bmr->base;
+        }
+        unsigned pseed = ((unsigned)SHARED_UC->frame_count * 2654435761u) | 1;
         for (int yy = 0; yy < ds->h; yy++)
             for (int xx = 0; xx < vw; xx++) {
                 uint8_t v = vt[yy * vw + xx];
+                if (v >= 5) {          /* screen texels (core + rim): live
+                                        * static — the viewer previews the
+                                        * powered-on set */
+                    chair_pv[yy * vw + xx] =
+                        (uint8_t)(rbase + STATIC_NOISE(xx, yy, pseed));
+                    continue;
+                }
                 int sh = (int)v - 1; if (sh > 3) sh = 3;
-                chair_pv[yy * vw + xx] = v ? (uint8_t)(CHAIR_BASE + sh) : 0;
+                chair_pv[yy * vw + xx] = v ? (uint8_t)(rbase + sh) : 0;
             }
         tex = chair_pv; tw = vw; th = ds->h; col_major = 0; fbase = 0;
         chair_flat = 1;
@@ -5087,14 +5591,17 @@ void raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist) {
  * so the missing .bss zero-init is never observed. _lo, not .hero_overlay: these
  * are LIVE while the viewer runs, so they must sit away from the stack. */
 #define MV_OVL __attribute__((section(".hero_overlay_lo")))
-static int   mv_px[CHAIRM_NVERTS] MV_OVL;
-static int   mv_py[CHAIRM_NVERTS] MV_OVL;
-static fx_t  mv_pz[CHAIRM_NVERTS] MV_OVL;
-static uint16_t mv_order[CHAIRM_NTRIS] MV_OVL;
-static fx_t     mv_dep[CHAIRM_NTRIS] MV_OVL;
+/* Sized for the BOX meshes now — the hero tri-mesh (1,692 tris) that used
+ * to dictate these is out of the build, so the viewer buffers shrink to the
+ * largest box model (BX_MAXBOXES * 8 verts / * 12 tris). */
+static int   mv_px[BX_MAXBOXES * 8] MV_OVL;
+static int   mv_py[BX_MAXBOXES * 8] MV_OVL;
+static fx_t  mv_pz[BX_MAXBOXES * 8] MV_OVL;
+static uint16_t mv_order[BX_MAXBOXES * 12] MV_OVL;
+static fx_t     mv_dep[BX_MAXBOXES * 12] MV_OVL;
 
 /* The in-game 7-box chair expanded to a tri list — the viewer's GAME variant.
- * Same 8.8 y-up model space as chairm_verts (chair height 1.0 = 256), so the
+ * Same 8.8 y-up model space as the baked box lists (height 1.0 = 256), so the
  * two variants render at identical scale and the comparison is honest. Shades
  * follow chair_face_shade's fixed axis mapping (top bright, bottom dark). */
 /* Sized for the LARGEST box model in ROM. Every model that build_box_mesh can
@@ -5153,21 +5660,23 @@ static void mv_line(uint8_t *fb, int x0, int y0, int x1, int y1, uint8_t c) {
 
 void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
                         int model) {
-    const int16_t  (*mverts)[3] = chairm_verts; int nv = CHAIRM_NVERTS;
-    const uint16_t (*mtris)[3]  = chairm_tri;   int ntr = CHAIRM_NTRIS;
-    const uint8_t   *msh        = chairm_shade;
-    /* An IMPORTED model (bake_boxes.py) ships only a box list — there is no
-     * baked hero tri-mesh for it — so both mesh variants show its boxes. The
-     * chair keeps its MESH/GAME split because it has both. */
-    int use_boxes = (variant == 1) || (model != MODEL_CHAIR);
-    if (use_boxes) {
-        const cbox_t *boxes = chair_boxes; int nb = CHAIR_NBOXES;
-        if (model == MODEL_DESK) { boxes = desk_boxes; nb = DESK_NBOXES; }
-        if (bx_built_for != model) { build_box_mesh(boxes, nb); bx_built_for = model; }
-        mverts = (const int16_t(*)[3])bx_verts; nv = bx_nv;
-        mtris  = (const uint16_t(*)[3])bx_tri;  ntr = bx_nt;
-        msh    = bx_shade;
-    }
+    /* Every model renders its BOX list — the chair's baked hero tri-mesh is
+     * out of the build (disk reference only; its MESH variant was the one
+     * consumer and nothing in the game ever drew it). */
+    (void)variant;
+    /* Viewer shade ramp tracks the in-game one (boxmodels[].base) so the
+     * BOXES view previews the real colour, not chair wood; mbm also carries
+     * the panel texture and the stand bias. */
+    const boxmodel_t *mbm = (model == MODEL_PVM)
+                          ? boxmodel_for_kind(PVM_ASSET_KIND) : 0;
+    uint8_t vbase = mbm ? mbm->base : CHAIR_BASE;
+    const cbox_t *boxes = chair_boxes; int nb = CHAIR_NBOXES;
+    if (model == MODEL_DESK) { boxes = desk_boxes; nb = DESK_NBOXES; }
+    if (model == MODEL_PVM)  { boxes = pvm_boxes;  nb = PVM_NBOXES;  }
+    if (bx_built_for != model) { build_box_mesh(boxes, nb); bx_built_for = model; }
+    const int16_t  (*mverts)[3] = (const int16_t(*)[3])bx_verts; int nv = bx_nv;
+    const uint16_t (*mtris)[3]  = (const uint16_t(*)[3])bx_tri;  int ntr = bx_nt;
+    const uint8_t   *msh        = bx_shade;
     fx_t cyy = COS_FX(rotY), syy = SIN_FX(rotY);
     fx_t cxx = COS_FX(rotX), sxx = SIN_FX(rotX);
     fx_t ZOOM = FX(zoom_px);                     /* screen px per world unit */
@@ -5186,7 +5695,7 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
     }
     if (wire) {
         /* WIREFRAME (Z toggles): skips the O(n^2) painter sort AND the fill —
-         * the 1,692-tri hero sort+fill crawls; edges need neither (no
+         * box fills don't need it and edges need neither (no
          * occlusion to get wrong). Shade-coded so the form still reads. */
         for (int t = 0; t < ntr; t++) {
             const uint16_t *ti = mtris[t];
@@ -5195,12 +5704,12 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
              * in-game path itself, with the viewer yaw standing in for the
              * chair's facing (the two rotations share one formula). Hero mesh
              * keeps its baked 1..7 lum, remapped onto the same 0..3 ramp. */
-            int r = (variant == 1) ? chair_face_shade(sh, cyy, syy)
-                                   : (sh - 1) * 4 / 7;
+            int r = chair_face_shade(sh, cyy, syy);   /* live in-game shading */
+            if (mbm && t >= 12) r -= mbm->stand_bias;
             r -= 1;                     /* one fog step: the game's typical viewing
                                          * distance (>2 cells) — raw ramp read tan */
             if (r < 0) r = 0; else if (r > 3) r = 3;
-            uint8_t c = (uint8_t)(CHAIR_BASE + r);
+            uint8_t c = (uint8_t)(vbase + r);
             mv_line(fb, mv_px[ti[0]], mv_py[ti[0]], mv_px[ti[1]], mv_py[ti[1]], c);
             mv_line(fb, mv_px[ti[1]], mv_py[ti[1]], mv_px[ti[2]], mv_py[ti[2]], c);
             mv_line(fb, mv_px[ti[2]], mv_py[ti[2]], mv_px[ti[0]], mv_py[ti[0]], c);
@@ -5217,15 +5726,45 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
         while (b > 0 && mv_dep[mv_order[b-1]] < d) { mv_order[b] = mv_order[b-1]; b--; }
         mv_order[b] = io;
     }
+    /* Panel texture in the viewer too — same face the in-game path textures
+     * (box 0, -z: build_box_mesh emits it as tris 10 and 11), same UV-by-
+     * corner-identity, decoded at the viewer's fixed one-fog-step shade. The
+     * caveman quad and the intro box already proved textured tris here. */
+    const boxmodel_t *vbm = mbm;
+    uint8_t vlut[14];
+    if (vbm && vbm->ftex)
+        for (int v = 1; v <= 4; v++) {
+            int s2 = (v - 1) - 1;
+            if (s2 < 0) s2 = 0;
+            vlut[v] = (uint8_t)(vbase + s2);
+            vlut[5 + v] = vlut[v];
+            vlut[9 + v] = (uint8_t)(vbase + (v - 1));   /* raw ramp: static */
+        }
+    vlut[5] = (uint8_t)(vbase + 0);                     /* dark glass */
+    /* The viewer previews the powered-on set: live static, new seed per frame. */
+    unsigned vseed = ((unsigned)SHARED_UC->frame_count * 2654435761u) | 1;
     for (int oi = 0; oi < ntr; oi++) {
-        const uint16_t *ti = mtris[mv_order[oi]];
+        int t = mv_order[oi];
+        const uint16_t *ti = mtris[t];
         int x0=mv_px[ti[0]],y0=mv_py[ti[0]], x1=mv_px[ti[1]],y1=mv_py[ti[1]], x2=mv_px[ti[2]],y2=mv_py[ti[2]];
-        int sh = msh[mv_order[oi]];
-        int r = (variant == 1) ? chair_face_shade(sh, cyy, syy)   /* live in-game shading */
-                               : (sh - 1) * 4 / 7;                /* hero: baked lum 1..7 */
+        if (vbm && vbm->ftex && (t == 10 || t == 11)) {
+            fx_t TW = FX(vbm->ftw), TH = FX(vbm->fth);
+            if (t == 10)                       /* bl, tl, tr */
+                tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->ftex, vbm->ftw, vbm->fth,
+                            0, vlut, vseed, 0,
+                            x0,y0, 0,TH, x1,y1, 0,0, x2,y2, TW,0);
+            else                               /* bl, tr, br */
+                tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->ftex, vbm->ftw, vbm->fth,
+                            0, vlut, vseed, 0,
+                            x0,y0, 0,TH, x1,y1, TW,0, x2,y2, TW,TH);
+            continue;
+        }
+        int sh = msh[t];
+        int r = chair_face_shade(sh, cyy, syy);   /* live in-game shading */
+        if (vbm && t >= 12) r -= vbm->stand_bias;
         r -= 1;                                   /* one fog step, as seen in game */
         if (r < 0) r = 0; else if (r > 3) r = 3;
-        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(CHAIR_BASE + r),
+        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(vbase + r),
                        0, 0, 0, 0, SCREEN_W, fb);
     }
 }
@@ -5478,6 +6017,8 @@ void raycast_purge_sprite_cache(void) {
     purge_cache_range(standup_fall_prog, sizeof standup_fall_prog);
     purge_cache_range(standup_fall_face, sizeof standup_fall_face);
     purge_cache_range(standup_fall_len_q, sizeof standup_fall_len_q);
+    purge_cache_range(standup_power, sizeof standup_power);
+    purge_cache_range(standup_scr_mode, sizeof standup_scr_mode);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop
@@ -6197,8 +6738,9 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         int y0, y1;
         /* Head underside: shadowed from the lip (film ref: the top reveal
          * gets no room light) -- a +3-step reveal shadow at the lip decaying
-         * to the +2 run-in by the back, over the fog lerp. */
-        {
+         * to the +2 run-in by the back, over the fog lerp. ONLY when the eye
+         * is BELOW the lintel: from above, its underside faces away. */
+        if (eye < HOLE_Z1) {
             int h = head_hi - head_lo; if (h < 1) h = 1;
             int kstep = (int)divu_u32((uint32_t)(256 << 8), (uint32_t)h);
             y0 = head_lo < 0 ? 0 : head_lo;
@@ -6207,7 +6749,8 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
             for (int y = y0; y <= y1; y++, kacc += kstep) {
                 int k = kacc >> 8;                  /* 0..256 lip -> back */
                 int s8 = f0_8 + (((f2_8 - f0_8) * k) >> 8)
-                       + (2 << 8) + 3 * (256 - k) + enc8;
+                       + (3 << 8) + 3 * (256 - k) + enc8;   /* overhead light
+                        * falls past the cut: interior +1 step vs the wall */
                 if (s8 > cap8) s8 = cap8;
                 base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
             }
@@ -6310,7 +6853,7 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
             if (fogmix > 4) fogmix = 4;
             for (int y = y0; y <= y1; y++, kacc += kstep) {
                 if (fogmix && ((y + (col << 1)) & 3) < fogmix) {
-                    int s8 = f2_8 + (2 << 8); if (s8 > cap8) s8 = cap8;
+                    int s8 = f2_8 + (3 << 8); if (s8 > cap8) s8 = cap8;
                     base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
                     continue;
                 }
@@ -6341,8 +6884,12 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
         }
         /* Sill: lit at the near lip (sill_hi), fog-dark by sill_lo — the
          * same fog lerp as the head, minus the reveal shadow (the ledge
-         * catches the room's light). */
-        {
+         * catches the room's light). ONLY when the eye is ABOVE the ledge:
+         * the lo/hi sort below makes the band unconditional, so a CROUCHED
+         * eye under the sill plane got the ledge's TOP hallucinated through
+         * the solid wall — Mike's dashed strips crawling the screen bottom
+         * (the projection flips and half-res leaves gaps between columns). */
+        if (eye > HOLE_Z0) {
             int h = sill_hi - sill_lo; if (h < 1) h = 1;
             int kstep = (int)divu_u32((uint32_t)(256 << 8), (uint32_t)h);
             y0 = sill_lo < 0 ? 0 : sill_lo;
@@ -6350,7 +6897,7 @@ RAMTEXT static void draw_exit_hole(int col_start, int col_end) {
             int kacc = kstep * (sill_hi - y0);     /* 0 at the near lip */
             for (int y = y0; y <= y1; y++, kacc -= kstep) {
                 int k = kacc >> 8;                 /* 0..256 lip -> back */
-                int s8 = f0_8 + (((f2_8 - f0_8) * k) >> 8) + (2 << 8) + enc8;
+                int s8 = f0_8 + (((f2_8 - f0_8) * k) >> 8) + (3 << 8) + enc8;
                 if (s8 > cap8) s8 = cap8;
                 base[y * SCREEN_W] = hole_shade(s8, HOLE_BAY(y));
             }
@@ -7041,8 +7588,15 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
                        + (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(tX, depth)) >> FX_SHIFT);
                 /* Widen by the decal's projected half-width (worst case, face-on)
                  * so a big/near decal like the full-width door isn't dropped when
-                 * its centre is off the edge but its face still spans into view. */
+                 * its centre is off the edge but its face still spans into view.
+                 * PLANE units, not world: sX comes from the plane-basis transform
+                 * (tX), where one unit is the 0.66-long camera plane — a world
+                 * half-width used raw comes out 34% narrow. That sliver put the
+                 * door's frame/jamb columns OUTSIDE the LOD veto: the sign held
+                 * full-res while the edges kept garbling at half, so the veto
+                 * read as a no-op from the player's side of the screen. */
                 fx_t dhw = decals[d].kind ? DECAL_DOOR_HW : DECAL_OUTLET_HW;
+                dhw = FX_MUL(dhw, FX(1.0 / 0.66));
                 int sHW = (int)(((int64_t)(SCREEN_W >> 1) * FX_DIV(dhw, depth)) >> FX_SHIFT);
                 if (sX + sHW < col_start || sX - sHW >= col_end) continue;  /* span off this half */
                 if (decals[d].kind == 1) {

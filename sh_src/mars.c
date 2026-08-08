@@ -213,6 +213,13 @@ void HwMdSetVram(unsigned short word) {
 	while(MARS_SYS_COMM0) ;
 }
 
+void HwMdSetColor(unsigned short index, unsigned short color) {
+	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
+	MARS_SYS_COMM2 = color;
+	MARS_SYS_COMM0 = 0x0800 | (index & 0xFF); // Set MD CRAM entry (BGR word)
+	while(MARS_SYS_COMM0) ;
+}
+
 static void NextChr(char c, uint16_t color) {
 	if(c >= '0' && c <= '9') {
 		c = c - '0' + 2;

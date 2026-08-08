@@ -283,6 +283,22 @@ static void prof_sample_and_draw(uint8_t *fb) {
     /* Build stamp: every metrics screenshot self-identifies. GENESIS layer. */
     HwMdPuts((char *)("B" VERSION_BUILD_STR " " VERSION_SHA_STR),
              HUD_TILE_COLOR, 25, 27);
+    /* Speex decode profiling, same row left of the stamp. DT = FRT
+     * ticks of the last frame decode (secondary FRT prescaler, like
+     * S:), DX = cumulative decoded frames (needs to climb ~50/s while
+     * the hello is audible; slower = ring starving = snippets). */
+    {
+        char d[20];
+        uint16_t dt = SHARED_UC->spx_dec_ticks;
+        uint16_t dx = SHARED_UC->spx_dec_count;
+        d[0] = 'D'; d[1] = 'T'; d[2] = ':';
+        for (int i = 7; i >= 3; i--) { d[i] = '0' + (dt % 10); dt /= 10; }
+        d[8] = ' ';
+        d[9] = 'D'; d[10] = 'X'; d[11] = ':';
+        for (int i = 16; i >= 12; i--) { d[i] = '0' + (dx % 10); dx /= 10; }
+        d[17] = 0;
+        HwMdPuts(d, HUD_TILE_COLOR, 0, 27);
+    }
 
     /* Row 1 — THE FIXED OVERHEAD, previously invisible. HU = post-render draw
      * (automap + menu + this HUD), SW = swapBuffers (vblank wait + flip), ID =
@@ -701,12 +717,24 @@ static void pos_draw(uint8_t *fb) {
 }
 
 void swapBuffers(void) {
+    /* Advertise both bus-free waits to the secondary's Speex decoder
+     * (amb_audio_idle): each poll below reads only a sysreg, so the
+     * ROM/SDRAM bus is genuinely idle inside them. The FS flip
+     * handshake is the one that matters — the VDP flips only at
+     * vblank, so at 8 fps it parks here for up to a full vblank while
+     * the COMM12 tick-wait usually exits instantly (the frame overran
+     * the tick long ago). Flag dropped around shimmer/pal work in
+     * between: those touch the framebuffer and CRAM. */
+    SHARED_UC->primary_vwait = 1;
     while (lastTick == MARS_SYS_COMM12);
+    SHARED_UC->primary_vwait = 0;
     /* In vblank now — safe palette-write window. */
     raycast_shimmer();
     raycast_pal_flush();     /* live COLOR-tab palette edits, repaint when dirty */
     MARS_VDP_FBCTL = currentFB ^ 1;
+    SHARED_UC->primary_vwait = 1;
     while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+    SHARED_UC->primary_vwait = 0;
     currentFB ^= 1;
     lastTick = MARS_SYS_COMM12;
 }
@@ -719,6 +747,19 @@ static void fade_step(int lvl) {
     raycast_render();
     while (lastTick == MARS_SYS_COMM12);
     raycast_set_brightness(lvl);
+    /* The MD layer fades WITH the 32X. raycast_set_brightness only reaches
+     * 32X CRAM; the HUD red, the boot green and the text grey live in MD
+     * CRAM and used to burn at full brightness through the whole fade on a
+     * CRT (Ares crops the overscan, so it never showed there). Genesis
+     * color word is 0000BBB0 GGG0RRR0 — scale each boot entry's nibbles. */
+    {
+        int r = ((0xA * lvl) / FADE_STEPS) & 0xE;   /* HUD red, entry 33 */
+        int g = ((0xA * lvl) / FADE_STEPS) & 0xE;   /* green,   entry 17 */
+        int c = ((0xC * lvl) / FADE_STEPS) & 0xE;   /* lt grey, entry 1  */
+        HwMdSetColor(33, (unsigned short)r);
+        HwMdSetColor(17, (unsigned short)(g << 4));
+        HwMdSetColor(1,  (unsigned short)((c << 8) | (c << 4) | c));
+    }
     MARS_VDP_FBCTL = currentFB ^ 1;
     while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
     currentFB ^= 1;
@@ -916,11 +957,13 @@ static void show_controls_screen(void) {
 }
 
 /* ---- Asset viewer screen (start menu) --------------------------------
- * Dedicated black screen for inspecting assets WITHOUT loading a level:
- * the chair renders as the live clustered 3D mesh, free-rotated on both
- * axes by the D-pad; other assets show as their baked sprites. Self-owned
- * loop like the controls screen — no raycast_render behind it, index 0 is
- * true black in the gameplay palette. MODE+START exits back to the menu. */
+ * Dedicated screen for inspecting assets WITHOUT loading a level: the
+ * chair renders as the live clustered 3D mesh, free-rotated on both axes
+ * by the D-pad; other assets show as their baked sprites. Self-owned
+ * loop like the controls screen — no raycast_render behind it. Backdrop
+ * is the brightest wallpaper yellow, not black: dark assets (the PVM's
+ * screen) vanished into a black room, and the game's own light tells the
+ * eye what an asset will read like in place. START exits to the menu. */
 static void asset_viewer_screen(void) {
     /* The hero backdrop painted ALL 256 CRAM entries with its own palette,
      * so every asset previewed here was decoding through the WRONG colors
@@ -929,35 +972,61 @@ static void asset_viewer_screen(void) {
      * job is showing assets as the game shows them. Handed back to the
      * hero palette on exit below. Index 0 stays black (backdrop). */
     raycast_set_brightness(FADE_STEPS);
+    raycast_backdrop_wall(1);                /* CRAM 0 = flat tuned wallpaper yellow */
     HwMdReadPad(0);
     uint16_t prev = MARS_SYS_COMM8;          /* seed: ignore the held commit button */
+    const int ink = 121;                     /* FRAME_BASE+4: brightest jamb brown —
+                                              * warm ink on the wallpaper backdrop */
     int sel = 3;                             /* start on CHAIR — the one with a 3D mesh */
-    int variant = 0;                         /* chair only: 0 hero MESH, 1 GAME boxes, 2 SPRITE */
+    int variant = 0;                         /* box models: 0 BOXES (live 3D), 1 SPRITE */
     uint8_t rotY = 32, rotX = 12;            /* engine angle units, 0..255 */
-    int zoom = 3;                            /* mesh views: screen scale notch */
+    int zscale = 126;                        /* mesh views: CONTINUOUS screen scale
+                                              * (was a 4-notch zoom; B+UP/DOWN glides it) */
+    int c_used = 0;                          /* C chord consumed a d-pad edge:
+                                              * suppress the tap-release reset */
     /* Sprite views: a live world quad (tex_tri, the neanderthal's path).
      * UP/DOWN glides the distance CONTINUOUSLY — smooth scaling through the
      * real rasterizer — LEFT/RIGHT yaws it (edge-on, cardboard back, LOD). */
     fx_t adist = FX(2.5);
-    int wire = 1;                            /* Z toggles; default ON — the filled
-                                              * 1,692-tri hero view crawls */
+    int wire = 0;                            /* C+UP/DOWN (or Z) toggles; box fills
+                                              * are cheap, so FILL is the default now
+                                              * that the hero tri-mesh is gone */
     for (;;) {
         HwMdReadPad(0);
         uint16_t pad = MARS_SYS_COMM8;
-        uint16_t pressed = (uint16_t)(pad & ~prev);
+        uint16_t pressed  = (uint16_t)(pad & ~prev);
+        uint16_t released = (uint16_t)(prev & ~pad);
         prev = pad;
-        if ((pad & SEGA_CTRL_MODE) && (pressed & SEGA_CTRL_START)) break;
-        /* Held D-pad = continuous independent rotation on both axes. */
-        if (pad & SEGA_CTRL_LEFT)  rotY = (uint8_t)(rotY - 2);
-        if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
-        if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
-        if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
+        /* Plain START exits. This was MODE+START, which no 3-button pad can
+         * press at all, and the field's flaky 6-button adapters drop MODE
+         * mid-hold (the pad_sticky latch exists because of them) — the
+         * viewer became a room with no door. Nothing else in here reads
+         * START, so the bare edge is safe. */
+        if (pressed & SEGA_CTRL_START) break;
+        /* CHORDED controls (Mike's scheme): B and C are HELD modifiers, so
+         * every viewer function reaches a 3-button pad — X/Z still work as
+         * one-tap shortcuts on pads that really have them.
+         *   B+UP/DOWN     smooth zoom (mesh scale / sprite distance)
+         *   B+LEFT/RIGHT  swap model type (what X does)
+         *   C+UP/DOWN     fill <-> wireframe (what Z does)
+         *   C tap         reset pose — fires on RELEASE, and only if the
+         *                 hold consumed no chord, so C+UP doesn't also snap
+         *                 the view home. */
+        int chord = pad & (SEGA_CTRL_B | SEGA_CTRL_C);
+        /* Held D-pad = continuous rotation — only while no chord is down. */
+        if (!chord) {
+            if (pad & SEGA_CTRL_LEFT)  rotY = (uint8_t)(rotY - 2);
+            if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
+            if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
+            if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
+        }
         /* Assets that own real 3D geometry: the chair (hand-authored boxes +
          * a baked hero mesh) and the DESK (imported GLB -> 3 boxes via
          * tools/bake_boxes.py). Everything else is sprite-only. */
         int model_id = (sel == CHAIR_ASSET_KIND) ? MODEL_CHAIR
-                     : (sel == DESK_ASSET_KIND)  ? MODEL_DESK : -1;
-        int mesh_shown = (model_id >= 0 && variant < 2);
+                     : (sel == DESK_ASSET_KIND)  ? MODEL_DESK
+                     : (sel == PVM_ASSET_KIND)   ? MODEL_PVM : -1;
+        int mesh_shown = (model_id >= 0 && variant == 0);
         if (pressed & SEGA_CTRL_A) {
             /* sprite_defs[] is kind-indexed and sparse — step over the null
              * padding rows or the viewer lands on an empty asset. */
@@ -967,29 +1036,43 @@ static void asset_viewer_screen(void) {
                 if (raycast_asset_valid(sel)) break;
             }
         }
-        if (pressed & SEGA_CTRL_B) {
-            if (mesh_shown) zoom = (zoom >= 5) ? 2 : zoom + 1;
+        if (pad & SEGA_CTRL_B) {
+            /* Smooth zoom, held: mesh views glide the screen scale, sprite
+             * views glide the world distance through the real rasterizer. */
+            if (mesh_shown) {
+                if (pad & SEGA_CTRL_UP)   { zscale += 3; if (zscale > 220) zscale = 220; }
+                if (pad & SEGA_CTRL_DOWN) { zscale -= 3; if (zscale < 50)  zscale = 50; }
+            } else {
+                if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
+                if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
+            }
+            if (pressed & SEGA_CTRL_RIGHT) variant = (variant + 1) % 2;
+            if (pressed & SEGA_CTRL_LEFT)  variant = (variant + 1) % 2;
         }
-        if (pressed & SEGA_CTRL_C) { rotY = 32; rotX = 12; adist = FX(2.5); }
-        if (pressed & SEGA_CTRL_X) variant = (variant + 1) % 3;
+        if (pressed & SEGA_CTRL_C) c_used = 0;             /* fresh hold */
+        if (pad & SEGA_CTRL_C) {
+            if (pressed & (SEGA_CTRL_UP | SEGA_CTRL_DOWN)) { wire ^= 1; c_used = 1; }
+        }
+        if ((released & SEGA_CTRL_C) && !c_used) { rotY = 32; rotX = 12; adist = FX(2.5); }
+        if (pressed & SEGA_CTRL_X) variant = (variant + 1) % 2;
         if (pressed & SEGA_CTRL_Z) wire ^= 1;
-        if (!mesh_shown) {                    /* held: glide the quad in/out */
-            if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
-            if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
-        }
         SHARED_UC->frame_count++;
 
         uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
         /* Clear with 32-bit stores: the 32X framebuffer IGNORES byte writes of
          * zero (hardware sprite-transparency quirk), so a fb[i]=0 byte loop
          * silently does nothing. Word writes always land — same trick as
-         * raycast_clear_half. Index 0 = true black in the gameplay palette. */
+         * raycast_clear_half. Index 0 is CRAM-painted the FLAT wallpaper
+         * yellow for the viewer's lifetime (raycast_backdrop_wall): filling
+         * with WALL_BASE itself strobed — the fluorescent shimmer rewrites
+         * that entry every frame, invisible on textured walls, a full-screen
+         * pulse on a flat fill. Index 0 nothing animates or draws. */
         {
             uint32_t *fb32 = (uint32_t *)fb;
             for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
         }
         if (mesh_shown)
-            raycast_model_view(fb, rotY, rotX, 60 + zoom * 22, variant, wire, model_id);
+            raycast_model_view(fb, rotY, rotX, zscale, variant, wire, model_id);
         else
             raycast_asset_preview(fb, sel, rotY, adist);
 
@@ -1005,8 +1088,8 @@ static void asset_viewer_screen(void) {
         if (h >= 100) line[p++] = (char)('0' + (h / 100) % 10);
         line[p++] = (char)('0' + (h / 10) % 10); line[p++] = (char)('0' + h % 10);
         line[p] = 0;
-        font_draw_string(fb, 8, 8, "ASSET VIEWER", 49);
-        font_draw_string(fb, 8, 22, line, 49);
+        font_draw_string(fb, 8, 8, "ASSET VIEWER", ink);
+        font_draw_string(fb, 8, 22, line, ink);
         p = 0;
         line[p++]='Y'; line[p++]=':';
         line[p++]=(char)('0'+(rotY/100)%10); line[p++]=(char)('0'+(rotY/10)%10); line[p++]=(char)('0'+rotY%10);
@@ -1014,7 +1097,10 @@ static void asset_viewer_screen(void) {
         line[p++]=(char)('0'+(rotX/100)%10); line[p++]=(char)('0'+(rotX/10)%10); line[p++]=(char)('0'+rotX%10);
         line[p++]=' ';
         if (mesh_shown) {
-            line[p++]='Z'; line[p++]=':'; line[p++]=(char)('0'+zoom);
+            line[p++]='Z'; line[p++]=':';
+            line[p++]=(char)('0'+(zscale/100)%10);
+            line[p++]=(char)('0'+(zscale/10)%10);
+            line[p++]=(char)('0'+zscale%10);
         } else {                              /* live distance in cells, one decimal */
             int d10 = (int)(((int64_t)adist * 10) >> FX_SHIFT);
             line[p++]='D'; line[p++]=':';
@@ -1023,16 +1109,14 @@ static void asset_viewer_screen(void) {
             line[p++]=(char)('0' + d10 % 10);
         }
         line[p]=0;
-        font_draw_string(fb, 8, 36, line, 49);
+        font_draw_string(fb, 8, 36, line, ink);
         if (model_id >= 0) {
-            /* An imported model has no hero tri-mesh, so variants 0/1 both show
-             * its boxes — label them BOXES rather than lying about a MESH. */
-            static const char *const vnames[3]  = { "MESH",  "GAME", "SPRITE" };
-            static const char *const vimport[3] = { "BOXES", "BOXES", "SPRITE" };
-            const char *const *vn = (model_id == MODEL_CHAIR) ? vnames : vimport;
-            font_draw_string(fb, 8, 50, vn[variant], 49);
-            if (variant < 2)
-                font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", 49);
+            /* Two variants since the hero tri-mesh left the build: the live
+             * box render (what the game draws up close) and the baked sprite. */
+            static const char *const vnames[2] = { "BOXES", "SPRITE" };
+            font_draw_string(fb, 8, 50, vnames[variant], ink);
+            if (variant == 0)
+                font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", ink);
         }
         /* SPRITE view of a directional asset: report which baked frame the
          * bearing picker landed on, so rotating can be checked to reach every
@@ -1046,13 +1130,18 @@ static void asset_viewer_screen(void) {
                 t[q++]='/';
                 t[q++]=(char)('0' + nv / 10); t[q++]=(char)('0' + nv % 10);
                 t[q]=0;
-                font_draw_string(fb, 8, 50, t, 49);
+                font_draw_string(fb, 8, 50, t, ink);
             }
         }
-        font_draw_string(fb, 8, SCREEN_H - 24, "DPAD ROTATE  A ASSET  B ZOOM  C RESET", 49);
-        font_draw_string(fb, 8, SCREEN_H - 12, "X VARIANT  Z WIRE  MODE+START BACK", 49);
+        font_draw_string(fb, 8, SCREEN_H - 24, "DPAD ROTATE  A ASSET  START BACK", ink);
+        font_draw_string(fb, 8, SCREEN_H - 12, "B+UD ZOOM B+LR TYPE C+UD WIRE C RESET", ink);
         swapBuffers();
     }
+    /* Drain the exiting START press: the caller reads its own pad edges,
+     * and a still-held START on return would register there as a fresh
+     * press and immediately re-open a menu over the screen we exited to. */
+    do { HwMdReadPad(0); } while (MARS_SYS_COMM8 & SEGA_CTRL_START);
+    raycast_backdrop_wall(0);                /* CRAM 0 back to true black */
     /* Restore the palette of the screen we RETURN to: the start menu draws
      * over the LIVE LOBBY render (raycast_render, the "stationary lobby
      * view"), so it needs the full gameplay palette back — the same one we
@@ -1096,7 +1185,11 @@ static void portal_to_procgen(void) {
      * tunnel-view to falling in the same scene, full brightness. Door
      * portals keep the plain dissolve. */
     if (!g_arrive_drop) {
-        for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+        /* FAST dissolve (was -= 2, nine frames each way: the door dragged
+         * next to the tunnel crawl's zero-blackout cut). Three steps down,
+         * endpoint pinned; the fade-in below mirrors it. */
+        for (int lvl = FADE_STEPS - 6; lvl > 0; lvl -= 6) fade_step(lvl);
+        fade_step(0);
     }
     if (g_next_seed_set) { g_procgen_seed = g_next_seed; g_next_seed_set = 0; }
     else g_procgen_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
@@ -1118,7 +1211,8 @@ static void portal_to_procgen(void) {
          * the player up from here, floor-glance and all. */
     } else {
         raycast_set_brightness(0);      /* held black until the fade-in */
-        for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+        for (int lvl = 6; lvl < FADE_STEPS; lvl += 6) fade_step(lvl);
+        fade_step(FADE_STEPS);
     }
 }
 
@@ -1170,11 +1264,13 @@ static void corridor_enter(void) {
  * hatch when the player gets stuck or is done with a map. */
 static void portal_to_custom(int idx) {
     g_custom_current = idx;
-    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) fade_step(lvl);
+    for (int lvl = FADE_STEPS - 6; lvl > 0; lvl -= 6) fade_step(lvl);
+    fade_step(0);
     raycast_load_custom(idx);
     raycast_init();
     raycast_set_brightness(0);
-    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) fade_step(lvl);
+    for (int lvl = 6; lvl < FADE_STEPS; lvl += 6) fade_step(lvl);
+    fade_step(FADE_STEPS);
 }
 
 int m_main(void) {
@@ -1697,18 +1793,13 @@ int m_main(void) {
 
     /* Walk-through transition: fade the lobby to black, swap in the chosen
      * map behind the black, fade it up — reads as the lobby sealing off
-     * and the backrooms opening ahead. (Own vblank flip so it bypasses
-     * raycast_shimmer, which would reset the bright palette mid-fade.) */
-    for (int lvl = FADE_STEPS; lvl >= 0; lvl -= 2) {
-        SHARED_UC->frame_count++;
-        raycast_render();
-        while (lastTick == MARS_SYS_COMM12);
-        raycast_set_brightness(lvl);
-        MARS_VDP_FBCTL = currentFB ^ 1;
-        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
-        currentFB ^= 1;
-        lastTick = MARS_SYS_COMM12;
-    }
+     * and the backrooms opening ahead. These two loops predated fade_step
+     * and open-coded its body — which also meant they missed the MD-layer
+     * fade (HUD red burned through this transition on a CRT). Now they ARE
+     * fade_step, at the fast cadence every portal uses (Mike: the map-pick
+     * fade dragged; ~2x faster). */
+    for (int lvl = FADE_STEPS - 6; lvl > 0; lvl -= 6) fade_step(lvl);
+    fade_step(0);
 
     if (items[cur].kind == IT_PROC) {
         g_custom_current = -1;
@@ -1725,16 +1816,8 @@ int m_main(void) {
     raycast_init();                 /* rebuilds full-bright palette... */
     raycast_set_brightness(0);      /* ...but hold black until the fade-in */
 
-    for (int lvl = 0; lvl <= FADE_STEPS; lvl += 2) {
-        SHARED_UC->frame_count++;
-        raycast_render();
-        while (lastTick == MARS_SYS_COMM12);
-        raycast_set_brightness(lvl);
-        MARS_VDP_FBCTL = currentFB ^ 1;
-        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
-        currentFB ^= 1;
-        lastTick = MARS_SYS_COMM12;
-    }
+    for (int lvl = 6; lvl < FADE_STEPS; lvl += 6) fade_step(lvl);
+    fade_step(FADE_STEPS);
 
     for (;;) {
         /* Read the joypad up-front so the menu can both react to
@@ -1819,6 +1902,13 @@ int m_main(void) {
                     && !(pad & (SEGA_CTRL_MODE | SEGA_CTRL_B))
                     && (fresh & (SEGA_CTRL_A | SEGA_CTRL_UP)))
                     climb_commit();
+                /* Same interaction button, next customer: a fresh A in reach
+                 * of a PVM toggles its power (screen static on/off). Gated
+                 * exactly like the climb so A+B crouch and MODE combos never
+                 * flip a set. */
+                else if (!(pad & (SEGA_CTRL_MODE | SEGA_CTRL_B))
+                         && (fresh & SEGA_CTRL_A))
+                    raycast_pvm_use();
             }
             }
         }

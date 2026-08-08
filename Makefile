@@ -99,6 +99,14 @@ SHOBJS += $(SHCS:.c=.o)
 SHOBJS += sh_src/custom_maps.o
 SHOBJS += $(SHCPPS:.cpp=.o)
 
+# Speex narrowband decoder strip (third-party, sh_src/speex/): UNLINKED.
+# The port works (host-verified, played on hardware) but one 20 ms frame
+# cost ~8 ms to decode on the cache-starved SH-2 (DT:1416, B00253) — the
+# hello ships as IMA ADPCM instead (sound.c). Sources stay as reference;
+# uncomment these two lines (and the rules below) to relink it.
+# SPXCS   = $(wildcard sh_src/speex/*.c)
+# SHOBJS += $(SPXCS:.c=.o)
+
 .PHONY: all release debug deploy deploy-tv publish lint community author FORCE
 
 # Override on command line: make deploy MISTER=root@othermister.local
@@ -222,6 +230,26 @@ $(ROMDIR):
 sh_src/md_start.bin: $(MDTARGET).bin
 	@cp $< $@
 sh_src/mars_start.o: sh_src/md_start.bin
+
+# Speex rule MUST precede the generic sh_src/%.o rules: GNU make 3.81
+# resolves pattern-rule collisions by definition order (shortest-stem
+# came in 3.82), and macOS ships 3.81. Speex objects get config.h via
+# -DHAVE_CONFIG_H, the freestanding shim headers via -Ish_src/speex,
+# and -w (upstream code, not held to the project warning bar).
+sh_src/speex/%.o: sh_src/speex/%.c
+	@echo "SHCC $<"
+	@$(SHCC) $(SHCCFLAGS) $(SHEXTRA) $(SHINCS) -w -DHAVE_CONFIG_H -Ish_src/speex -MMD -MP -c $< -o $@
+
+# libmem defines memcpy/memmove/memset for the -nostdlib link (gcc emits
+# builtin mem* calls late). It must be a REAL object, not LTO bytecode:
+# whole-program analysis discards "unused" IR definitions before those
+# calls appear, leaving them unresolvable. -fno-builtin also stops gcc
+# rewriting the byte loops into calls to the very functions they
+# implement. (The unlinked speex glue needs the same treatment if the
+# strip is ever relinked.)
+sh_src/libmem.o: sh_src/libmem.c
+	@echo "SHCC $< (no-lto)"
+	@$(SHCC) $(SHCCFLAGS) $(SHEXTRA) $(SHINCS) -fno-lto -fno-builtin -MMD -MP -c $< -o $@
 
 sh_src/%.o: sh_src/%.s
 	@echo "SHAS $<"
