@@ -57,6 +57,8 @@ volatile int g_warp_request = -1;
 volatile int g_viewer_request = 0, g_lobby_request = 0;
 /* TESTING>SMSBOOT: hand the screen to the Master System spike. */
 volatile int g_sms_request = 0;
+/* TESTING>SMSGAME: the SMS mini-game on the CURRENT level's map. */
+volatile int g_smsgame_request = 0;
 
 /* GAME-tab automap hooks (menu.c): the same state the MODE+B combo and the
  * MODE+UP/DOWN zoom drive, reachable without MODE -- full parity for
@@ -1034,6 +1036,75 @@ static void sms_boot_screen(void) {
     raycast_set_brightness(FADE_STEPS);      /* 32X CRAM untouched, but belt */
 }
 
+/* ---- SMS mini-game screen ----------------------------------------------
+ * ESCAPE THE BACKROOMS, running on the Master System's CPU, on THIS level's
+ * map. The "ROM patching system" in one breath: the Z80 game blob compiled
+ * into the 32X ROM has a 132-byte hole at a fixed address; we pack the live
+ * world_map to 1bpp (a bit per cell — by now procgen vs curated is just
+ * bytes), append the player's current cell as spawn and the level's exit
+ * cell as goal, stream it over COMM, and the 68K writes it into the hole
+ * right after the code copy. The Master System wakes up inside the level
+ * you were just standing in. Overhead view, boot-font tiles, D-pad to move,
+ * step into the door to escape. START exits any time (and is the prompt on
+ * the YOU ESCAPED screen — the SH-2 owns that exit path, so no Z80 state
+ * can trap the player). */
+static void sms_game_screen(void) {
+    uint16_t saved_mode = MARS_VDP_DISPMODE;
+    unsigned char pack[132];
+    for (int i = 0; i < 132; i++) pack[i] = 0;
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++)
+            if (world_map[y][x] != 0)
+                pack[y * 4 + (x >> 3)] |= (unsigned char)(0x80 >> (x & 7));
+    int sx = FX_INT(player.x), sy = FX_INT(player.y);
+    if (sx < 0) sx = 0; if (sx > MAP_W - 1) sx = MAP_W - 1;
+    if (sy < 0) sy = 0; if (sy > MAP_H - 1) sy = MAP_H - 1;
+    int ex, ey;
+    if (!raycast_exit_cell(&ex, &ey)) {
+        /* No exit on this map (the lobby): farthest open cell wins. Not a
+         * pathfind — the fun here is proving the pipe, not the puzzle. */
+        int best = -1; ex = sx; ey = sy;
+        for (int y = 0; y < MAP_H; y++)
+            for (int x = 0; x < MAP_W; x++) {
+                if (world_map[y][x] != 0) continue;
+                int dx = x > sx ? x - sx : sx - x;
+                int dy = y > sy ? y - sy : sy - y;
+                if (dx + dy > best) { best = dx + dy; ex = x; ey = y; }
+            }
+    }
+    pack[128] = (unsigned char)sx;
+    pack[129] = (unsigned char)sy;
+    pack[130] = (unsigned char)ex;
+    pack[131] = (unsigned char)ey;
+    /* Black BOTH 32X buffers (word stores — the FB drops zero BYTE writes)
+     * so the Master System's tiles overlay a black room, the compositing
+     * the diag spike proved. */
+    for (int b = 0; b < 2; b++) {
+        uint32_t *fb32 = (uint32_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
+        swapBuffers();
+    }
+    HwMdSmsGameMap(pack);
+    HwMdSmsGameBoot();
+    /* Wait for START. No timeout: this is a game, not a diagnostic — and
+     * the exit runs entirely on this CPU, so no Z80 wedge can eat it. */
+    uint16_t prev = MARS_SYS_COMM8;
+    for (;;) {
+        uint16_t pad = MARS_SYS_COMM8;
+        uint16_t pressed = (uint16_t)(pad & ~prev);
+        prev = pad;
+        if (pressed & SEGA_CTRL_START) break;
+        Hw32xDelay(1);
+    }
+    HwMdSmsGameStop();
+    {   /* bounded START drain — a stuck bit must not hold the exit */
+        uint32_t guard = 1000000;
+        while ((MARS_SYS_COMM8 & SEGA_CTRL_START) && --guard) ;
+    }
+    MARS_VDP_DISPMODE = saved_mode;
+    raycast_set_brightness(FADE_STEPS);
+}
+
 /* ---- Asset viewer screen (start menu) --------------------------------
  * Dedicated screen for inspecting assets WITHOUT loading a level: the
  * chair renders as the live clustered 3D mesh, free-rotated on both axes
@@ -1915,6 +1986,10 @@ int m_main(void) {
         if (g_sms_request) {
             g_sms_request = 0;
             sms_boot_screen();
+        }
+        if (g_smsgame_request) {
+            g_smsgame_request = 0;
+            sms_game_screen();
         }
         if (g_viewer_request) {
             g_viewer_request = 0;

@@ -1979,6 +1979,32 @@ int raycast_exit_path_cell(int x, int y) {
     return (int)((exit_path_bits[y] >> x) & 1u);
 }
 
+/* The cell the SMS mini-game's player must step into to escape, covering all
+ * three exit flavors: the procgen door's wall cell (walking INTO the door is
+ * the win — it stays a wall bit in the packed map, so the game checks exit
+ * before wall), the exit hole's open approach cell, or an authored map's door
+ * decal wall cell. 0 = this level has no exit (the lobby). */
+int raycast_exit_cell(int *cx, int *cy) {
+    if (g_exit_wall_cx >= 0) { *cx = g_exit_wall_cx; *cy = g_exit_wall_cy; return 1; }
+    if (g_exit_hole_cx >= 0) { *cx = g_exit_hole_ax; *cy = g_exit_hole_ay; return 1; }
+    for (int d = 0; d < num_decals; d++) {
+        if (decals[d].kind != 1) continue;
+        int px_ = FX_INT(decals[d].x), py_ = FX_INT(decals[d].y);
+        int qx = px_, qy = py_;
+        if (decals[d].axis) { py_ = FX_INT(decals[d].y - (FX_ONE >> 1));
+                              qy  = FX_INT(decals[d].y + (FX_ONE >> 1)); }
+        else                { px_ = FX_INT(decals[d].x - (FX_ONE >> 1));
+                              qx  = FX_INT(decals[d].x + (FX_ONE >> 1)); }
+        /* the WALL side of the decal plane is the target cell */
+        if ((unsigned)px_ < MAP_W && (unsigned)py_ < MAP_H &&
+            world_map[py_][px_] == 0) { *cx = qx; *cy = qy; }
+        else                          { *cx = px_; *cy = py_; }
+        if ((unsigned)*cx < MAP_W && (unsigned)*cy < MAP_H) return 1;
+        break;
+    }
+    return 0;
+}
+
 /* ── EXIT TELEGRAPH ─────────────────────────────────────────────────────
  * Every powered PVM can show a tiny POV frame captured FROM the level's
  * exit, looking back down the way a player would approach — the monitors

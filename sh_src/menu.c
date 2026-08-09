@@ -32,6 +32,7 @@ extern volatile int g_warp_request;
  * utility reachable from START on any pad, MODE combos stay optional. */
 extern volatile int g_viewer_request, g_lobby_request;
 extern volatile int g_sms_request;
+extern volatile int g_smsgame_request;
 uint8_t m_main_automap_get(void);
 void    m_main_automap_cycle(int dir);
 void    m_main_automap_zoom(int dir);
@@ -58,7 +59,7 @@ void    m_main_automap_zoom(int dir);
 #define AUDIO_CONTENT_ROWS    5   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE, HELLO */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
-#define TESTING_CONTENT_ROWS  8   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, SMSBOOT */
+#define TESTING_CONTENT_ROWS  9   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, SMSBOOT, SMSGAME */
 #define COLOR_CONTENT_ROWS    6   /* SURFACE, R, G, B, WARMTH, SAT */
 #define CREDITS_CONTENT_ROWS  0   /* read-only display, no selection cursor */
 #define CREDITS_DRAWN_ROWS    4   /* MAP / BY / BUILD / DATE lines it paints */
@@ -86,11 +87,12 @@ static int res_cat_of(int m) {
  * screen, wide enough for the "LIGHTING |CREDITS|" tab row and tall
  * enough for the LIGHTING tab's three toggle rows. */
 #define MENU_W_PX      176
-#define MENU_H_PX      128   /* 8 content rows (TESTING grew to 8) + footer. MUST
-                              * be a multiple of 16 so MENU_Y stays 8-aligned — else
-                              * the tile-layer text and the pixel-drawn highlight bar
-                              * diverge 4px. Was 112/6 rows; SMSBOOT overflowed into
-                              * the footer's row (Mike's screenshot, 2026-08-09). */
+#define MENU_H_PX      144   /* 9 content rows (TESTING grew again: SMSGAME) +
+                              * footer. MUST be a multiple of 16 so MENU_Y stays
+                              * 8-aligned — else the tile-layer text and the
+                              * pixel-drawn highlight bar diverge 4px. Was 112/6
+                              * rows; SMSBOOT overflowed into the footer's row
+                              * (Mike's screenshot, 2026-08-09), then 128/8. */
 #define MENU_X        ((SCREEN_W - MENU_W_PX) / 2)
 #define MENU_Y        ((SCREEN_H - MENU_H_PX) / 2)
 
@@ -209,11 +211,12 @@ void menu_update(uint16_t pad) {
     }
 
     /* COLOR tab: A resets the whole palette to the shipped defaults. */
-    if (menu_tab == TAB_TESTING && menu_row == 8 && (pressed & SEGA_CTRL_A)) {
-        /* SMSBOOT is an ACTION, not a toggle — it must fire on A like the
-         * GAME/MAPS rows do. (It also fires on LEFT/RIGHT via the dispatch
-         * below, but nobody's thumb believes that for a row that says GO.) */
-        g_sms_request = 1;
+    if (menu_tab == TAB_TESTING && menu_row >= 8 && (pressed & SEGA_CTRL_A)) {
+        /* SMSBOOT/SMSGAME are ACTIONS, not toggles — they must fire on A
+         * like the GAME/MAPS rows do. (They also fire on LEFT/RIGHT via the
+         * dispatch below, but nobody's thumb believes that for a GO row.) */
+        if (menu_row == 8) g_sms_request = 1;
+        else               g_smsgame_request = 1;
         menu_active = 0;
         menu_genesis_blank();
         return;
@@ -325,6 +328,11 @@ void menu_update(uint16_t pad) {
             menu_active = 0;
             menu_genesis_blank();
         }
+        else if (menu_row == 9) {                            /* the mini-game */
+            g_smsgame_request = 1;
+            menu_active = 0;
+            menu_genesis_blank();
+        }
     } else if (menu_tab == TAB_COLOR) {
         /* Live palette lab. Row 1 picks a surface; 2-4 nudge its R/G/B anchor;
          * 5-6 are the global WARMTH/SAT masters. Every change flags the palette
@@ -418,8 +426,8 @@ void menu_render(uint8_t *fb) {
     /* Top + bottom rule. Every write below is full-width and overwrites its row
      * in place, so no blank pass is needed on a change — that blank-then-redraw
      * was the per-move flash. (The close path still blanks to clear the menu.) */
-    menu_puts_pad(TX(X), 0,  "+--------------------+", 22);
-    menu_puts_pad(TX(X), 96, "+--------------------+", 22);
+    menu_puts_pad(TX(X), 0,   "+--------------------+", 22);
+    menu_puts_pad(TX(X), 104, "+--------------------+", 22);
 
     /* Tab row at y=16: the > cursor points at the active tab, with the next
      * tab in the cycle shown after a pipe separator — e.g. "> AUDIO |
@@ -514,6 +522,7 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 72, menu_row == 6, "AUTOQTR", SHARED_UC->auto_qtr ? " ON" : "OFF");
         draw_row(fb, 80, menu_row == 7, "UNLITF", SHARED_UC->unlit_kill ? "OFF" : " ON");
         draw_row(fb, 88, menu_row == 8, "SMSBOOT", "GO");
+        draw_row(fb, 96, menu_row == 9, "SMSGAME", "GO");
     } else if (menu_tab == TAB_COLOR) {
         char v[6];
         draw_row(fb, 32, menu_row == 1, "SURFACE", pal_surf_names[pal_sel]);
@@ -580,11 +589,11 @@ void menu_render(uint8_t *fb) {
     for (int r = used + 1; r <= TESTING_CONTENT_ROWS; r++)
         menu_puts_pad(TX(X + 8), 32 + (r - 1) * 8, "", 20);
 
-    /* Hint row below all content (box is 128px, 8 rows). */
+    /* Hint row below all content (box is 144px, 9 rows). */
     const char *hint = "START TO CLOSE";
     if      (menu_tab == TAB_GAME)  hint = "A=SELECT START=CLOSE";
     else if (menu_tab == TAB_MAPS)  hint = "A=GO  START=CLOSE";
     else if (menu_tab == TAB_COLOR) hint = "A=RESET  START=CLOSE";
     else if (menu_tab == TAB_TESTING) hint = "A=RUN  START=CLOSE";
-    menu_puts_pad(TX(X + 8), 104, hint, 20);
+    menu_puts_pad(TX(X + 8), 112, hint, 20);
 }

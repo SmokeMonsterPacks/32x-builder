@@ -2,3 +2,6 @@ hello.o
 hello.sms
 linkfile
 font_1bpp.bin
+game.o
+game.bin
+game.linkfile

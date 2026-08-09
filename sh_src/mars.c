@@ -232,6 +232,33 @@ void HwMdSmsStop(void) {
 	while (MARS_SYS_COMM0 && --guard) ;
 }
 
+void HwMdSmsGameMap(const unsigned char *packed) {
+	/* Stream the 132-byte level patch (1bpp world_map + spawn + exit) as
+	 * 66 indexed words. Each word is stateless (index rides in the command
+	 * low byte), so the protocol has no cursor to shear. */
+	for (int i = 0; i < 66; i++) {
+		while (MARS_SYS_COMM0) ;
+		MARS_SYS_COMM2 = (unsigned short)((packed[i * 2] << 8) | packed[i * 2 + 1]);
+		MARS_SYS_COMM0 = (unsigned short)(0x0B00 | i);
+	}
+	while (MARS_SYS_COMM0) ;
+}
+
+void HwMdSmsGameBoot(void) {
+	while (MARS_SYS_COMM0) ;
+	MARS_SYS_COMM0 = 0x0C00; // upload mini-game, patch map in, run the Z80
+	while (MARS_SYS_COMM0) ;
+}
+
+void HwMdSmsGameStop(void) {
+	/* BOUNDED like HwMdSmsStop — no COMM handshake may hold the exit. */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM0 = 0x0D00;
+	guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+}
+
 void HwMdSetColor(unsigned short index, unsigned short color) {
 	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
 	MARS_SYS_COMM2 = color;

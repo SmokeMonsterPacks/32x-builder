@@ -1,5 +1,6 @@
 #include "common.h"
 #include "z80_sms_hello.h"
+#include "z80_sms_game.h"
 
 // 32X COMM
 static volatile uint16_t* const mars_comm0  = (uint16_t*) MARS_COMM0;
@@ -23,6 +24,15 @@ uint16_t vramOffset = 0;
 // BEFORE the pad-publish lines and the player can't exit (COMM8 freezes).
 // While set, the loop paces on a crude delay instead and keeps serving.
 static uint8_t sms_active = 0;
+
+// SMS mini-game bridge state. The staged map is the "ROM patch": the SH-2
+// streams the live level (132 bytes: 1bpp world_map + spawn + exit) into
+// sms_game_map via command 0x0B words, and the game-boot command writes it
+// into the Z80 blob's MAP region after the code copy — the Master System
+// program wakes up already holding whatever map the player was standing in.
+static uint8_t sms_game_on = 0;
+static uint8_t sms_game_map[Z80_GAME_MAP_LEN];
+static uint8_t sms_game_tiles[Z80_GAME_TILEBUF_LEN];
 
 // It is recommended to put functions that run 1+ times every frame into RAM
 // by specifying this attribute before the signature. This keeps the M68K off
@@ -153,8 +163,108 @@ void do_commands(void) {
 		                                   // requested left the machine odd
 		break;
 	}
+	case 11: { // SMS GAME MAP: stage one word of the level patch (index in
+		// the command's low byte, 0..65). Stateless per word, so a dropped
+		// or repeated command can't shear the whole map.
+		uint16_t idx = cmd & 0xFF;
+		if (idx < Z80_GAME_MAP_LEN / 2) {
+			uint16_t w = *mars_comm2;
+			sms_game_map[idx * 2]     = (uint8_t)(w >> 8);
+			sms_game_map[idx * 2 + 1] = (uint8_t)w;
+		}
+		break;
+	}
+	case 12: { // SMS GAME BOOT: upload the mini-game, patch the staged map
+		// in, and — unlike the diag spike, whose payload is vestigial in
+		// the mode-5 design — actually RUN the Z80. It is the game CPU.
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
+		volatile uint8_t  *zram   = (uint8_t *)0xA00000;
+		// Sweep the visible plane rows first so the playfield starts clean
+		// (menu/HUD tiles persist otherwise). Name-table writes only — the
+		// font in VRAM is never touched (grey-menus law).
+		for (uint16_t row = 0; row < 28; row++) {
+			uint32_t ofs = (row * 64u * 2u) + 0xE000;
+			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+			               | ((ofs >> 14) | 0x03);
+			for (uint16_t i = 0; i < 40; i++)
+				*vdp_data_port = 0;
+		}
+		// ORDER IS LAW (see the SMS BOOT case): release reset BEFORE the
+		// bus request or the grant never comes.
+		*reset = 0x100;
+		*busreq = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		for (uint16_t i = 0; i < Z80_GAME_LEN; i++)
+			zram[i] = z80_sms_game[i];
+		for (uint16_t i = 0; i < Z80_GAME_MAP_LEN; i++)
+			zram[Z80_GAME_MAP_BITS + i] = sms_game_map[i];
+		zram[Z80_GAME_PAD_MBX]   = 0;      // mailboxes live OUTSIDE the
+		zram[Z80_GAME_DIRTY_MBX] = 0;      // payload and uninit Z80 RAM
+		zram[Z80_GAME_STATE_MBX] = 0;      // boots 0xFF (the phantom-
+		zram[Z80_GAME_FRAME_MBX] = 0;      // mailbox-command lesson)
+		zram[Z80_GAME_HEART]     = 0;
+		*reset = 0x000;                    // reset pulse while we own the bus
+		for (volatile uint16_t d = 0; d < 64; d++) ;   // let it latch
+		*busreq = 0x000;                   // hand the bus back...
+		*reset = 0x100;                    // ...and let the Z80 run from $0000
+		sms_game_on = 1;
+		break;
+	}
+	case 13: { // SMS GAME STOP: park the Z80, sweep the playfield rows.
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
+		sms_game_on = 0;
+		*busreq = 0x100;                   // bounded — see SMS STOP
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		*reset = 0x000;
+		*busreq = 0x000;
+		for (uint16_t row = 2; row < 26; row++) {
+			uint32_t ofs = ((row * 64u + 4u) * 2u) + 0xE000;
+			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+			               | ((ofs >> 14) | 0x03);
+			for (uint16_t i = 0; i < 32; i++)
+				*vdp_data_port = 0;
+		}
+		break;
+	}
 	}
 	*mars_comm0 = 0;
+}
+
+// One 68K frame of the SMS mini-game duet: under a brief bus request, hand
+// the Z80 the pad byte and a frame tick; if it flagged a fresh frame, pull
+// TILEBUF out and blit it to the text layer (rows 2..25, cols 4..35 — the
+// 32-wide field centered in the 40-column plane). The Z80 never touches the
+// VDP; the 68K never touches game state. The bus pause is a few dozen
+// microseconds — the same trick every sound driver on the platform uses.
+__attribute__((section(".data")))
+static void sms_game_frame(void) {
+	volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+	volatile uint8_t  *zram   = (uint8_t *)0xA00000;
+	uint8_t pad = (uint8_t)*mars_comm8;    // U1 D2 L4 R8 B10 C20 A40 ST80
+	uint8_t dirty;
+	*busreq = 0x100;
+	{ uint32_t g = 100000; while ((*busreq & 0x100) && --g) ; }
+	zram[Z80_GAME_PAD_MBX] = pad;
+	zram[Z80_GAME_FRAME_MBX] = (uint8_t)(zram[Z80_GAME_FRAME_MBX] + 1);
+	dirty = zram[Z80_GAME_DIRTY_MBX];
+	if (dirty) {
+		for (uint16_t i = 0; i < Z80_GAME_TILEBUF_LEN; i++)
+			sms_game_tiles[i] = zram[Z80_GAME_TILEBUF + i];
+		zram[Z80_GAME_DIRTY_MBX] = 0;
+	}
+	*busreq = 0x000;
+	if (dirty) {
+		const uint8_t *t = sms_game_tiles;
+		for (uint16_t row = 0; row < Z80_GAME_TILEBUF_ROWS; row++) {
+			uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
+			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+			               | ((ofs >> 14) | 0x03);
+			for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++)
+				*vdp_data_port = *t++;
+		}
+	}
 }
 
 // Sticky six-button latch. read_joypad returns bit 0x1000 set when the pad
@@ -203,5 +313,6 @@ void main(void) {
 		*mars_comm8  = pad_sticky(0, read_joypad(0));
 		*mars_comm10 = pad_sticky(1, read_joypad(1));
 		*mars_comm12 = ++timer;
+		if (sms_game_on) sms_game_frame();
 	}
 }

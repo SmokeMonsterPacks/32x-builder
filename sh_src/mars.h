@@ -171,6 +171,9 @@ extern void HwMdClearScreen(void);
 extern void HwMdSetColor(unsigned short index, unsigned short color);
 extern void HwMdSmsBoot(void);
 extern void HwMdSmsStop(void);
+extern void HwMdSmsGameMap(const unsigned char *packed);   /* 132B level patch */
+extern void HwMdSmsGameBoot(void);
+extern void HwMdSmsGameStop(void);
 extern void HwMdSetOffset(unsigned short offset);
 extern void HwMdSetNTable(unsigned short word);
 extern void HwMdSetVram(unsigned short word);

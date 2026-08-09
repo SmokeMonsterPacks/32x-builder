@@ -216,6 +216,9 @@ int  raycast_standup_in_cell(int cx, int cy);  /* procgen spawn-overlap guard */
 int  raycast_exit_path_cell(int x, int y);     /* protected spawn->exit corridor:
                                                 * placers must keep these cells
                                                 * traversable (exit solvability) */
+int  raycast_exit_cell(int *cx, int *cy);      /* the win cell for the SMS mini-
+                                                * game (door wall cell / hole
+                                                * approach); 0 = no exit here */
 void raycast_add_dark_room(int x0, int y0, int x1, int y1);
 
 #endif
