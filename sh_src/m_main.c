@@ -55,6 +55,8 @@ volatile int g_warp_request = -1;
  * asset viewer over the paused game; LOBBY breaks the game loop back to the
  * start list (the "exit to main menu" that used to need a console reset). */
 volatile int g_viewer_request = 0, g_lobby_request = 0;
+/* TESTING>SMSBOOT: hand the screen to the Master System spike. */
+volatile int g_sms_request = 0;
 
 /* GAME-tab automap hooks (menu.c): the same state the MODE+B combo and the
  * MODE+UP/DOWN zoom drive, reachable without MODE -- full parity for
@@ -956,6 +958,82 @@ static void show_controls_screen(void) {
     }
 }
 
+/* ---- SMS boot screen ---------------------------------------------------
+ * The Master System spike, v1: blank the 32X layer so the Genesis VDP owns
+ * the glass, ask the 68K to upload the Z80 hello and drop the VDP into SMS
+ * mode 4, then wait. What you should see: the whole screen pulsing through
+ * the SMS palette — a real Z80 executing SMS-family code against a VDP in
+ * SMS mode, inside a running 32X game. START hands the world back. */
+static void sms_boot_screen(void) {
+    uint16_t saved_mode = MARS_VDP_DISPMODE;
+    /* PROVEN COMPOSITING ONLY (v5b): the one arm that ever showed mode-4
+     * tiles kept the 32X layer ON with MD pixels overlaying it — exactly
+     * how the HUD text rides the game. So no MODE_OFF gamble: paint the
+     * 32X frame BLACK (word stores — the FB drops zero BYTE writes) and
+     * let the Master System's white glyphs overlay a black room. */
+    {
+        uint32_t *fb32 = (uint32_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
+    }
+    swapBuffers();     /* fill lands on the DRAW side — flip it to the glass */
+    HwMdSmsBoot();
+    /* SELF-INSTRUMENTING WAIT (v5d): the SH-2 redraws its layer each flip —
+     * black field, COMM8's 16 bits as blocks top-left (live pad telemetry:
+     * if they never change while buttons are held, the 68K stopped
+     * publishing — the screenshot itself names the broken link), and a
+     * walking heartbeat pixel row proving THIS loop is alive. A 15-second
+     * timeout exits unconditionally: no CPU state can trap the player. */
+    uint16_t prev = MARS_SYS_COMM8;
+    uint32_t beats = 0;
+    for (;;) {
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        {
+            uint32_t *fb32 = (uint32_t *)fb;
+            for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
+        }
+        uint16_t pad = MARS_SYS_COMM8;
+        for (int b = 0; b < 16; b++) {          /* bit blocks, MSB first */
+            uint8_t c = (pad & (0x8000 >> b)) ? 49 : 46;
+            for (int y = 4; y < 10; y++)
+                for (int x = 0; x < 6; x++)
+                    fb[(y) * SCREEN_W + 8 + b * 8 + x] = c;
+        }
+        fb[12 * SCREEN_W + 8 + (beats & 127)] = 49;   /* walking heartbeat */
+        MARS_VDP_FBCTL = currentFB ^ 1;
+        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+        currentFB ^= 1;
+        uint16_t pressed = (uint16_t)(pad & ~prev);
+        prev = pad;
+        if (pressed & SEGA_CTRL_START) break;
+        if (++beats > 60u * 15u) break;         /* the escape no bug can eat */
+    }
+    /* STAGE BEACONS: a short colored bar appears at the top-left as each
+     * teardown stage completes. If the screen freezes, the bar count in
+     * the screenshot names the stage that hung: 1 bar = left the wait
+     * loop, 2 = HwMdSmsStop returned, 3 = START drained. */
+    {
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        for (int x = 0; x < 12; x++) fb[2 * SCREEN_W + 8 + x] = 49;
+    }
+    {
+        HwMdSmsStop();
+    }
+    {
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        for (int x = 0; x < 12; x++) fb[2 * SCREEN_W + 24 + x] = 49;
+    }
+    {   /* bounded START drain — a stuck bit must not hold the exit */
+        uint32_t guard = 1000000;
+        while ((MARS_SYS_COMM8 & SEGA_CTRL_START) && --guard) ;
+    }
+    {
+        uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+        for (int x = 0; x < 12; x++) fb[2 * SCREEN_W + 40 + x] = 49;
+    }
+    MARS_VDP_DISPMODE = saved_mode;
+    raycast_set_brightness(FADE_STEPS);      /* 32X CRAM untouched, but belt */
+}
+
 /* ---- Asset viewer screen (start menu) --------------------------------
  * Dedicated screen for inspecting assets WITHOUT loading a level: the
  * chair renders as the live clustered 3D mesh, free-rotated on both axes
@@ -1834,6 +1912,10 @@ int m_main(void) {
         }
         /* GAME tab: 3D viewer over the paused game (self-owned screen; it
          * restores the gameplay palette on exit), or back to the lobby. */
+        if (g_sms_request) {
+            g_sms_request = 0;
+            sms_boot_screen();
+        }
         if (g_viewer_request) {
             g_viewer_request = 0;
             asset_viewer_screen();

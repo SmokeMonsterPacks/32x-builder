@@ -213,6 +213,25 @@ void HwMdSetVram(unsigned short word) {
 	while(MARS_SYS_COMM0) ;
 }
 
+void HwMdSmsBoot(void) {
+	while(MARS_SYS_COMM0) ;
+	MARS_SYS_COMM0 = 0x0900; // upload Z80 hello, drop VDP to mode 4, run
+	while(MARS_SYS_COMM0) ;
+}
+
+void HwMdSmsStop(void) {
+	/* BOUNDED (see the exit-hang saga). The 68K sweeps the splash rows and
+	 * parks the Z80 — nothing more. The old "full restore" tail (register
+	 * replay + CRAM repaint + $3800 sweep) was the grey-menu font-eraser:
+	 * two bisect rounds proved any exit that skipped it kept the font, and
+	 * in the mode-5-only design it restores state that was never touched. */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM0 = 0x0A00;
+	guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+}
+
 void HwMdSetColor(unsigned short index, unsigned short color) {
 	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
 	MARS_SYS_COMM2 = color;
