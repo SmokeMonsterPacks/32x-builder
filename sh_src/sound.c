@@ -1,6 +1,7 @@
 #include "mars.h"
 #include "shared.h"
 #include "sound.h"
+#include "raycast.h"   /* RAYCAST_PEEK_CLAIM: the peek's hero_scratch span */
 #include "amb_buzz.h"
 #include "amb_neon.h"
 #include "amb_hello_adp.h"
@@ -227,8 +228,11 @@ static int      neon_active = 0;
 /* MEMORY OVERLAY: the PCM ring lives in a slice of box_hero's
  * hero_scratch — the 71,680 B title-intro buffer that is DEAD during
  * gameplay, exported precisely for aliasing (the exit-hole peek bitmap
- * already borrows its low ~2.8 KB, live during the climb — our slice
- * starts at +3 KB to clear it). The ring is live only while
+ * borrows its low RAYCAST_PEEK_CLAIM bytes, live during the climb — the
+ * slice starts PAST that claim. It used to start at +3 KB against the
+ * peek's stale 64x44 comment while the real peek was 96x64: the decoder
+ * wrote live PCM into the peek's middle rows and the crawl's end window
+ * showed the Voyager broadcast as a band of confetti). The ring is live only while
  * AMB_ACTIVE, i.e. only during gameplay, so the phases are disjoint; a
  * title replay scribbles over the slice and the lazy re-init below
  * (spx_ready) rebuilds it before the next decode. Stack safety: the
@@ -236,7 +240,7 @@ static int      neon_active = 0;
  * below that. (The Speex arena that used to follow the ring is gone —
  * IMA decoder state is three scalars in .bss.) */
 extern uint8_t hero_scratch[];               /* box_hero.c title scratch */
-#define SPX_SLICE       (hero_scratch + 3072)
+#define SPX_SLICE       (hero_scratch + RAYCAST_PEEK_CLAIM)
 #define HELLO_RING_SAMPLES 1024              /* 2 KB, power of two */
 #define HELLO_RING_MASK    (HELLO_RING_SAMPLES - 1)
 static int16_t *const hello_ring = (int16_t *)(void *)SPX_SLICE;

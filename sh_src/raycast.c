@@ -1092,13 +1092,16 @@ static inline int hole_fog8(fx_t d) {
  * the faint interior light resolving into an actual place -- so the level
  * change reads as continuous space instead of a loading fade.
  *
- * Walls-only, primary-CPU, 64x44: through a dark aperture the destination is
+ * Walls-only, primary-CPU, 96x64: through a dark aperture the destination is
  * small, fogged and glimpsed, so the full pipeline (two CPUs, textures,
  * sprites, vblank flip discipline) would buy nothing and risk plenty.
  * Both CPUs BLIT the buffer in the tail pass; the secondary purges its lines
  * in raycast_purge_lowceil_cache, and the flag is purged there every frame. */
 #define PEEK_W  96
 #define PEEK_H  64
+_Static_assert(PEEK_W * PEEK_H <= RAYCAST_PEEK_CLAIM,
+               "peek grew past its exported hero_scratch claim — bump "
+               "RAYCAST_PEEK_CLAIM (and mind the Voyager ring above it)");
 #define PEEK_DIM 1                    /* extra fog step: glimpsed, not displayed */
 /* SDRAM is packed to the byte (the stack overlay saw to that), so the bitmap
  * ALIASES the low end of the title's 71 KB hero_scratch (.hero_overlay) --
@@ -7073,7 +7076,7 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
          * Same shape as the crawlspace block below — reject the row by bbox,
          * clip to the columns the zone actually spans, then fill at the
          * carpet's own LOD. g_dark_active means a lit map never enters. */
-        if (g_dark_active) {
+        if (g_dark_active && !SHARED_UC->unlit_kill) {
             fx_t wx0 = px + FX_MUL(rowDist, leftDirX);
             fx_t wy0 = py + FX_MUL(rowDist, leftDirY);
             fx_t wxR = px + FX_MUL(rowDist, rightDirX);
@@ -7111,8 +7114,22 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                 if (c1 > col_end - 1) c1 = col_end - 1;
                 uint8_t *drow = fb + y * SCREEN_W;
                 fx_t dwx = wx0 + stepX * c0, dwy = wy0 + stepY * c0;
+                /* CELL-RUN walk (UNLITF A/B, 2026-08-09: the zone fills were
+                 * 6,383 of the crawl's R:8,582 — dominated by a grid test per
+                 * 2px pair). A cell spans many pairs at any depth, so retest
+                 * only when the pair CROSSES a cell boundary and ride the
+                 * verdict across the run. Exact per-cell result, ~6-15x fewer
+                 * grid reads. */
+                int dcx = -0x7000, dcy = -0x7000, don = !test_dark;
                 for (int col = c0; col <= c1; col += 2, dwx += stepX * 2, dwy += stepY * 2) {
-                    if (test_dark && !cell_is_dark(dwx, dwy)) continue;
+                    if (test_dark) {
+                        int ncx = FX_INT(dwx), ncy = FX_INT(dwy);
+                        if (ncx != dcx || ncy != dcy) {
+                            dcx = ncx; dcy = ncy;
+                            don = cell_is_dark(dwx, dwy);
+                        }
+                        if (!don) continue;
+                    }
                     *(uint16_t *)(drow + col) = WDUP(ddk);
                     if (lod_pair)
                         *(uint16_t *)(drow + lod_pair * SCREEN_W + col) = WDUP(ddk);
@@ -7124,7 +7141,7 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
          * bbox like the slab so it stays cheap; the carpet draws before the
          * walls, so they overpaint it — no z-test. Re-stamps the stain pattern
          * (a yet-darker shade) so the carpet stains survive into the shade. */
-        if (g_lowceil_active) {
+        if (g_lowceil_active && !SHARED_UC->unlit_kill) {
             fx_t wx0 = px + FX_MUL(rowDist, leftDirX);
             fx_t wy0 = py + FX_MUL(rowDist, leftDirY);
             fx_t wxR = px + FX_MUL(rowDist, rightDirX);
@@ -7163,8 +7180,17 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
                 if (c1 > col_end - 1) c1 = col_end - 1;
                 uint8_t *frow = fb + y * SCREEN_W;
                 fx_t fwx = wx0 + stepX * c0, fwy = wy0 + stepY * c0;
+                /* CELL-RUN walk — same trade as the dark-room block above:
+                 * ceil_is_low re-evaluated only on cell-boundary crossings,
+                 * its verdict ridden across the run. */
+                int fcx = -0x7000, fcy = -0x7000, fon = 0;
                 for (int col = c0; col <= c1; col += 2, fwx += stepX * 2, fwy += stepY * 2) {
-                    if (!ceil_is_low(fwx, fwy)) continue;
+                    int ncx = FX_INT(fwx), ncy = FX_INT(fwy);
+                    if (ncx != fcx || ncy != fcy) {
+                        fcx = ncx; fcy = ncy;
+                        fon = ceil_is_low(fwx, fwy);
+                    }
+                    if (!fon) continue;
                     uint8_t cv = fdk;
                     if ((col & xmask) == 0) {
                         int hwx = (int)(fwx >> 13) & 0xFF;

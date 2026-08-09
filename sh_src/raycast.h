@@ -98,6 +98,14 @@ void raycast_init(void);
 /* Scale the gameplay palette to brightness 0..FADE_STEPS (full..black) for
  * the lobby->map fade. Call inside vblank. */
 #define FADE_STEPS 16
+/* The exit-hole peek's claim on the LOW end of hero_scratch, exported so
+ * other hero_scratch tenants (the Voyager PCM ring in sound.c) can start
+ * PAST it instead of sizing against a stale comment. The 2026-08-08 window
+ * band: the ring parked at +3KB because the peek's comment still said
+ * 64x44 (~2.8KB) after the peek had grown to 96x64 (6KB) — live PCM
+ * decoded straight into the peek's middle rows, and the crawl's end
+ * window played it as confetti. */
+#define RAYCAST_PEEK_CLAIM 6144
 void raycast_set_brightness(int lvl);
 void raycast_backdrop_wall(int on);   /* CRAM 0: tuned wall yellow / back to black */
 void raycast_paint_chair_ramp(void);   /* chair CRAM entries, full bright */

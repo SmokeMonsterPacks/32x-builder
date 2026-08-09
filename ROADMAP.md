@@ -427,7 +427,12 @@ Parity makes partitions **correct, not fast**. Getting above the floor with
 partitions in view needs the structural fork, not more parity patches:
 decouple grid resolution from cell size (`MAP_RES`) so a thin divider becomes a
 first-class DDA cell and inherits depth/LOD/occlusion natively — cost is DDA
-steps + map RAM. See the doom-staircase / major-pivot discussion.
+steps + map RAM. **STATUS 2026-08-09: formally BOOKED as its own arc, scheduled
+after the SMS-boot feature.** (The staircase/pivot framing is dropped — Mike
+filed it as a half-idea — but this fork stands on the hardware numbers alone:
+pit F:05 FULL / F:07 HALF, W 24,836 + O 6,304, and parity patching is spent.)
+Opens with a design doc: sub-grid factor, RAM cost, procgen/editor/spawn blast
+radius, and the DDA step budget at 2x vs 4x.
 
 ### Mine the Doom 32X Resurrection codebase for techniques
 **Status:** strategic resource — deep-mine report landed; concrete

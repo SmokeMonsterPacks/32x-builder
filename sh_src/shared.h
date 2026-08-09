@@ -207,6 +207,14 @@ typedef struct {
      * walk -- measured via the blunt all-rows VERT toggle, carpet went 2,068 ->
      * 888 ticks (-57%). Same-binary A/B lives in TESTING>CARPETLOD. */
     volatile uint8_t carpet_vlod;
+    /* UNLIT-FLOOR kill: skips BOTH carpet zone re-stamps (dark-room fill +
+     * crawlspace darken) for a same-binary A/B of their cost inside HUD R:.
+     * Phase-1 hardware baseline read R:8,122 in the crawl scene vs ~2-4k
+     * elsewhere — this toggle tells us how much of that is the zone fills
+     * (double-painting the floor with per-pair grid tests) vs the base
+     * stain pass, BEFORE any refactor spends effort on the wrong half.
+     * Diagnostic only: ON leaves unlit floors rendered LIT. */
+    volatile uint8_t unlit_kill;
     /* Exit-hole close-up work: the vertical JAMB (the wall's cut thickness at
      * the aperture's left/right edges) and the chevron skin on the cavity side
      * walls. Both only render on side_hit columns, so the cost is bounded by
