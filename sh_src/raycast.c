@@ -244,6 +244,7 @@ uint8_t world_map[MAP_H][MAP_W];
  * bake reference; every model view now renders its box list. */
 #include "desk3d.h"         /* tools/bake_boxes.py output — imported GLB as boxes */
 #include "pvm3d.h"          /* same, for the PVM monitor + stand */
+#include "desk_pvm3d.h"     /* tools/compose_desk_pvm.py — monitor on desk */
 #include "pvm_front_tex.h"  /* screen + control panel, mapped onto box 0's front face */
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
 #include "desk_dir_tex.h"      /* same, for the imported desk (tools/bake_dir_sprites.py) */
@@ -491,6 +492,10 @@ static uint8_t standup_scr_mode[MAX_STANDUPS];
  * SHARED_UC->frame_count (both CPUs read the same clock: no per-CPU
  * counters to race, no decrement to double-run). */
 static uint16_t standup_bloom_start[MAX_STANDUPS];
+/* 1 = this PVM sits on a desk (the composite desk_pvm box model draws in
+ * place of the floor stand; same kind, so interact/power/bloom/telegraph
+ * all apply unchanged). Set by procgen right after add_standup. */
+static uint8_t standup_on_desk[MAX_STANDUPS];
 #define BLOOM_FRAMES  3   /* near the floor: 1 strike + 2 unfold; below this it's just a pop */
 #define STRIKE_FRAMES 1
 #define OFF_FRAMES    2   /* power-off: collapse frame + falling-line frame */
@@ -526,6 +531,7 @@ void standups_clear(void) {
         standup_power[i] = 0;
         standup_scr_mode[i] = 0;
         standup_bloom_start[i] = (uint16_t)0x8000;   /* far in the past */
+        standup_on_desk[i] = 0;
     }
 }
 
@@ -587,6 +593,12 @@ int raycast_standup_in_cell(int cx, int cy) {
          && (int)(standups[i].y >> FX_SHIFT) == cy)
             return 1;
     return 0;
+}
+
+void raycast_standup_make_desk(void) {
+    /* Procgen calls this right after add_standup: the newest standup (a
+     * PVM) becomes the desk-mounted composite. */
+    if (num_standups > 0) standup_on_desk[num_standups - 1] = 1;
 }
 
 void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind) {
@@ -2734,9 +2746,17 @@ static int cell_passable(int x, int y) {
  * (bake_dir_sprites.py --stand-bias), so near/far/viewer agree. */
 typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base;
                  const uint8_t *ftex; uint8_t ftw, fth;
-                 uint8_t stand_bias; } boxmodel_t;
+                 uint8_t stand_bias;
+                 /* optional per-box ramp override (composite models mix
+                  * materials: the desk_pvm's monitor is case-gray, its desk
+                  * wood-brown). NULL = every box uses .base. */
+                 const uint8_t *box_base; } boxmodel_t;
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
+static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
+                                  fx_t *hx, fx_t *hz);
+static const boxmodel_t *boxmodel_for_standup(int i);
+static fx_t world_h_for_standup(int i);
 
 /* Index of the solid cutout containing (px,py), or -1. */
 static int standup_blocker(fx_t px, fx_t py) {
@@ -2753,7 +2773,7 @@ static int standup_blocker(fx_t px, fx_t py) {
             if (cdx > -m && cdx < m && cdy > -m && cdy < m) return i;
             continue;
         }
-        if (boxmodel_for_kind(standups[i].kind)) {
+        if (boxmodel_for_standup(i)) {
             /* Any OTHER box model blocks over its real footprint. Without this
              * an imported model inherited the flat-cutout slab below, so you
              * could walk into a desk that is nearly a cell wide — and standing
@@ -2762,7 +2782,8 @@ static int standup_blocker(fx_t px, fx_t py) {
              * Footprint comes from the box list itself, so it can never drift
              * from the geometry being drawn. */
             fx_t hx, hz;
-            boxmodel_footprint(standups[i].kind, &hx, &hz);
+            boxmodel_footprint_bm(boxmodel_for_standup(i),
+                                  world_h_for_standup(i), &hx, &hz);
             /* facing: E0 S64 W128 N192 — N/S facers present width along X. */
             int ns = (standups[i].facing_angle == 64 || standups[i].facing_angle == 192);
             fx_t mx = (ns ? hx : hz) + FX(0.10);
@@ -3980,12 +4001,37 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
     return 0;
 }
 
+/* The desk-with-PVM composite: PVM kind (so every monitor behavior applies
+ * verbatim) but its own geometry and mixed ramps. Selected per STANDUP via
+ * the on_desk flag, never by kind lookup. Drawn under world_h 0.46 (the
+ * model tops out at y=294 of the 0.4-cell scale = 0.46 cells). */
+static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
+    PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE, CHAIR_BASE };
+static const boxmodel_t desk_pvm_model = {
+    desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
+    (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
+    desk_pvm_box_base };
+
+static const boxmodel_t *boxmodel_for_standup(int i) {
+    if (standup_on_desk[i]) return &desk_pvm_model;
+    return boxmodel_for_kind(standups[i].kind);
+}
+static fx_t world_h_for_standup(int i) {
+    /* composite tops out at y=294 of the 0.4 scale = 0.46 cells */
+    if (standup_on_desk[i]) return (fx_t)(FX(0.4) * 294 / 256);
+    return sprite_defs[standups[i].kind].world_h;
+}
+
 /* World-space half-extents of a box model's footprint, straight from its box
  * list (model units are 8.8 with height 1.0, scaled by the sprite's world_h).
  * Collision reads this so the blocker always matches the geometry drawn. */
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz) {
+    boxmodel_footprint_bm(boxmodel_for_kind(kind),
+                          sprite_defs[kind].world_h, hx, hz);
+}
+static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
+                                  fx_t *hx, fx_t *hz) {
     *hx = *hz = 0;
-    const boxmodel_t *bm = boxmodel_for_kind(kind);
     if (!bm) return;
     int x0 = 32767, x1 = -32768, z0 = 32767, z1 = -32768;
     for (int b = 0; b < bm->nboxes; b++) {
@@ -3993,7 +4039,6 @@ static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz) {
         if (q->x0 < x0) x0 = q->x0;   if (q->x1 > x1) x1 = q->x1;
         if (q->z0 < z0) z0 = q->z0;   if (q->z1 > z1) z1 = q->z1;
     }
-    fx_t wh = sprite_defs[kind].world_h;
     *hx = (fx_t)((((int32_t)(x1 - x0) / 2) * wh) >> 8);
     *hz = (fx_t)((((int32_t)(z1 - z0) / 2) * wh) >> 8);
 }
@@ -4111,7 +4156,7 @@ static const uint8_t static_tbl[256] = {
 
 /* One projected box face, shared by draw_chair_3d and draw_panel_face. */
 typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade;
-                 uint8_t ftex; } cface_t;
+                 uint8_t ftex; uint8_t bxi; } cface_t;
 
 /* The textured front face, LUT build included. Split out of draw_chair_3d and
  * noinline for the same RAM reason as draw_boxmodel_shadow: inlined, this
@@ -4286,6 +4331,7 @@ static void draw_chair_3d(int i, int col_start, int col_end,
              * along the decal dir) — the face a ftex model paints its panel
              * texture on. Only box 0 (the carve's primary mass) carries it. */
             faces[nf].ftex = (bm->ftex != 0 && b == 0 && f == 5);
+            faces[nf].bxi  = (uint8_t)b;
             for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
             nf++;
         }
@@ -4336,7 +4382,9 @@ static void draw_chair_3d(int i, int col_start, int col_end,
         /* A chair standing in a dark room honors the dark: collapse to the
          * deepest brown so it reads as a shape in the gloom, like the walls. */
         if (cell_is_dark(cx, cy)) shade = 0;
-        uint8_t c = (uint8_t)(bm->base + shade);
+        uint8_t fbase = bm->box_base ? bm->box_base[faces[q].bxi]
+                                     : bm->base;
+        uint8_t c = (uint8_t)(fbase + shade);
         if (faces[q].ftex) {
             {
                 int be = -1;
@@ -4844,7 +4892,8 @@ static void draw_boxmodel_shadow(int i, int col_start, int col_end,
     uint8_t fa = standups[i].facing_angle;
     fx_t fc = COS_FX((uint8_t)(fa + 64)), fs = -SIN_FX((uint8_t)(fa + 64));
     fx_t hx, hz;
-    boxmodel_footprint(standups[i].kind, &hx, &hz);
+    boxmodel_footprint_bm(boxmodel_for_standup(i),
+                          world_h_for_standup(i), &hx, &hz);
     /* Same cast direction and flicker seed the chair shadow uses, so a desk and
      * a chair under one fixture agree on where the light is and pulse together. */
     fx_t sdx, sdy; int dom = -1;
@@ -5124,7 +5173,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
     uint16_t chair_ticks = 0;
     for (int oi = 0; oi < on; oi++) {
         int i = order[oi];
-        const boxmodel_t *bm = boxmodel_for_kind(standups[i].kind);
+        const boxmodel_t *bm = boxmodel_for_standup(i);
         if (bm) {                                     /* near = true 3D, far = billboard */
             /* Floor shadow FIRST so the chair overpaints its near edge — cast
              * in BOTH tiers from the same fixed 3/4 silhouette, so the shadow
@@ -5170,7 +5219,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
                 uint16_t _cf0 = prof_frt_read();
                 draw_chair_3d(i, col_start, col_end, px, py, dirX, dirY,
                               planeX, planeY, inv_det, horizon_y, fb,
-                              bm, sprite_defs[standups[i].kind].world_h);
+                              bm, world_h_for_standup(i));
                 chair_ticks = (uint16_t)(chair_ticks + (prof_frt_read() - _cf0));
                 continue;
             }
@@ -6144,6 +6193,7 @@ void raycast_purge_sprite_cache(void) {
     purge_cache_range(standup_power, sizeof standup_power);
     purge_cache_range(standup_scr_mode, sizeof standup_scr_mode);
     purge_cache_range(standup_bloom_start, sizeof standup_bloom_start);
+    purge_cache_range(standup_on_desk, sizeof standup_on_desk);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop

@@ -214,8 +214,10 @@ static void place_neanderthals(int count) {
 
 /* EXACTLY ONE PVM per generated level (Mike: every procedural level has the
  * monitor, but they FEEL expensive — budget is a hard 2 per map, lint-side,
- * and procgen spends just 1 of it). Faces a random cardinal like the rest of
- * the furniture; the exit corridor stays clear so it never blocks the way. */
+ * and procgen spends just 1 of it). Since 2026-08-10 the procgen monitor is
+ * the DESK-MOUNTED composite, and the FACING RULE is law: the screen must
+ * face an open floor cell, never a wall — a monitor nobody could watch is
+ * set dressing gone wrong. Cells with no open cardinal are skipped. */
 static void place_pvms(int count) {
     int placed = 0, attempts = count * 32;   /* one MUST land: try harder */
     while (attempts-- > 0 && placed < count) {
@@ -224,9 +226,19 @@ static void place_pvms(int count) {
         if (!footprint_clear(x, y, 1, 1)) continue;
         if (raycast_standup_in_cell(x, y)) continue;
         if (raycast_exit_path_cell(x, y)) continue;
-        uint8_t facing = (uint8_t)(xs32_range(0, 3) * 64);
+        /* facing: E0 S64 W128 N192 -> front dir (+x),(+y),(-x),(-y). Collect
+         * the cardinals whose neighbor is walkable floor; pick one at random. */
+        static const int8_t fdx[4] = { 1, 0, -1, 0 };
+        static const int8_t fdy[4] = { 0, 1, 0, -1 };
+        uint8_t open[4]; int nopen = 0;
+        for (int d = 0; d < 4; d++)
+            if (footprint_clear(x + fdx[d], y + fdy[d], 1, 1))
+                open[nopen++] = (uint8_t)(d * 64);
+        if (!nopen) continue;                 /* boxed in: no watchable side */
+        uint8_t facing = open[xs32_range(0, nopen - 1)];
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, PVM_ASSET_KIND);
+        raycast_standup_make_desk();          /* the composite, not the stand */
         placed++;
     }
 }
