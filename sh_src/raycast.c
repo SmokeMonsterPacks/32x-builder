@@ -494,6 +494,9 @@ static uint16_t standup_bloom_start[MAX_STANDUPS];
 #define BLOOM_FRAMES  3   /* near the floor: 1 strike + 2 unfold; below this it's just a pop */
 #define STRIKE_FRAMES 1
 #define OFF_FRAMES    2   /* power-off: collapse frame + falling-line frame */
+#define ON_SETTLE     2   /* after the unfold: 1 stable frame, 1 dark drop,
+                           * then steady — the degauss catching the picture,
+                           * losing it, catching it for good (Mike's call) */
 /* Which side hit the floor: 1 = pushed from the FRONT, figure lands face up
  * (the printed side shows); 0 = pushed from BEHIND, lands face down — the
  * blank cardboard back shows, mirrored. Set at the shove from the same
@@ -4146,12 +4149,16 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
     /* Bloom shaping, precomputed per face (stack = per-CPU, no races):
      * {elapsed, band half-height, unfold step 8.8, glass center ty}. */
     int bloomv[5]; const int *bp = 0;
-    if (bloom_e >= 0) {
+    if (bloom_e >= 0 && !(power && bloom_e == BLOOM_FRAMES)) {
+        /* (power-on frame BLOOM_FRAMES draws PLAIN: the one stable catch
+         * frame between the unfold and the flicker drop.) */
         bloomv[0] = bloom_e;
         int half = tg_bh / 2; if (half < 1) half = 1;
         bloomv[3] = tg_by0 + half;             /* default: glass center */
         bloomv[4] = !power;                    /* 1 = collapse (power-off) */
-        if (!power) {
+        if (power && bloom_e > BLOOM_FRAMES) {
+            bloomv[4] = 2;                     /* the drop: one dark frame */
+        } else if (!power) {
             /* Frame 0: thin band at center. Frame 1: single line fallen
              * to the lower glass, on its way off the bottom. */
             if (bloom_e == 0) {
@@ -4336,7 +4343,8 @@ static void draw_chair_3d(int i, int col_start, int col_end,
                 {
                     uint16_t el = (uint16_t)((uint16_t)SHARED_UC->frame_count
                                              - standup_bloom_start[i]);
-                    uint16_t win = standup_power[i] ? BLOOM_FRAMES : OFF_FRAMES;
+                    uint16_t win = standup_power[i]
+                                 ? (BLOOM_FRAMES + ON_SETTLE) : OFF_FRAMES;
                     if (el < win) be = (int)el;
                 }
                 draw_panel_face(fb, col_start, col_end, &faces[q], bm,
@@ -4508,6 +4516,10 @@ static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
                      * content out of it (one mul per pixel). */
                     if (bloom) {
                         int rel = ty - bloom[3];
+                        if (bloom[4] == 2) {   /* the flicker drop: dark */
+                            row[x] = lut[5];
+                            continue;
+                        }
                         if (bloom[4]) {
                             /* POWER-OFF: phosphors losing voltage — a DIM
                              * white band (51 = 50% white, never the
