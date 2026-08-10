@@ -245,6 +245,7 @@ uint8_t world_map[MAP_H][MAP_W];
 #include "desk3d.h"         /* tools/bake_boxes.py output — imported GLB as boxes */
 #include "pvm3d.h"          /* same, for the PVM monitor + stand */
 #include "desk_pvm3d.h"     /* tools/compose_desk_pvm.py — monitor on desk */
+#include "pvm_rear_tex.h"   /* Mike's rear panel (tools/pvm_bezel_edit.py) */
 #include "pvm_front_tex.h"  /* screen + control panel, mapped onto box 0's front face */
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
 #include "desk_dir_tex.h"      /* same, for the imported desk (tools/bake_dir_sprites.py) */
@@ -2778,7 +2779,12 @@ typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base
                  /* optional per-box ramp override (composite models mix
                   * materials: the desk_pvm's monitor is case-gray, its desk
                   * wood-brown). NULL = every box uses .base. */
-                 const uint8_t *box_base; } boxmodel_t;
+                 const uint8_t *box_base;
+                 /* optional REAR-face texture (box 0, +z): same dims as
+                  * ftex by the editor-kit contract, case values only —
+                  * never both visible with the front, so it costs no
+                  * frame time. */
+                 const uint8_t *rtex; } boxmodel_t;
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
 static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
@@ -4019,7 +4025,8 @@ static const boxmodel_t boxmodels[] = {
     { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND, CHAIR_BASE, 0, 0, 0, 0 },
     { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND,  CHAIR_BASE, 0, 0, 0, 0 },
     { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
-      (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2 },
+      (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
+      0, (const uint8_t *)pvm_rear_tex },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
 
@@ -4038,7 +4045,7 @@ static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
-    desk_pvm_box_base };
+    desk_pvm_box_base, (const uint8_t *)pvm_rear_tex };
 
 static const boxmodel_t *boxmodel_for_standup(int i) {
     if (standup_on_desk[i]) return &desk_pvm_model;
@@ -4216,6 +4223,9 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
     unsigned seed = (power && !scr)
         ? (((unsigned)SHARED_UC->frame_count * 2654435761u) | 1) : 0;
     if (!power) scr = 0;                 /* dark glass wins over telegraph */
+    /* Rear face: Mike's back panel, case values only — no glass texels,
+     * so the screen branches (static/telegraph/bloom) never trigger. */
+    const uint8_t *ptex = (fc->ftex == 2) ? bm->rtex : bm->ftex;
     /* UVs by corner identity (face-5 vi order is bl,tl,tr,br; texture row 0 =
      * top), in texel units for the shift-sampling. Same two-triangle split as
      * the flat fill. */
@@ -4253,12 +4263,12 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
     }
     fx_t TW = FX(bm->ftw), TH = FX(bm->fth);
     tex_tri_lut(fb, col_start, col_end, fc->depth,
-            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
+            ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
             fc->sx[0],fc->sy[0], 0,  TH,
             fc->sx[1],fc->sy[1], 0,  0,
             fc->sx[2],fc->sy[2], TW, 0);
     tex_tri_lut(fb, col_start, col_end, fc->depth,
-            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
+            ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
             fc->sx[0],fc->sy[0], 0,  TH,
             fc->sx[2],fc->sy[2], TW, 0,
             fc->sx[3],fc->sy[3], TW, TH);
@@ -4358,7 +4368,8 @@ static void draw_chair_3d(int i, int col_start, int col_end,
             /* Face 5 is -z, the model front (the facing rotation points it
              * along the decal dir) — the face a ftex model paints its panel
              * texture on. Only box 0 (the carve's primary mass) carries it. */
-            faces[nf].ftex = (bm->ftex != 0 && b == 0 && f == 5);
+            faces[nf].ftex = (bm->ftex != 0 && b == 0 && f == 5) ? 1
+                           : (bm->rtex != 0 && b == 0 && f == 4) ? 2 : 0;
             faces[nf].bxi  = (uint8_t)b;
             for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
             nf++;
