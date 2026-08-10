@@ -2386,6 +2386,11 @@ void raycast_load_custom(int idx) {
                 standups[num_standups].facing_angle = m->decals[i].facing;
                 standups[num_standups].silhouette   = 0;
                 standups[num_standups].kind         = m->decals[i].kind;
+                /* Authored desk-mounted PVM: the pvm token with z=1 (the z
+                 * field is unused by free-standing kinds — it is the flag). */
+                if (m->decals[i].kind == PVM_ASSET_KIND &&
+                    m->decals[i].z >= FX(1))
+                    standup_on_desk[num_standups] = 1;
                 num_standups++;
             }
         } else if (m->decals[i].kind == 4) {
@@ -2567,6 +2572,18 @@ int raycast_pvm_use(void) {
         if (best < 0 || m < bestm) { best = i; bestm = m; }
     }
     if (best < 0) return 0;
+    if (standup_on_desk[best]) {
+        /* The desk unit is the CONSOLE: A boots the Master System game
+         * (caller sees 2 and runs the transition), it never toggles off
+         * by hand. First press wakes it with the full strike. */
+        if (!standup_power[best]) {
+            standup_power[best] = 1;
+            standup_scr_mode[best] = 0;                  /* static while booting */
+            standup_bloom_start[best] = (uint16_t)SHARED_UC->frame_count;
+            SHARED_UC->crt_sfx = 1;                      /* degauss */
+        }
+        return 2;
+    }
     standup_power[best] ^= 1;
     /* Stamp BOTH edges: power-on plays the strike+unfold, power-off the
      * phosphor collapse (same window, mode picked by power state). */
@@ -2579,6 +2596,17 @@ int raycast_pvm_use(void) {
      * (one-shot request to the mixer, same channel style as the climb). */
     SHARED_UC->crt_sfx = standup_power[best] ? 1 : 2;
     return 1;
+}
+
+/* Power down the desk console on return from the full-screen game: the
+ * collapse animation plays as the world comes back — you watched it die. */
+void raycast_pvm_desk_off(void) {
+    for (int i = 0; i < num_standups; i++)
+        if (standup_on_desk[i] && standup_power[i]) {
+            standup_power[i] = 0;
+            standup_bloom_start[i] = (uint16_t)SHARED_UC->frame_count;
+            SHARED_UC->crt_sfx = 2;                      /* the off click */
+        }
 }
 
 /* Portal check: returns 1 when the EXIT door is open far enough AND the player

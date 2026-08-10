@@ -98,6 +98,9 @@ volatile int g_ym_tl_dirty = 0;   /* menu sets on AMBIENCE change */
 volatile int g_ym_upload = 1;
 /* TESTING>SMSGAME: the SMS mini-game on the CURRENT level's map. */
 volatile int g_smsgame_request = 0;
+/* Desk-console boot transition: frames of in-world CRT birth remaining
+ * before the full-screen Master System takes the glass. */
+static int g_smsboot_frames = 0;
 
 /* GAME-tab automap hooks (menu.c): the same state the MODE+B combo and the
  * MODE+UP/DOWN zoom drive, reachable without MODE -- full parity for
@@ -2096,9 +2099,12 @@ int m_main(void) {
             g_sms_request = 0;
             sms_boot_screen();
         }
+        if (g_smsboot_frames && --g_smsboot_frames == 0)
+            g_smsgame_request = 1;
         if (g_smsgame_request) {
             g_smsgame_request = 0;
             sms_game_screen();
+            raycast_pvm_desk_off();   /* the console dies as the world returns */
         }
         if (g_viewer_request) {
             g_viewer_request = 0;
@@ -2173,8 +2179,14 @@ int m_main(void) {
                  * exactly like the climb so A+B crouch and MODE combos never
                  * flip a set. */
                 else if (!(pad & (SEGA_CTRL_MODE | SEGA_CTRL_B))
-                         && (fresh & SEGA_CTRL_A))
-                    raycast_pvm_use();
+                         && (fresh & SEGA_CTRL_A)) {
+                    /* Desk console (returns 2): the monitor wakes with the
+                     * full strike, and after a beat of static the screen
+                     * swallows you — the countdown lets the birth play
+                     * against the degauss before the cut. */
+                    if (raycast_pvm_use() == 2 && !g_smsboot_frames)
+                        g_smsboot_frames = 14;
+                }
             }
             }
         }

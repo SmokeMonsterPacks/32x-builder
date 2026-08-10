@@ -213,6 +213,7 @@ void raycast_purge_sprite_cache(void);
 void standups_clear(void);   /* reset free-standing objects (neanderthals/chairs) */
 void raycast_add_standup(fx_t x, fx_t y, uint8_t facing, uint8_t kind);
 void raycast_standup_make_desk(void);   /* newest standup -> desk-PVM composite */
+void raycast_pvm_desk_off(void);        /* power down the console on game exit */
 int  raycast_standup_in_cell(int cx, int cy);  /* procgen spawn-overlap guard */
 int  raycast_exit_path_cell(int x, int y);     /* protected spawn->exit corridor:
                                                 * placers must keep these cells

@@ -82,6 +82,9 @@ chair  28.5,22.5 face=W
 # corridor and the PVM is at the end of it, facing back at you (Mike's
 # spot, HUD X:09.2 Y:19.5 A:000).
 pvm    10.5,19.5 face=W
+# The console: a desk-mounted PVM in the spawn chamber's south-east corner
+# (z=1 marks the desk mount). Press A and the Master System boots on it.
+pvm    24.5,30.5 face=N z=1
 outlet 17,26.5 face=W z=0.2
 door   16.5,31 face=S
 neanderthal 16.3,23.5 face=S
