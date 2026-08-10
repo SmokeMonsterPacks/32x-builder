@@ -360,6 +360,19 @@ ambient slider.
 After ambient drone is in place. Slow swells, sub-bass, distant rumbles.
 Still pending — would layer over the existing buzz/hum bed.
 
+### Stereo directional hello  (nice to have, 2026-08-09)
+The neanderthal's Voyager hello is distance-attenuated but mono: DMA1 is
+destination-fixed on `MARS_PWM_MONO`, so both PWM FIFOs always get the
+same pulse width. Directional needs the stereo output path: interleave
+the ping-pong buffers L,R and switch DMA1 to longword transfers at the
+LCH/RCH register pair (one DREQ = one stereo frame), then pan ONLY the
+hello by relative bearing (compass-dot trick from the directional
+sprites); buzz/neon/steps stay centered so the mix cost barely moves
+(fill is ~321 ticks mono, estimate +1/3). Build behind a same-binary
+AUDIO>STEREO toggle with a hard-panned test tone — this reopens the
+DMA/DREQ engine from the 16 ms-chop saga, and Ares-vs-MiSTer pacing must
+be verified by ear before it defaults on.
+
 ## Performance
 
 ### The frame is now measured — and the bottleneck moves  (2026-08-06)

@@ -103,6 +103,16 @@ typedef struct {
      * sprite worth multiple fps on its own. Toggle this at a fixed
      * standing spot and read T/F with nothing else changing. */
     volatile uint8_t voice_off;
+    /* 1 = the whole hum system is YM2612 FM synthesis (68K-driven over
+     * COMM 0x0E): channel 2 sustains the buzz bed, channel 1 fires the
+     * neon sting, and the mixer mutes BOTH sample voices (437KB buzz +
+     * 31KB neon). The A/B for the hum-synthesis experiment (AUDIO menu,
+     * HUM row); if the Yamaha passes the ear, both bakes get deleted. */
+    volatile uint8_t hum_ym;
+    /* Sting handshake: the secondary's audio pump rolls the sting dice
+     * but only the primary may drive COMM0 — pump sets 1, primary
+     * key-ons YM ch1 and clears it. */
+    volatile uint8_t ym_sting;
     /* Speex decode profiling (secondary writes, primary HUD reads):
      * ticks of the LAST frame decode on the secondary's FRT (same
      * prescaler as secondary_render_ticks) and a cumulative decoded-

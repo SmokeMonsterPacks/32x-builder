@@ -128,6 +128,115 @@ void do_commands(void) {
 		}
 		break;
 	}
+	case 14: { // YM2612 part-I register write: reg in cmd low byte, value
+		// in COMM2. The Yamaha sits on the Z80 bus, so take busreq for
+		// the duration (the Z80's boot stub tolerates the pause), wait
+		// out the YM busy flag before address AND data, release.
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint8_t  *ym     = (uint8_t *)0xA04000;
+		uint16_t val = *mars_comm2;
+		// CANARY (menu/HUD text color names the failure in a screenshot):
+		// GREEN = command arrived here. RED = Z80 bus grant timed out.
+		// BLUE = grant OK but the YM busy flag never cleared ($A04000
+		// reads garbage). Busy guards trimmed 10000->200: real busy is
+		// ~32 chip cycles, and the old guards made every poisoned write
+		// stall the 68K ~17ms — the CPU peg, and the REAL cause of the
+		// B00245 1.2s hang (not vblank pacing).
+		// (green arrival paint removed — hum confirmed audible; the
+		// RED/BLUE error canaries below stay until the lab era ends)
+		// ORDER IS LAW (the SMS boot's own lesson): no bus grant while
+		// the Z80 is held in reset — and gameplay parks it in reset.
+		// Release reset FIRST, then request; re-park on the way out.
+		// The resident Z80 program runs a few harmless init opcodes in
+		// the microseconds before the grant lands.
+		volatile uint16_t *zreset = (uint16_t *)Z80_RESET;
+		*zreset = 0x100;
+		*busreq = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ;
+		  if (!g) vdp_color(1, 0x00E); }
+		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ;
+		  if (!g) vdp_color(1, 0xE00); }
+		ym[0] = (uint8_t)(cmd & 0xFF);       // address port
+		for (volatile uint16_t d = 0; d < 8; d++) ;
+		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; }
+		ym[1] = (uint8_t)val;                // data port
+		for (volatile uint16_t d = 0; d < 32; d++) ;
+		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; }
+		*busreq = 0x000;
+		// NO re-park: the Z80 reset line ALSO RESETS THE YM2612 — parking
+		// the Z80 wipes every FM register (why the chip has been amnesiac
+		// all along). The Z80 stays released and running, like every MD
+		// game ever; an SMS stop re-parks it and therefore kills the hum
+		// until the next toggle.
+		break;
+	}
+	case 15: { // YM hum control, ONE command per action (the per-register
+		// path costs a frame per write — a 70-write patch upload hung
+		// the primary for ~1.2s). op in cmd low byte: 0 = all off,
+		// 1 = upload both hum patches + key bed on, 2 = sting key-on,
+		// 3 = sting release. Patch mirror of sh_src/menu.c ym_hum_set.
+		static const uint8_t hum_patch[][2] = {
+			{0x22, 0x08}, {0x27, 0x00}, {0x2B, 0x00},
+			// ch1: neon sting
+			{0x30, 0x01}, {0x34, 0x03}, {0x38, 0x02}, {0x3C, 0x14},
+			{0x40, 0x28}, {0x44, 0x34}, {0x48, 0x20}, {0x4C, 0x3A},
+			{0x50, 0x1F}, {0x54, 0x1F}, {0x58, 0x1F}, {0x5C, 0x1F},
+			{0x60, 0x80}, {0x64, 0x80}, {0x68, 0x80}, {0x6C, 0x80},
+			{0x70, 0x00}, {0x74, 0x00}, {0x78, 0x00}, {0x7C, 0x00},
+			{0x80, 0x06}, {0x84, 0x06}, {0x88, 0x06}, {0x8C, 0x06},
+			{0x90, 0x00}, {0x94, 0x00}, {0x98, 0x00}, {0x9C, 0x00},
+			{0xB0, 0x2F}, {0xB4, 0xD1}, {0xA4, 0x0C}, {0xA0, 0x9D},
+			// ch2: buzz bed
+			{0x31, 0x01}, {0x35, 0x03}, {0x39, 0x02}, {0x3D, 0x34},
+			{0x41, 0x30}, {0x45, 0x3C}, {0x49, 0x28}, {0x4D, 0x42},
+			{0x51, 0x1F}, {0x55, 0x1F}, {0x59, 0x1F}, {0x5D, 0x1F},
+			{0x61, 0x80}, {0x65, 0x80}, {0x69, 0x80}, {0x6D, 0x80},
+			{0x71, 0x00}, {0x75, 0x00}, {0x79, 0x00}, {0x7D, 0x00},
+			{0x81, 0x08}, {0x85, 0x08}, {0x89, 0x08}, {0x8D, 0x08},
+			{0x91, 0x00}, {0x95, 0x00}, {0x99, 0x00}, {0x9D, 0x00},
+			{0xB1, 0x3F}, {0xB5, 0xE1}, {0xA5, 0x0C}, {0xA1, 0x9D},
+		};
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *zreset = (uint16_t *)Z80_RESET;
+		volatile uint8_t  *ym     = (uint8_t *)0xA04000;
+		uint16_t op = cmd & 0xFF;
+		*zreset = 0x100;                     // no grant while reset (LAW)
+		*busreq = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		// Busy-poll PLUS fixed settle delays: the real chip DROPS writes
+		// that land while it is busy, and if the status read lies (open
+		// bus, emulator shortcut) the poll passes instantly — B00246's
+		// back-to-back burst was silent while B00245's frame-spaced
+		// writes (same values!) sounded. The delays are the classic
+		// pacing (address ~17 68K cycles, data ~83) with margin; the
+		// whole 70-write patch still lands in ~2ms.
+		#define YMW(r, v) do { \
+			uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; \
+			ym[0] = (r); \
+			for (volatile uint16_t d = 0; d < 8; d++) ; \
+			g = 200; while ((ym[0] & 0x80) && --g) ; \
+			ym[1] = (v); \
+			for (volatile uint16_t d = 0; d < 32; d++) ; } while (0)
+		switch (op) {
+		case 0: YMW(0x28, 0x00); YMW(0x28, 0x01); break;
+		case 1:
+			for (uint16_t i = 0; i < sizeof(hum_patch) / 2; i++)
+				YMW(hum_patch[i][0], hum_patch[i][1]);
+			YMW(0x28, 0xF1);                       // bed on (ch2)
+			break;
+		case 2: YMW(0x28, 0x00); YMW(0x28, 0xF0); break;  // sting retrigger
+		case 3: YMW(0x28, 0x00); break;                   // sting release
+		}
+		#undef YMW
+		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; }
+		*busreq = 0x000;
+		// NO re-park: the Z80 reset line ALSO RESETS THE YM2612 — parking
+		// the Z80 wipes every FM register (why the chip has been amnesiac
+		// all along). The Z80 stays released and running, like every MD
+		// game ever; an SMS stop re-parks it and therefore kills the hum
+		// until the next toggle.
+		break;
+	}
 	case 10: { // SMS STOP: sweep the splash rows, park the Z80. NOTHING MORE.
 		// The old "full restore" tail (InitVDPRegs replay + CRAM repaint +
 		// $3800 sweep) was the grey-menu FONT-ERASER: two bisect rounds
@@ -204,6 +313,10 @@ void do_commands(void) {
 		zram[Z80_GAME_STATE_MBX] = 0;      // boots 0xFF (the phantom-
 		zram[Z80_GAME_FRAME_MBX] = 0;      // mailbox-command lesson)
 		zram[Z80_GAME_HEART]     = 0;
+		{	// PSG silent before the Z80 takes it (68K reaches it at $C00011)
+			volatile uint8_t *psg = (uint8_t *)0xC00011;
+			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
+		}
 		*reset = 0x000;                    // reset pulse while we own the bus
 		for (volatile uint16_t d = 0; d < 64; d++) ;   // let it latch
 		*busreq = 0x000;                   // hand the bus back...
@@ -219,6 +332,10 @@ void do_commands(void) {
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
 		*reset = 0x000;
 		*busreq = 0x000;
+		{	// the Z80 died mid-note: silence the PSG (teardown rule, 4a)
+			volatile uint8_t *psg = (uint8_t *)0xC00011;
+			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
+		}
 		for (uint16_t row = 2; row < 26; row++) {
 			uint32_t ofs = ((row * 64u + 4u) * 2u) + 0xE000;
 			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16

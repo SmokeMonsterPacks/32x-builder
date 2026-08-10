@@ -169,6 +169,8 @@ extern void Hw32xFlipWait(void);
 extern void HwMdReadPad(uint8_t port);
 extern void HwMdClearScreen(void);
 extern void HwMdSetColor(unsigned short index, unsigned short color);
+extern void HwMdYmWrite(unsigned char reg, unsigned char val);   /* YM2612 part I */
+extern void HwMdYmCmd(unsigned char op);   /* hum: 0 off, 1 on, 2 sting, 3 release */
 extern void HwMdSmsBoot(void);
 extern void HwMdSmsStop(void);
 extern void HwMdSmsGameMap(const unsigned char *packed);   /* 132B level patch */

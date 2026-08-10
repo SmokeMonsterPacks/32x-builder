@@ -57,6 +57,45 @@ volatile int g_warp_request = -1;
 volatile int g_viewer_request = 0, g_lobby_request = 0;
 /* TESTING>SMSBOOT: hand the screen to the Master System spike. */
 volatile int g_sms_request = 0;
+
+/* YM hum patch — MASTER COPY (drip-fed one register/frame by the game
+ * loop; see the hum service). Two algorithm-7 additive voices at
+ * 60/120/180/240Hz: ch1 (+0 regs) = neon sting, ch2 (+1) = buzz bed
+ * (max feedback, deeper AM, ~6dB under). fnum 1181 @ block 1 = 59.99Hz.
+ * The 68K's case-15 op-1 burst mirror is RETIRED: bursts landed silent
+ * (B00246) where this frame-spaced stream sounds. */
+const uint8_t ym_hum_patch[][2] = {
+    {0x22, 0x08}, {0x27, 0x00}, {0x2B, 0x00},
+    {0x30, 0x01}, {0x34, 0x03}, {0x38, 0x02}, {0x3C, 0x14},
+    {0x40, 0x28}, {0x44, 0x34}, {0x48, 0x20}, {0x4C, 0x3A},
+    {0x50, 0x1F}, {0x54, 0x1F}, {0x58, 0x1F}, {0x5C, 0x1F},
+    {0x60, 0x80}, {0x64, 0x80}, {0x68, 0x80}, {0x6C, 0x80},
+    {0x70, 0x00}, {0x74, 0x00}, {0x78, 0x00}, {0x7C, 0x00},
+    {0x80, 0x06}, {0x84, 0x06}, {0x88, 0x06}, {0x8C, 0x06},
+    {0x90, 0x00}, {0x94, 0x00}, {0x98, 0x00}, {0x9C, 0x00},
+    {0xB0, 0x2F}, {0xB4, 0xD1}, {0xA4, 0x0C}, {0xA0, 0x9D},
+    {0x31, 0x01}, {0x35, 0x03}, {0x39, 0x02}, {0x3D, 0x34},
+    {0x41, 0x20}, {0x45, 0x2C}, {0x49, 0x18}, {0x4D, 0x32},
+    {0x51, 0x1F}, {0x55, 0x1F}, {0x59, 0x1F}, {0x5D, 0x1F},
+    {0x61, 0x80}, {0x65, 0x80}, {0x69, 0x80}, {0x6D, 0x80},
+    {0x71, 0x00}, {0x75, 0x00}, {0x79, 0x00}, {0x7D, 0x00},
+    {0x81, 0x08}, {0x85, 0x08}, {0x89, 0x08}, {0x8D, 0x08},
+    {0x91, 0x00}, {0x95, 0x00}, {0x99, 0x00}, {0x9D, 0x00},
+    {0xB1, 0x3F}, {0xB5, 0xE1}, {0xA5, 0x0C}, {0xA1, 0x9D},
+};
+#define YM_HUM_PATCH_N (sizeof(ym_hum_patch) / 2)
+/* The BED's four operator TLs at full AMBIENCE (regs 0x41/45/49/4D).
+ * The slider adds attenuation on top: (255 - amb_volume) >> 2 steps of
+ * 0.75dB, so slider 0 is ~48dB down = gone, 255 = these values. */
+static const uint8_t ym_bed_tl_reg[4]  = { 0x41, 0x45, 0x49, 0x4D };
+static const uint8_t ym_bed_tl_base[4] = { 0x20, 0x2C, 0x18, 0x32 };  /* +6dB 2026-08-10 */
+volatile int g_ym_tl_dirty = 0;   /* menu sets on AMBIENCE change */
+/* 0 = idle; 1..N = next patch index+1. STARTS AT 1: the YM hum is the
+ * shipping ambience (the 437KB PWM buzz bake is deleted) — the game
+ * loop drips the patch in over its first ~70 frames, the fluorescent
+ * tubes striking as the world fades in. SMS exits re-arm it below
+ * (their Z80 re-park resets the YM too — same silicon line). */
+volatile int g_ym_upload = 1;
 /* TESTING>SMSGAME: the SMS mini-game on the CURRENT level's map. */
 volatile int g_smsgame_request = 0;
 
@@ -960,6 +999,31 @@ static void show_controls_screen(void) {
     }
 }
 
+/* ---- SMS audio duck ----------------------------------------------------
+ * While the Master System has the stage, it should be the only thing you
+ * hear: ramp the 32X mix to silence before boot and back after teardown.
+ * Two knobs cover the whole mixer — amb_volume gains buzz + neon + the
+ * Voyager hello, step_volume gains footsteps + slide + CRT one-shots
+ * (sound.c line ~663). ~0.5 s ramp, frame-stepped; the menu's own values
+ * come back exactly as the player left them. */
+static uint8_t duck_amb, duck_step;
+static void sms_audio_duck(void) {
+    duck_amb  = SHARED_UC->amb_volume;
+    duck_step = SHARED_UC->step_volume;
+    for (int t = 15; t >= 0; t--) {
+        SHARED_UC->amb_volume  = (uint8_t)((duck_amb  * t) / 16);
+        SHARED_UC->step_volume = (uint8_t)((duck_step * t) / 16);
+        Hw32xDelay(2);
+    }
+}
+static void sms_audio_restore(void) {
+    for (int t = 1; t <= 16; t++) {
+        SHARED_UC->amb_volume  = (uint8_t)((duck_amb  * t) / 16);
+        SHARED_UC->step_volume = (uint8_t)((duck_step * t) / 16);
+        Hw32xDelay(2);
+    }
+}
+
 /* ---- SMS boot screen ---------------------------------------------------
  * The Master System spike, v1: blank the 32X layer so the Genesis VDP owns
  * the glass, ask the 68K to upload the Z80 hello and drop the VDP into SMS
@@ -968,6 +1032,7 @@ static void show_controls_screen(void) {
  * SMS mode, inside a running 32X game. START hands the world back. */
 static void sms_boot_screen(void) {
     uint16_t saved_mode = MARS_VDP_DISPMODE;
+    sms_audio_duck();
     /* PROVEN COMPOSITING ONLY (v5b): the one arm that ever showed mode-4
      * tiles kept the 32X layer ON with MD pixels overlaying it — exactly
      * how the HUD text rides the game. So no MODE_OFF gamble: paint the
@@ -1019,6 +1084,7 @@ static void sms_boot_screen(void) {
     }
     {
         HwMdSmsStop();
+        g_ym_upload = 1;   /* SMS teardown parked the Z80 = YM wiped; re-strike */
     }
     {
         uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
@@ -1034,6 +1100,7 @@ static void sms_boot_screen(void) {
     }
     MARS_VDP_DISPMODE = saved_mode;
     raycast_set_brightness(FADE_STEPS);      /* 32X CRAM untouched, but belt */
+    sms_audio_restore();
 }
 
 /* ---- SMS mini-game screen ----------------------------------------------
@@ -1050,6 +1117,7 @@ static void sms_boot_screen(void) {
  * can trap the player). */
 static void sms_game_screen(void) {
     uint16_t saved_mode = MARS_VDP_DISPMODE;
+    sms_audio_duck();
     unsigned char pack[132];
     for (int i = 0; i < 132; i++) pack[i] = 0;
     for (int y = 0; y < MAP_H; y++)
@@ -1097,12 +1165,14 @@ static void sms_game_screen(void) {
         Hw32xDelay(1);
     }
     HwMdSmsGameStop();
+    g_ym_upload = 1;       /* same: the minigame teardown reset the YM */
     {   /* bounded START drain — a stuck bit must not hold the exit */
         uint32_t guard = 1000000;
         while ((MARS_SYS_COMM8 & SEGA_CTRL_START) && --guard) ;
     }
     MARS_VDP_DISPMODE = saved_mode;
     raycast_set_brightness(FADE_STEPS);
+    sms_audio_restore();
 }
 
 /* ---- Asset viewer screen (start menu) --------------------------------
@@ -1975,6 +2045,45 @@ int m_main(void) {
         uint16_t pad = MARS_SYS_COMM8;
 
         menu_update(pad);
+        /* YM hum service. Two jobs, both on this CPU because only it may
+         * drive COMM0:
+         * 1) PATCH DRIP-FEED — one register per frame, fire-and-forget.
+         *    The 68K serves ~one command per vblank; the synchronous
+         *    burst (case-15 op 1) both hung the menu AND landed silent
+         *    (B00246), while B00245's frame-spaced stream sounded. The
+         *    ~1.2s ramp-in IS the fluorescent tube striking.
+         * 2) STING — the secondary's pump rolls the dice, this side keys
+         *    ch1 and releases it ~2s later (RR=6 gives the tail). */
+        {
+            static uint16_t ym_sting_frames = 0;
+            if (g_ym_upload > 0) {
+                if (g_ym_upload <= (int)YM_HUM_PATCH_N) {
+                    HwMdYmWrite(ym_hum_patch[g_ym_upload - 1][0],
+                                ym_hum_patch[g_ym_upload - 1][1]);
+                    g_ym_upload++;
+                } else {
+                    HwMdYmWrite(0x28, 0xF1);        /* bed on (ch2) */
+                    g_ym_upload = 0;
+                    g_ym_tl_dirty = 1;  /* apply the slider to fresh TLs */
+                }
+            }
+            /* AMBIENCE -> bed level: one TL write per frame, after any
+             * drip. 0.75dB/step beats the PWM path's resolution. */
+            if (g_ym_tl_dirty && g_ym_upload == 0) {
+                static uint8_t tl_i = 0;
+                uint16_t att = (uint16_t)((255 - SHARED_UC->amb_volume) >> 2);
+                uint16_t tl = ym_bed_tl_base[tl_i] + att;
+                if (tl > 127) tl = 127;
+                HwMdYmWrite(ym_bed_tl_reg[tl_i], (uint8_t)tl);
+                if (++tl_i >= 4) { tl_i = 0; g_ym_tl_dirty = 0; }
+            }
+            /* ch1 NEVER keys in this design: its hum-toned patch at the
+             * bed's own frequencies beat against ch2 as cancellation —
+             * Mike heard the "sting" as a clipping frequency CUT. The
+             * bong stays a PWM sample; an FM bell patch for ch1 is a
+             * tuning-lab project. */
+            (void)ym_sting_frames;
+        }
         /* MAPS tab asked to warp -> fade to the chosen custom map. */
         if (g_warp_request >= 0) {
             int t = g_warp_request; g_warp_request = -1;

@@ -26,6 +26,7 @@ extern void hud_genesis_blank(void);
 /* Owned by m_main.c — the MAPS tab writes the chosen custom-map index here and
  * the main loop drains it into the warp. -1 = no request. */
 extern volatile int g_warp_request;
+extern volatile int g_ym_tl_dirty;   /* m_main.c: bed-level update request */
 /* GAME tab plumbing (m_main.c): the automap lives there, and the viewer /
  * exit-to-lobby are whole-screen flows the main loop owns. The menu just
  * pokes state and posts requests -- Michael's "no memorizing" note: every
@@ -282,6 +283,7 @@ void menu_update(uint16_t pad) {
         if (v < 0)   v = 0;
         if (v > 255) v = 255;
         *target = (uint8_t)v;
+        if (menu_row == 1) g_ym_tl_dirty = 1;   /* bed follows AMBIENCE */
     } else if (menu_tab == TAB_LIGHTING) {
         /* LIGHTING tab: toggle the corresponding effect bit. dir doesn't
          * matter — LEFT and RIGHT both flip. */

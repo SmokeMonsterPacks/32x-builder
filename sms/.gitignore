@@ -2,6 +2,12 @@ hello.o
 hello.sms
 linkfile
 font_1bpp.bin
-game.o
-game.bin
-game.linkfile
+games/*/game.o
+games/*/game.bin
+games/*/game.linkfile
+games/*/out.*
+games/*/crt0.rel
+games/*/main.rel
+games/*/main.lst
+games/*/main.sym
+games/*/main.asm

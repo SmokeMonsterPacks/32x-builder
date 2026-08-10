@@ -483,6 +483,17 @@ static uint8_t standup_power[MAX_STANDUPS];
  * button is the whole interface. Read by the secondary for its draw half,
  * so it rides the sprite-cache purge. */
 static uint8_t standup_scr_mode[MAX_STANDUPS];
+/* CRT BLOOM: frame_count stamp of the last power-ON. For BLOOM_FRAMES
+ * rendered frames the glass plays the tube strike: a white line flares
+ * at center (STRIKE_FRAMES), then the picture/static unfolds vertically
+ * from it — the image sampled through an animated reciprocal so it
+ * stretches out of the line like a warming CRT. Progress derives from
+ * SHARED_UC->frame_count (both CPUs read the same clock: no per-CPU
+ * counters to race, no decrement to double-run). */
+static uint16_t standup_bloom_start[MAX_STANDUPS];
+#define BLOOM_FRAMES  3   /* near the floor: 1 strike + 2 unfold; below this it's just a pop */
+#define STRIKE_FRAMES 1
+#define OFF_FRAMES    2   /* power-off: collapse frame + falling-line frame */
 /* Which side hit the floor: 1 = pushed from the FRONT, figure lands face up
  * (the printed side shows); 0 = pushed from BEHIND, lands face down — the
  * blank cardboard back shows, mirrored. Set at the shove from the same
@@ -511,6 +522,7 @@ void standups_clear(void) {
          * (mode 0); the telegraph is the second cycle's reveal. */
         standup_power[i] = 0;
         standup_scr_mode[i] = 0;
+        standup_bloom_start[i] = (uint16_t)0x8000;   /* far in the past */
     }
 }
 
@@ -2541,6 +2553,9 @@ int raycast_pvm_use(void) {
     }
     if (best < 0) return 0;
     standup_power[best] ^= 1;
+    /* Stamp BOTH edges: power-on plays the strike+unfold, power-off the
+     * phosphor collapse (same window, mode picked by power state). */
+    standup_bloom_start[best] = (uint16_t)SHARED_UC->frame_count;
     /* Every power CYCLE alternates the screen: static, telegraph, static...
      * Flipped on the OFF edge, so the FIRST wake of a found-dead set shows
      * plain static and the telegraph is the next cycle's reveal. */
@@ -4060,7 +4075,7 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
  * gloom instead of collapsing like a lit surface. */
 static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
         const uint8_t *tex, int tw, int th, int do_z, const uint8_t *lut,
-        unsigned noise_seed, const uint8_t *scr,
+        unsigned noise_seed, const uint8_t *scr, const int *bloom,
         int ax, int ay, fx_t au, fx_t av, int bx, int by, fx_t bu, fx_t bv,
         int cx, int cy, fx_t cu, fx_t cv);
 
@@ -4104,7 +4119,7 @@ __attribute__((noinline))
 static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
         const cface_t *fc, const boxmodel_t *bm,
         fx_t center_depth, int chair_dark, int dark, int zt, int power,
-        const uint8_t *scr) {
+        const uint8_t *scr, int bloom_e) {
     /* Same fog + flicker + dark-room walk the flat faces get, applied to ramp
      * values 1..4 so the textured face dims in lockstep and the LOD swap
      * stays seamless. 5 = dark glass (screen, power off). 6..9 = the RAW ramp
@@ -4128,14 +4143,42 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
     /* UVs by corner identity (face-5 vi order is bl,tl,tr,br; texture row 0 =
      * top), in texel units for the shift-sampling. Same two-triangle split as
      * the flat fill. */
+    /* Bloom shaping, precomputed per face (stack = per-CPU, no races):
+     * {elapsed, band half-height, unfold step 8.8, glass center ty}. */
+    int bloomv[5]; const int *bp = 0;
+    if (bloom_e >= 0) {
+        bloomv[0] = bloom_e;
+        int half = tg_bh / 2; if (half < 1) half = 1;
+        bloomv[3] = tg_by0 + half;             /* default: glass center */
+        bloomv[4] = !power;                    /* 1 = collapse (power-off) */
+        if (!power) {
+            /* Frame 0: thin band at center. Frame 1: single line fallen
+             * to the lower glass, on its way off the bottom. */
+            if (bloom_e == 0) {
+                int hv = half >> 2; if (hv < 1) hv = 1;
+                bloomv[1] = hv;
+            } else {
+                bloomv[1] = 0;                 /* one texel */
+                bloomv[3] = tg_by0 + tg_bh - (tg_bh >> 3) - 1;
+            }
+            bloomv[2] = 256;
+        } else if (bloom_e >= STRIKE_FRAMES) {
+            int hv = (half * (bloom_e - STRIKE_FRAMES + 1))
+                   / (BLOOM_FRAMES - STRIKE_FRAMES);
+            if (hv < 1) hv = 1;
+            bloomv[1] = hv;
+            bloomv[2] = (half << 8) / hv;
+        } else { bloomv[1] = 0; bloomv[2] = 256; }
+        bp = bloomv;
+    }
     fx_t TW = FX(bm->ftw), TH = FX(bm->fth);
     tex_tri_lut(fb, col_start, col_end, fc->depth,
-            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr,
+            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
             fc->sx[0],fc->sy[0], 0,  TH,
             fc->sx[1],fc->sy[1], 0,  0,
             fc->sx[2],fc->sy[2], TW, 0);
     tex_tri_lut(fb, col_start, col_end, fc->depth,
-            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr,
+            bm->ftex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
             fc->sx[0],fc->sy[0], 0,  TH,
             fc->sx[2],fc->sy[2], TW, 0,
             fc->sx[3],fc->sy[3], TW, TH);
@@ -4288,10 +4331,19 @@ static void draw_chair_3d(int i, int col_start, int col_end,
         if (cell_is_dark(cx, cy)) shade = 0;
         uint8_t c = (uint8_t)(bm->base + shade);
         if (faces[q].ftex) {
-            draw_panel_face(fb, col_start, col_end, &faces[q], bm,
+            {
+                int be = -1;
+                {
+                    uint16_t el = (uint16_t)((uint16_t)SHARED_UC->frame_count
+                                             - standup_bloom_start[i]);
+                    uint16_t win = standup_power[i] ? BLOOM_FRAMES : OFF_FRAMES;
+                    if (el < win) be = (int)el;
+                }
+                draw_panel_face(fb, col_start, col_end, &faces[q], bm,
                             center_depth, chair_dark, cell_is_dark(cx, cy), zt,
                             standup_power[i],
-                            (standup_scr_mode[i] && tg_valid) ? tg_buf : 0);
+                            (standup_scr_mode[i] && tg_valid) ? tg_buf : 0, be);
+            }
             continue;
         }
         if (SHARED_UC->chair_tex) {
@@ -4403,7 +4455,7 @@ static void tex_tri(uint8_t *fb, int col_start, int col_end, fx_t depth,
 __attribute__((noinline))
 static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
         const uint8_t *tex, int tw, int th, int do_z, const uint8_t *lut,
-        unsigned noise_seed, const uint8_t *scr,
+        unsigned noise_seed, const uint8_t *scr, const int *bloom,
         int ax, int ay, fx_t au, fx_t av, int bx, int by, fx_t bu, fx_t bv,
         int cx, int cy, fx_t cu, fx_t cv) {
     int X[3] = {ax,bx,cx}, Y[3] = {ay,by,cy};
@@ -4450,6 +4502,37 @@ static void tex_tri_lut(uint8_t *fb, int col_start, int col_end, fx_t depth,
                 if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
                 uint8_t s = tex[ty * tw + tx];
                 if (s >= 5) {
+                    /* CRT bloom: bloom = {elapsed, half-height, unfold
+                     * step, glass center ty}. Strike phase paints a white
+                     * line; unfold phase gates the band and stretches the
+                     * content out of it (one mul per pixel). */
+                    if (bloom) {
+                        int rel = ty - bloom[3];
+                        if (bloom[4]) {
+                            /* POWER-OFF: phosphors losing voltage — a DIM
+                             * white band (51 = 50% white, never the
+                             * strike's 49) collapses, then a single line
+                             * SWEEPS toward the bottom edge, dimmer (52)
+                             * as it falls. bloom[3] carries the moving
+                             * line position; no frame ever holds still. */
+                            row[x] = (rel <= bloom[1] && rel >= -bloom[1])
+                                   ? (uint8_t)(bloom[0] >= OFF_FRAMES - 1
+                                               ? 52 : 51)
+                                   : lut[5];
+                            continue;
+                        }
+                        if (bloom[0] < STRIKE_FRAMES) {
+                            row[x] = (rel <= bloom[0] && rel >= -bloom[0])
+                                   ? (uint8_t)49 : lut[5];
+                            continue;
+                        }
+                        if (rel > bloom[1] || rel < -bloom[1]) {
+                            row[x] = lut[5];
+                            continue;
+                        }
+                        ty = bloom[3] + ((rel * bloom[2]) >> 8);
+                        if (ty < 0) ty = 0; else if (ty >= th) ty = th - 1;
+                    }
                     /* Screen. The TELEGRAPH samples by texture coords — the
                      * image must stick to the glass like a picture, unlike
                      * the noise, which hashes SCREEN space (at a distance
@@ -5780,11 +5863,11 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
             fx_t TW = FX(vbm->ftw), TH = FX(vbm->fth);
             if (t == 10)                       /* bl, tl, tr */
                 tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->ftex, vbm->ftw, vbm->fth,
-                            0, vlut, vseed, 0,
+                            0, vlut, vseed, 0, 0,
                             x0,y0, 0,TH, x1,y1, 0,0, x2,y2, TW,0);
             else                               /* bl, tr, br */
                 tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->ftex, vbm->ftw, vbm->fth,
-                            0, vlut, vseed, 0,
+                            0, vlut, vseed, 0, 0,
                             x0,y0, 0,TH, x1,y1, TW,0, x2,y2, TW,TH);
             continue;
         }
@@ -6048,6 +6131,7 @@ void raycast_purge_sprite_cache(void) {
     purge_cache_range(standup_fall_len_q, sizeof standup_fall_len_q);
     purge_cache_range(standup_power, sizeof standup_power);
     purge_cache_range(standup_scr_mode, sizeof standup_scr_mode);
+    purge_cache_range(standup_bloom_start, sizeof standup_bloom_start);
 }
 
 /* Drop-ceiling grid pass — called from the secondary SH-2's dispatch loop

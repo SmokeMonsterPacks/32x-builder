@@ -1,18 +1,38 @@
 ROM = hello.sms
 
-all: $(ROM) game.bin
+# In-game mini-games live in games/<name>/game.asm (see DESIGN.md). Each
+# builds an 8KB image that runs from Z80 RAM; tools/gen_z80_game.py packages
+# it into the header the 68K compiles against. One game is wired into the
+# 68K side today (maze); multi-game selection is milestone M2.
+GAME ?= maze
+GDIR  = games/$(GAME)
 
-# In-game mini-game blob: 8KB image that runs from Z80 RAM. The header
-# the 68K compiles against is regenerated whenever the blob changes.
-game.o: game.asm
-	wla-z80 -o game.o game.asm
+all: $(ROM) $(GDIR)/game.bin games/hello-c/game.bin
 
-game.linkfile: Makefile
-	printf '[objects]\ngame.o\n' > game.linkfile
+# C games: SDCC -mz80 against harness.h (no SMSlib — the harness contract
+# is the platform). crt0 at $0000, data above the map region, makebin
+# pads to the 8KB image the packager expects.
+games/hello-c/crt0.rel: games/hello-c/crt0.s
+	cd games/hello-c && sdasz80 -o crt0.rel crt0.s
 
-game.bin: game.o game.linkfile
-	wlalink -d game.linkfile game.bin
-	python3 ../tools/gen_z80_game.py
+# NOTE: -o out.ihx, NOT game.ihx — SDCC names every intermediate after
+# the output, and a generated game.asm would shadow the hand-written-asm
+# convention (the packager treats game.asm as the contract source).
+games/hello-c/game.bin: games/hello-c/main.c games/hello-c/harness.h games/hello-c/crt0.rel
+	cd games/hello-c && sdcc -mz80 --no-std-crt0 --opt-code-size \
+	    --code-loc 0x0080 --data-loc 0 crt0.rel main.c -o out.ihx
+	cd games/hello-c && makebin -p out.ihx game.bin
+	python3 ../tools/gen_z80_game.py hello-c
+
+$(GDIR)/game.o: $(GDIR)/game.asm
+	cd $(GDIR) && wla-z80 -o game.o game.asm
+
+$(GDIR)/game.linkfile: Makefile
+	printf '[objects]\ngame.o\n' > $(GDIR)/game.linkfile
+
+$(GDIR)/game.bin: $(GDIR)/game.o $(GDIR)/game.linkfile
+	cd $(GDIR) && wlalink -d game.linkfile game.bin
+	python3 ../tools/gen_z80_game.py $(GAME)
 
 font_1bpp.bin: gen_font.py
 	python3 gen_font.py
@@ -31,6 +51,10 @@ install: $(ROM)
 	cp $(ROM) ../rom/sms-diag.sms
 
 clean:
-	rm -f hello.o $(ROM) linkfile font_1bpp.bin game.o game.bin game.linkfile
+	rm -f hello.o $(ROM) linkfile font_1bpp.bin \
+	      games/*/game.o games/*/game.bin games/*/game.linkfile \
+	      games/*/*.rel games/*/*.ihx games/*/*.lst games/*/*.sym \
+	      games/*/*.asm.orig games/*/*.map games/*/*.noi games/*/*.lk \
+	      games/*/main.asm games/*/*.rst
 
 .PHONY: all install clean

@@ -2,13 +2,13 @@
 #include "shared.h"
 #include "sound.h"
 #include "raycast.h"   /* RAYCAST_PEEK_CLAIM: the peek's hero_scratch span */
-#include "amb_buzz.h"
 #include "amb_neon.h"
 #include "amb_hello_adp.h"
 #include "amb_death_tape.h"
 #include "amb_slide.h"
 #include "amb_step.h"
 #include "amb_crt_on.h"
+#include "amb_crt_off.h"
 
 /* Neanderthal sprite position (matches the entry in raycast.c::standups).
  * Keeping a duplicate here on the audio side means the secondary doesn't
@@ -29,6 +29,10 @@
  * (~0.6%) of safety margin. Keeps buzz/neon levels intact (they're
  * the constant ambient bed) while giving room for hello+step to mix
  * in without summing past the rails. */
+/* The mixer's output rate. Was spelled AMB_MIX_RATE while the
+ * buzz sample was the bed; the bed is the YM2612 now, the rate is ours. */
+#define AMB_MIX_RATE 16000
+
 #define SAMPLE_MIN 8
 #define SAMPLE_MAX 1430
 #define SAMPLE_CENTER ((SAMPLE_MAX + SAMPLE_MIN) / 2)   /* 719 */
@@ -378,7 +382,7 @@ void amb_audio_idle(void) {
 }
 
 #define HELLO_STEP_FX \
-    ((uint32_t)(((uint64_t)AMB_HELLO_ADP_SAMPLE_RATE << 16) / AMB_BUZZ_SAMPLE_RATE))
+    ((uint32_t)(((uint64_t)AMB_HELLO_ADP_SAMPLE_RATE << 16) / AMB_MIX_RATE))
 
 /* Broken-tape death effect needs reverse + variable-rate scrubbing,
  * which a compressed stream can't do — so it warps this small 4 s
@@ -387,7 +391,7 @@ void amb_audio_idle(void) {
 static uint32_t death_pos_fx = 0;
 static int      death_was_active = 0;
 #define DEATH_STEP_FX \
-    ((uint32_t)(((uint64_t)AMB_DEATH_TAPE_SAMPLE_RATE << 16) / AMB_BUZZ_SAMPLE_RATE))
+    ((uint32_t)(((uint64_t)AMB_DEATH_TAPE_SAMPLE_RATE << 16) / AMB_MIX_RATE))
 
 /* Voyager-hello playback-speed trim. On real hardware the hellos drag
  * slightly slower than in Ares while the buzz bed sounds right, so this
@@ -432,7 +436,7 @@ static int      slide_active = 0;
 static int      crt_active = 0, crt_rev = 0;
 static uint32_t crt_pos_fx = 0;
 #define STEP_STEP_FX \
-    ((uint32_t)(((uint64_t)AMB_STEP_SAMPLE_RATE << 16) / AMB_BUZZ_SAMPLE_RATE))
+    ((uint32_t)(((uint64_t)AMB_STEP_SAMPLE_RATE << 16) / AMB_MIX_RATE))
 
 /* Buzz envelope state for the "fluorescent flicker" effect. Most of
  * the time amp = 256 (full); occasionally the envelope dips to ~12%,
@@ -443,9 +447,6 @@ static uint32_t crt_pos_fx = 0;
  *   2 = hold low
  *   3 = fading up
  */
-static int buzz_env_amp   = 256;
-static int buzz_env_phase = 0;
-static int buzz_env_timer = 0;
 
 void amb_pump(void) {
     if (!AMB_ACTIVE) {
@@ -485,11 +486,11 @@ void amb_pump(void) {
         slide_pos_fx = 0;
     }
 
-    /* CRT power one-shot from the primary (PVM A toggle). ONE bake serves
-     * both directions: power-off plays the power-on clip REVERSED (hum ->
-     * degauss -> click), which reads as a shutdown and saves the second
-     * bake's ROM (Mike's call). A new request retriggers from the top —
-     * mashing A restarts the click, which is what a real switch does. */
+    /* CRT power one-shot from the primary (PVM A toggle). Two real bakes
+     * now (the reversed-clip trick bugged Mike since day one): power-on =
+     * the degauss THUNK, power-off = its own short clip. A new request
+     * retriggers from the top — mashing A restarts the click, which is
+     * what a real switch does. */
     if (SHARED_UC->crt_sfx) {
         crt_rev = (SHARED_UC->crt_sfx == 2);
         SHARED_UC->crt_sfx = 0;
@@ -497,38 +498,19 @@ void amb_pump(void) {
         crt_pos_fx = 0;
     }
 
-    /* Neon sting trigger — rare, 1/512 ≈ avg 12 s. */
+    /* Neon sting trigger — rare, 1/512 ≈ avg 12 s. The sting stays the
+     * PWM sample in BOTH hum modes: the recording is a struck-tube BONG
+     * the current FM patch can't imitate (Mike missed it immediately).
+     * YM mode owns only the bed; an FM bell patch for the sting is a
+     * tuning-lab project, not a default. */
     if (!neon_active && (prng_next() & 0x1FF) == 0) {
         neon_active = 1;
         neon_pos = 0;
     }
 
-    /* Buzz envelope state machine — random fade-out events. */
-    switch (buzz_env_phase) {
-    case 0:  /* steady full */
-        if ((prng_next() & 0x3FF) == 0) {       /* 1/1024 → avg ~24 s */
-            buzz_env_phase = 1;
-        }
-        break;
-    case 1:  /* fade down: 256 → 32 in ~88 buffers (~2 s) */
-        buzz_env_amp -= 3;
-        if (buzz_env_amp <= 32) {
-            buzz_env_amp = 32;
-            buzz_env_phase = 2;
-            buzz_env_timer = 24;                /* ~0.5 s hold */
-        }
-        break;
-    case 2:  /* hold low */
-        if (--buzz_env_timer <= 0) buzz_env_phase = 3;
-        break;
-    case 3:  /* fade up */
-        buzz_env_amp += 3;
-        if (buzz_env_amp >= 256) {
-            buzz_env_amp = 256;
-            buzz_env_phase = 0;
-        }
-        break;
-    }
+    /* (Buzz envelope machine retired with the sample: the bed is the
+     * YM2612 now — its LFO does the wavering. A future ambience event
+     * can dip the bed via YM TL writes from the primary.) */
 
     int hello_amp = hello_dist_amp();
 
@@ -573,22 +555,19 @@ void amb_pump(void) {
      * runs dry the mixer below freezes the hello mid-word and resumes
      * when idle decode catches up: a radio dropout, not a frame drop. */
 
-    static uint32_t buzz_pos = 0;
     for (int i = 0; i < len; i++) {
-        /* Buzz with envelope. >>9 (was >>8) halves the contribution so
-         * the source's fade-in/out events sit underneath neon rather
-         * than overpowering it. Buzz is the atmospheric bed, not the
-         * lead. */
-        int buzz = (int)amb_buzz_samples[buzz_pos];
-        int delta = ((buzz - SAMPLE_CENTER) * buzz_env_amp) >> 9;
+        /* The bed is the YM2612 (drip-fed patch, m_main.c) — the PWM mix
+         * carries only the events on top: neon bong, hello, steps. */
+        int delta = 0;
 
-        /* Neon sting at quarter amplitude (was >>1). Source peak is
-         * ±633 of the ±711 budget — at >>1 it dominated the mix and
-         * blew through the soft-clip headroom; at >>2 it sits around
-         * ±158, in line with buzz/hello/step. */
+        /* Neon sting at quarter amplitude (was >>1) — at >>1 it dominated
+         * the mix and blew through the soft-clip headroom; at >>2 it sits
+         * in line with buzz/hello/step. 8-bit bake, normalized; RESCALE
+         * reconstructs the original ±317 PWM-word delta. */
         if (neon_active) {
-            int neon = (int)amb_neon_samples[neon_pos];
-            delta += (neon - SAMPLE_CENTER) >> 2;
+            int neon = ((int)amb_neon_samples[neon_pos] * AMB_NEON_RESCALE) >> 7;
+            delta += neon >> 1;   /* half amplitude: doubled 2026-08-10 —
+                                    * the PWM bed is gone, headroom freed */
             neon_pos++;
             if (neon_pos >= AMB_NEON_SAMPLE_COUNT) neon_active = 0;
         }
@@ -627,11 +606,11 @@ void amb_pump(void) {
 
         /* Carpet footstep — bypasses primary `vol` (amb_volume) below.
          * >>9 (was >>8) halves its contribution so it shares the
-         * budget evenly with buzz/neon/hello. Source baked 11kHz/16-bit. */
+         * budget evenly with buzz/neon/hello. Source baked 11kHz/8-bit. */
         int step_delta = 0;
         if (walking) {
             uint32_t step_idx = step_pos_fx >> 16;
-            int step = (int)amb_step_samples[step_idx] - SAMPLE_CENTER;
+            int step = ((int)amb_step_samples[step_idx] * AMB_STEP_RESCALE) >> 7;
             step_delta = (step * step_vol) >> 9;
             step_pos_fx += step_adv;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
@@ -643,20 +622,21 @@ void amb_pump(void) {
             int sl = (int)amb_slide_samples[slide_pos_fx >> 16] << 2;
             step_delta += (sl * step_vol) >> 8;
             slide_pos_fx += ((uint32_t)AMB_SLIDE_SAMPLE_RATE << 16)
-                            / AMB_BUZZ_SAMPLE_RATE;
+                            / AMB_MIX_RATE;
             if ((slide_pos_fx >> 16) >= AMB_SLIDE_SAMPLE_COUNT) slide_active = 0;
         }
         /* CRT power one-shot — same 8-bit path as the slide, same loudness
-         * (it's the event you just caused, inches from your hand). Reverse
-         * indexes the same bake back-to-front for the power-off. */
+         * (it's the event you just caused, inches from your hand). */
         if (crt_active) {
             uint32_t ci = crt_pos_fx >> 16;
-            if (crt_rev) ci = AMB_CRT_ON_SAMPLE_COUNT - 1 - ci;
-            int cv = (int)amb_crt_on_samples[ci] << 2;
+            uint32_t n  = crt_rev ? AMB_CRT_OFF_SAMPLE_COUNT
+                                  : AMB_CRT_ON_SAMPLE_COUNT;
+            int cv = crt_rev ? (int)amb_crt_off_samples[ci] << 2
+                             : (int)amb_crt_on_samples[ci] << 2;
             step_delta += (cv * step_vol) >> 8;
             crt_pos_fx += ((uint32_t)AMB_CRT_ON_SAMPLE_RATE << 16)
-                          / AMB_BUZZ_SAMPLE_RATE;
-            if ((crt_pos_fx >> 16) >= AMB_CRT_ON_SAMPLE_COUNT) crt_active = 0;
+                          / AMB_MIX_RATE;
+            if ((crt_pos_fx >> 16) >= n) crt_active = 0;
         }
 
         /* Overall gain on ambient sources; footstep added post-gain. */
@@ -673,8 +653,6 @@ void amb_pump(void) {
         if (s < SAMPLE_MIN) s = SAMPLE_MIN;
         amb_pwm_buf[buf_idx][i] = (uint16_t)s;
 
-        buzz_pos++;
-        if (buzz_pos >= AMB_BUZZ_SAMPLE_COUNT) buzz_pos = 0;
     }
 
     /* Clear only OUR bit, against a FRESH read — not the `needs` value
@@ -718,7 +696,7 @@ void amb_sound_init(void) {
         for (int i = 0; i < AMB_SAMPLES_PER_BUF; i++)
             amb_pwm_buf[b][i] = SAMPLE_CENTER;
 
-    Mars_InitPWM(AMB_BUZZ_SAMPLE_RATE, SAMPLE_MIN, SAMPLE_MAX);
+    Mars_InitPWM(AMB_MIX_RATE, SAMPLE_MIN, SAMPLE_MAX);
 
     /* DMA destination = PWM mono register, fixed. */
     SH2_DMA_DAR1  = (uint32_t)(uintptr_t)&MARS_PWM_MONO;

@@ -259,6 +259,33 @@ void HwMdSmsGameStop(void) {
 	while (MARS_SYS_COMM0 && --guard) ;
 }
 
+void HwMdYmCmd(unsigned char op) {
+	/* Whole-action YM control (command 0x0F): 0 all off, 1 patch upload
+	 * + bed on, 2 sting key-on, 3 sting release. One COMM round trip —
+	 * the per-register path costs a frame per write (68K serves one
+	 * command per vblank) and a 70-write upload visibly hung the game. */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM0 = (unsigned short)(0x0F00 | op);
+	guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+}
+
+void HwMdYmWrite(unsigned char reg, unsigned char val) {
+	/* One YM2612 part-I register write, relayed to the 68K (command
+	 * 0x0E). FIRE-AND-FORGET: waits for the slot to be free, posts, and
+	 * returns — no completion wait. The 68K serves ~one command per
+	 * vblank, so a caller pacing itself to one write per frame never
+	 * blocks at all, while a synchronous burst is both a hang (16ms per
+	 * write) and, empirically, silent (the B00246 mystery: 70-write
+	 * bursts never took effect on the chip even with settle pacing —
+	 * the frame-spaced stream is the PROVEN-sounding shape). */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM2 = val;
+	MARS_SYS_COMM0 = (unsigned short)(0x0E00 | reg);
+}
+
 void HwMdSetColor(unsigned short index, unsigned short color) {
 	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
 	MARS_SYS_COMM2 = color;

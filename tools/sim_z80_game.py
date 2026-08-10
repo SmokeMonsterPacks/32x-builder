@@ -19,11 +19,15 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIN = ROOT / "sms" / "game.bin"
+GAME = sys.argv[1] if len(sys.argv) > 1 else "maze"
+BIN = ROOT / "sms" / "games" / GAME / "game.bin"
 
 TILEBUF, MAP_BITS, MAP_META = 0x1900, 0x1C00, 0x1C80
 PAD, DIRTY, STATE, FRAME = 0x1FF4, 0x1FF5, 0x1FF6, 0x1FF7
 T_FLOOR, T_WALL, T_PLAYER, T_EXIT = 1, 44, 27, 16
+
+
+PSG_PORT = 0x7F11
 
 
 class Z80:
@@ -33,6 +37,7 @@ class Z80:
         self.sp = 0
         self.a = self.b = self.c = self.d = self.e = self.h = self.l = 0
         self.fz = self.fc = False   # only Z and C matter to this program
+        self.psg = []               # bytes written to $7F11, in order
 
     # -- register helpers -------------------------------------------------
     def hl(self): return (self.h << 8) | self.l
@@ -113,16 +118,35 @@ class Z80:
         if op == 0x11:  self.set_de(self.fetch16()); return
         if op == 0x01:  self.set_bc(self.fetch16()); return
         if op == 0x3A:  self.a = self.m[self.fetch16()]; return
-        if op == 0x32:  self.m[self.fetch16()] = self.a; return
+        if op == 0x32:
+            addr = self.fetch16()
+            self.m[addr] = self.a
+            if addr == PSG_PORT:
+                self.psg.append(self.a)
+            return
+        if op == 0x2A:                                # ld hl,(nn)
+            addr = self.fetch16()
+            self.l, self.h = self.m[addr], self.m[addr + 1]
+            return
+        if op == 0x22:                                # ld (nn),hl
+            addr = self.fetch16()
+            self.m[addr], self.m[addr + 1] = self.l, self.h
+            return
         if op == 0x36:  self.m[self.hl()] = self.fetch(); return
         if op == 0x34:                                # inc (hl)
             v = (self.m[self.hl()] + 1) & 0xFF
             self.m[self.hl()] = v
             self.fz = v == 0
             return
+        if op == 0x35:                                # dec (hl)
+            v = (self.m[self.hl()] - 1) & 0xFF
+            self.m[self.hl()] = v
+            self.fz = v == 0
+            return
         if op == 0x23:  self.set_hl((self.hl() + 1) & 0xFFFF); return
         if op == 0x13:  self.set_de((self.de() + 1) & 0xFFFF); return
         if op == 0x0B:  self.set_bc((self.bc() - 1) & 0xFFFF); return
+        if op == 0x2B:  self.set_hl((self.hl() - 1) & 0xFFFF); return
         if op == 0x19:                                # add hl,de
             r = self.hl() + self.de()
             self.fc = r > 0xFFFF
@@ -135,6 +159,16 @@ class Z80:
             return
         if op == 0x1A:  self.a = self.m[self.de()]; return
         if op == 0x2F:  self.a ^= 0xFF; return        # cpl
+        if op == 0x0F:                                # rrca
+            c = self.a & 1
+            self.a = (self.a >> 1) | (c << 7)
+            self.fc = bool(c)
+            return
+        if op == 0x07:                                # rlca
+            c = (self.a >> 7) & 1
+            self.a = ((self.a << 1) | c) & 0xFF
+            self.fc = bool(c)
+            return
         if op == 0x1F:                                # rra
             c = self.a & 1
             self.a = (self.a >> 1) | (0x80 if self.fc else 0)
@@ -200,6 +234,12 @@ class Z80:
             self.pc = t
             return
         if op == 0xC9:  self.pc = self.pop(); return  # ret
+        if op in (0xC0, 0xC8, 0xD0, 0xD8):            # ret cc
+            take = {0xC0: not self.fz, 0xC8: self.fz,
+                    0xD0: not self.fc, 0xD8: self.fc}[op]
+            if take:
+                self.pc = self.pop()
+            return
         if op == 0xC5:  self.push(self.bc()); return
         if op == 0xD5:  self.push(self.de()); return
         if op == 0xE5:  self.push(self.hl()); return
@@ -216,6 +256,10 @@ class Z80:
             elif 0x38 <= sub <= 0x3F:                 # srl
                 self.fc = bool(v & 1)
                 v >>= 1
+            elif 0x18 <= sub <= 0x1F:                 # rr (through carry)
+                c = v & 1
+                v = (v >> 1) | (0x80 if self.fc else 0)
+                self.fc = bool(c)
             else:
                 raise NotImplementedError(f"CB {sub:02X}")
             self.set_r(i, v)
@@ -246,8 +290,12 @@ mem[MAP_META:MAP_META + 4] = bytes([2, 2, 31, 16])
 cpu = Z80(mem)
 
 
+FRAME_COUNT = [0]
+
+
 def run_frame(pad):
     """One 68K frame: poke pad, tick FRAME, run the Z80 a while."""
+    FRAME_COUNT[0] += 1
     mem[PAD] = pad
     mem[FRAME] = (mem[FRAME] + 1) & 0xFF
     for _ in range(200000):
@@ -359,6 +407,101 @@ for _ in range(40):
     tap(0x08)
 tap(0x08)                            # the step into the door itself
 check("escape: STATE flipped", mem[STATE] == 1)
+settle(150, 0)                       # music keeps playing on the escape screen
+
+
+# ---- music parity: PSG stream must match the reference engine -----------
+# Independent reimplementation of games/maze/game.asm's SPACE-A music (and
+# of run_engine_space in sms_liminal_gen.py): the whole point is three
+# copies of the algorithm agreeing byte for byte. Echoes use the Z80's
+# countdown model; section order per frame is the parity contract:
+# bass, phrase select, note fire, melody decay, echo fire, echo decay.
+def ref_psg(seed, frames):
+    s = (seed & 0xFFFF) or 1
+
+    def step():
+        nonlocal s
+        lsb = s & 1
+        s >>= 1
+        if lsb:
+            s ^= 0xB400
+        return s
+
+    MOTIFS = [[285, 240, 254, 285], [190, 214, 240, 285],
+              [143, 190, 240], [254, 240, 285, 190]]
+    BASS = [762, 855, 960, 762]
+    BT = [330 + i * 30 for i in range(8)]
+    MGAP = [75 + i * 30 for i in range(8)]
+
+    def tone(base, d):
+        return [base | (d & 0xF), (d >> 4) & 0x3F]
+
+    out = [0x9F, 0xBF, 0xDF, 0xFF]               # boot silence only
+    b_i, b_att, b_fade, b_t = 0, 15, 0, 0
+    motif, mi = [], 0
+    m_att, m_fade, note_t, gap = 15, 0, 0, 0
+    e_att, e_fade = 15, 0
+    echo = []                                    # [countdown, div]
+    for _ in range(frames):
+        if b_t == 0:
+            d = BASS[b_i & 3]
+            b_i += 1 if (step() & 3) else 2
+            out += tone(0x80, d)
+            out.append(0x90 | 6)
+            b_att, b_fade = 6, 30
+            b_t = BT[step() & 7]
+        b_t -= 1
+        if b_att < 15:
+            b_fade -= 1
+            if b_fade == 0:
+                b_fade = 30
+                b_att += 1
+                out.append(0x90 | b_att)
+        if mi >= len(motif):
+            if gap == 0:
+                motif = MOTIFS[step() & 3]
+                mi, note_t = 0, 0
+                gap = MGAP[step() & 7]
+            else:
+                gap -= 1
+        if mi < len(motif) and note_t == 0:
+            d = motif[mi]
+            mi += 1
+            out += tone(0xC0, d)
+            out.append(0xD0 | 2)
+            m_att, m_fade = 2, 6
+            echo.append([19, d])
+            note_t = 13 + (step() & 7)
+        elif note_t > 0:
+            note_t -= 1
+        if m_att < 15:
+            m_fade -= 1
+            if m_fade == 0:
+                m_fade = 6
+                m_att += 1
+                out.append(0xD0 | m_att)
+        for slot in echo:
+            slot[0] -= 1
+            if slot[0] == 0:
+                out += tone(0xA0, slot[1])
+                out.append(0xB0 | 7)
+                e_att, e_fade = 7, 6
+        echo = [x for x in echo if x[0] > 0]
+        if e_att < 15:
+            e_fade -= 1
+            if e_fade == 0:
+                e_fade = 6
+                e_att += 1
+                out.append(0xB0 | e_att)
+    return out
+
+
+m_seed = 0xACE1 ^ 0x0202 ^ 0x101F   # ^ (spawn_y:x) ^ (exit_y:x) of this maze
+expected = ref_psg(m_seed, FRAME_COUNT[0])
+check(f"music parity: {len(cpu.psg)} PSG writes match reference byte-for-byte",
+      cpu.psg == expected)
+check("music: melody onsets occurred",
+      sum(1 for b in cpu.psg if b & 0xF0 == 0xC0) >= 1)
 rows = frame_rows()
 esc = "".join(chr(t - 12 + ord('A')) if 12 <= t <= 37 else ' '
               for t in mem[TILEBUF + 8 * 32:TILEBUF + 8 * 32 + 32])
