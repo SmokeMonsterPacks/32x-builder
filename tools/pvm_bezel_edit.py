@@ -49,7 +49,10 @@ def read_header():
     return w, h, vals
 
 def do_export():
+    # The engine samples the front face MIRRORED horizontally; flip both
+    # directions in this tool so the editor is WYSIWYG with the glass.
     w, h, vals = read_header()
+    vals = [vals[y*w + (w-1-x)] for y in range(h) for x in range(w)]
     im = Image.new("RGB", (w, h))
     im.putdata([LEGEND[v] for v in vals])
     im.resize((w * SCALE, h * SCALE), Image.NEAREST).save(PNG)
@@ -67,6 +70,7 @@ def do_import():
                 # nearest legend color: tolerate editor anti-alias slop
                 px = min(RLOOK, key=lambda c: sum((a-b)**2 for a, b in zip(c, px)))
             out.append(RLOOK[px])
+    out = [out[y*w + (w-1-x)] for y in range(h) for x in range(w)]   # WYSIWYG flip
     rows = []
     for y in range(h):
         rows.append("    { " + ",".join(f"{v}" for v in out[y*w:(y+1)*w]) + " },")
@@ -97,6 +101,7 @@ def do_import_rear():
                 px = min(RLOOK, key=lambda c: sum((a-b)**2 for a, b in zip(c, px)))
             v = RLOOK[px]
             out.append(4 if v > 4 else v)      # clamp screen values to case
+    out = [out[y*w + (w-1-x)] for y in range(h) for x in range(w)]   # WYSIWYG flip
     rows = []
     for y in range(h):
         rows.append("    { " + ",".join(str(v) for v in out[y*w:(y+1)*w]) + " },")
