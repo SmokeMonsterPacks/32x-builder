@@ -101,7 +101,7 @@ def do_import_rear():
                 px = min(RLOOK, key=lambda c: sum((a-b)**2 for a, b in zip(c, px)))
             v = RLOOK[px]
             out.append(4 if v > 4 else v)      # clamp screen values to case
-    out = [out[y*w + (w-1-x)] for y in range(h) for x in range(w)]   # WYSIWYG flip
+    # no flip: the rear face has its own UV assignment (WYSIWYG as-is)
     rows = []
     for y in range(h):
         rows.append("    { " + ",".join(str(v) for v in out[y*w:(y+1)*w]) + " },")

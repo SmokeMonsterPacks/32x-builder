@@ -30,6 +30,19 @@ mon_f = (MON_CX - mw2, desk_top, mz0 - mzc + MON_CZ,
          MON_CX + mw2, desk_top + (my1 - my0), mz1 - mzc + MON_CZ)
 
 out = pathlib.Path(__file__).resolve().parent.parent / "sh_src" / "desk_pvm3d.h"
+# SPLIT THE DESKTOP SLAB at the monitor's x-extent: a box that both spans a
+# stacked box (monitor, Y-verdict) and extends past the pedestals (X-verdict
+# vs the monitor) makes the pairwise separating-axis comparator CYCLIC, and
+# the insertion sort then picks an angle-dependent arbitrary order — Mike's
+# desk-through-monitor screenshot. Three segments = every pair single-axis
+# consistent, cycle impossible.
+slab = desk_f[2]
+sx0, sy0, sz0, sx1, sy1, sz1 = slab
+m_x0, m_x1 = mon_f[0], mon_f[3]
+slab_parts = [(sx0, sy0, sz0, m_x0, sy1, sz1),
+              (m_x0, sy0, sz0, m_x1, sy1, sz1),
+              (m_x1, sy0, sz0, sx1, sy1, sz1)]
+desk_f = desk_f[:2] + slab_parts
 boxes = [mon_f] + desk_f          # MONITOR FIRST: ftex binds to box 0 face 5
 lines = "\n".join(f"    {{ {b[0]:6d},{b[1]:6d},{b[2]:6d},{b[3]:6d},{b[4]:6d},{b[5]:6d} }},"
                   for b in boxes)

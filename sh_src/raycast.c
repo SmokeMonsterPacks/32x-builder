@@ -4041,7 +4041,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
  * the on_desk flag, never by kind lookup. Drawn under world_h 0.46 (the
  * model tops out at y=294 of the 0.4-cell scale = 0.46 cells). */
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
-    PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE, CHAIR_BASE };
+    PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
+    CHAIR_BASE, CHAIR_BASE, CHAIR_BASE };
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
@@ -4262,6 +4263,22 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
         bp = bloomv;
     }
     fx_t TW = FX(bm->ftw), TH = FX(bm->fth);
+    if (fc->ftex == 2) {
+        /* REAR face (+z, chair_face_v order bl,br,tr,tl viewed from
+         * behind, model +x on the viewer's LEFT): its own UV corner
+         * assignment — reusing the front's rotated the panel 90°. */
+        tex_tri_lut(fb, col_start, col_end, fc->depth,
+                ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
+                fc->sx[0],fc->sy[0], TW, TH,
+                fc->sx[1],fc->sy[1], 0,  TH,
+                fc->sx[2],fc->sy[2], 0,  0);
+        tex_tri_lut(fb, col_start, col_end, fc->depth,
+                ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
+                fc->sx[0],fc->sy[0], TW, TH,
+                fc->sx[2],fc->sy[2], 0,  0,
+                fc->sx[3],fc->sy[3], TW, 0);
+        return;
+    }
     tex_tri_lut(fb, col_start, col_end, fc->depth,
             ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
             fc->sx[0],fc->sy[0], 0,  TH,
