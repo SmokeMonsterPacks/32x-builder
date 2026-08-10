@@ -232,7 +232,10 @@ static void place_pvms(int count) {
         static const int8_t fdy[4] = { 0, 1, 0, -1 };
         uint8_t open[4]; int nopen = 0;
         for (int d = 0; d < 4; d++)
-            if (footprint_clear(x + fdx[d], y + fdy[d], 1, 1))
+            /* WALKABLE is the test, not placeable: footprint_clear demands
+             * a 1-cell margin too, and requiring that of a neighbor turned
+             * the rule into "needs a plaza" — zero monitors ever placed. */
+            if (cells_open(x + fdx[d], y + fdy[d], x + fdx[d], y + fdy[d]))
                 open[nopen++] = (uint8_t)(d * 64);
         if (!nopen) continue;                 /* boxed in: no watchable side */
         uint8_t facing = open[xs32_range(0, nopen - 1)];
