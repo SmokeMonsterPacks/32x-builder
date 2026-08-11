@@ -2788,7 +2788,8 @@ typedef struct boxmodel_s { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; u
                  /* optional COMPOSITE variant of this kind's model (the
                   * PVM's desk-mounted set). The asset viewer walks this —
                   * a new composite is one pointer, never a new enum. */
-                 const struct boxmodel_s *alt; } boxmodel_t;
+                 const struct boxmodel_s *alt;
+                 const char *alt_name; } boxmodel_t;
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
 static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
@@ -4036,7 +4037,7 @@ static const boxmodel_t boxmodels[] = {
     { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
       (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
       0, (const uint8_t *)pvm_rear_tex,
-      (const struct boxmodel_s *)&desk_pvm_model },
+      (const struct boxmodel_s *)&desk_pvm_model, "DESK SET" },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
 
@@ -5676,14 +5677,47 @@ int raycast_asset_dir_view(int sel, uint8_t yaw, int *nviews) {
     return ds->sect_view[best];
 }
 
-int raycast_asset_count(void) { return SPRITE_DEF_COUNT; }
+/* COMPOSITE models (boxmodels[].alt) ride the asset cycle as first-class
+ * entries after the sprite kinds — Mike: hiding the desk set behind a
+ * B-chord variant meant 'I still don't see all of our assets'. */
+static int viewer_alt_parent(int j) {
+    for (int i = 0; i < BOXMODEL_COUNT; i++)
+        if (boxmodels[i].alt && j-- == 0) return boxmodels[i].kind;
+    return -1;
+}
+static int viewer_alt_count(void) {
+    int n = 0;
+    for (int i = 0; i < BOXMODEL_COUNT; i++) if (boxmodels[i].alt) n++;
+    return n;
+}
+
+int raycast_asset_count(void) { return SPRITE_DEF_COUNT + viewer_alt_count(); }
 
 int raycast_asset_valid(int sel) {
-    if (sel < 0 || sel >= SPRITE_DEF_COUNT) return 0;
+    if (sel >= SPRITE_DEF_COUNT)
+        return viewer_alt_parent(sel - SPRITE_DEF_COUNT) >= 0;
+    if (sel < 0) return 0;
     return sprite_defs[sel].tex != 0;      /* padding rows carry no texture */
 }
 
+/* Resolve a viewer selection to a drawable model: returns variant count
+ * (0 = sprite-only), fills kind + whether it is the composite alt. */
+int raycast_asset_model(int sel, int *kind, int *use_alt) {
+    if (sel >= SPRITE_DEF_COUNT) {
+        int pk = viewer_alt_parent(sel - SPRITE_DEF_COUNT);
+        *kind = pk; *use_alt = 1;
+        return pk >= 0 ? 1 : 0;
+    }
+    *kind = sel; *use_alt = 0;
+    return boxmodel_for_kind(sel) ? 1 : 0;
+}
+
 const char *raycast_asset_name(int sel) {
+    if (sel >= SPRITE_DEF_COUNT) {
+        int pk = viewer_alt_parent(sel - SPRITE_DEF_COUNT);
+        const boxmodel_t *bm = pk >= 0 ? boxmodel_for_kind(pk) : 0;
+        return (bm && bm->alt_name) ? bm->alt_name : "COMBO";
+    }
     /* Names come from sprite_defs.h (generated from the registry), so a
      * community upload shows its own id here rather than a generic "ASSET". */
     if (sel < 0 || sel >= (int)(sizeof sprite_names / sizeof sprite_names[0]))

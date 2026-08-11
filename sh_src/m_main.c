@@ -1243,13 +1243,14 @@ static void asset_viewer_screen(void) {
             if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
         }
         /* Table-driven: any kind with a boxmodels[] row has a mesh view,
-         * and a row with an .alt shows its composite as a third variant
-         * (the PVM's desk set). New models never touch this code. */
-        int nvariants = raycast_kind_model_variants(sel);
-        int model_id = nvariants ? sel : -1;
-        int nvar = (nvariants == 2) ? 3 : 2;   /* BOXES / SPRITE [/ COMPOSITE] */
+         * and every composite (.alt) is its OWN entry in the A-cycle —
+         * first-class, no hidden chords. New models never touch this. */
+        int mk = sel, malt = 0;
+        int nvariants = raycast_asset_model(sel, &mk, &malt);
+        int model_id = nvariants ? mk : -1;
+        int nvar = malt ? 1 : 2;               /* composites: mesh only */
         if (variant >= nvar) variant = 0;
-        int mesh_shown = (model_id >= 0 && (variant == 0 || variant == 2));
+        int mesh_shown = (model_id >= 0 && variant == 0);
         if (pressed & SEGA_CTRL_A) {
             /* sprite_defs[] is kind-indexed and sparse — step over the null
              * padding rows or the viewer lands on an empty asset. */
@@ -1296,7 +1297,7 @@ static void asset_viewer_screen(void) {
         }
         if (mesh_shown)
             raycast_model_view(fb, rotY, rotX, zscale, variant, wire, model_id,
-                               variant == 2);
+                               malt);
         else
             raycast_asset_preview(fb, sel, rotY, adist);
 
@@ -1337,10 +1338,10 @@ static void asset_viewer_screen(void) {
         if (model_id >= 0) {
             /* Two variants since the hero tri-mesh left the build: the live
              * box render (what the game draws up close) and the baked sprite. */
-            static const char *const vnames[3] = { "BOXES", "SPRITE", "DESK SET" };
+            static const char *const vnames[2] = { "BOXES", "SPRITE" };
             font_draw_string(fb, 8, 50, vnames[variant], ink);
-            if (variant != 1)
-                font_draw_string(fb, 80, 50, wire ? "WIRE" : "FILL", ink);
+            if (variant == 0)
+                font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", ink);
         }
         /* SPRITE view of a directional asset: report which baked frame the
          * bearing picker landed on, so rotating can be checked to reach every

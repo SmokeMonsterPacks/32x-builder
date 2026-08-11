@@ -162,6 +162,7 @@ int         raycast_asset_valid(int sel);
  * views exist. -1 / *nviews = 0 when the asset has no set. */
 int         raycast_asset_dir_view(int sel, uint8_t yaw, int *nviews);
 int         raycast_kind_model_variants(int kind);
+int         raycast_asset_model(int sel, int *kind, int *use_alt);
 void        raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
                                int kind, int use_alt);
 void player_update(uint16_t pad);
