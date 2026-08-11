@@ -5933,6 +5933,7 @@ static fx_t     mv_dep[BX_MAXBOXES * 12] MV_OVL;
 static int16_t  bx_verts[BXV][3];
 static uint16_t bx_tri[BXT][3];
 static uint8_t  bx_shade[BXT];
+static uint8_t  bx_box[BXT];    /* owning box per tri: per-box ramp override */
 static int      bx_nv = 0, bx_nt = 0;
 static int      bx_built_for = -1;      /* which model the arrays currently hold */
 static void build_box_mesh(const cbox_t *boxes, int nboxes) {
@@ -5951,9 +5952,9 @@ static void build_box_mesh(const cbox_t *boxes, int nboxes) {
         for (int f = 0; f < 6; f++) {
             const uint8_t *vi = chair_face_v[f];
             bx_tri[nt][0]=(uint16_t)(b*8+vi[0]); bx_tri[nt][1]=(uint16_t)(b*8+vi[1]);
-            bx_tri[nt][2]=(uint16_t)(b*8+vi[2]); bx_shade[nt++] = (uint8_t)f;
+            bx_tri[nt][2]=(uint16_t)(b*8+vi[2]); bx_box[nt]=(uint8_t)b; bx_shade[nt++] = (uint8_t)f;
             bx_tri[nt][0]=(uint16_t)(b*8+vi[0]); bx_tri[nt][1]=(uint16_t)(b*8+vi[2]);
-            bx_tri[nt][2]=(uint16_t)(b*8+vi[3]); bx_shade[nt++] = (uint8_t)f;
+            bx_tri[nt][2]=(uint16_t)(b*8+vi[3]); bx_box[nt]=(uint8_t)b; bx_shade[nt++] = (uint8_t)f;
         }
     }
     bx_nv = nboxes * 8;
@@ -6034,7 +6035,8 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
             r -= 1;                     /* one fog step: the game's typical viewing
                                          * distance (>2 cells) — raw ramp read tan */
             if (r < 0) r = 0; else if (r > 3) r = 3;
-            uint8_t c = (uint8_t)(vbase + r);
+            uint8_t tb = mbm->box_base ? mbm->box_base[bx_box[t]] : vbase;
+            uint8_t c = (uint8_t)(tb + r);
             mv_line(fb, mv_px[ti[0]], mv_py[ti[0]], mv_px[ti[1]], mv_py[ti[1]], c);
             mv_line(fb, mv_px[ti[1]], mv_py[ti[1]], mv_px[ti[2]], mv_py[ti[2]], c);
             mv_line(fb, mv_px[ti[2]], mv_py[ti[2]], mv_px[ti[0]], mv_py[ti[0]], c);
@@ -6084,12 +6086,27 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
                             x0,y0, 0,TH, x1,y1, TW,0, x2,y2, TW,TH);
             continue;
         }
+        if (vbm && vbm->rtex && (t == 8 || t == 9)) {
+            /* REAR panel (face 4 = tris 8/9): its own UV corner order —
+             * chair_face_v[4] runs bl,br,tr,tl seen from behind. */
+            fx_t TW = FX(vbm->ftw), TH = FX(vbm->fth);
+            if (t == 8)
+                tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->rtex, vbm->ftw, vbm->fth,
+                            0, vlut, 0, 0, 0,
+                            x0,y0, TW,TH, x1,y1, 0,TH, x2,y2, 0,0);
+            else
+                tex_tri_lut(fb, 0, SCREEN_W, 0, vbm->rtex, vbm->ftw, vbm->fth,
+                            0, vlut, 0, 0, 0,
+                            x0,y0, TW,TH, x1,y1, 0,0, x2,y2, TW,0);
+            continue;
+        }
         int sh = msh[t];
         int r = chair_face_shade(sh, cyy, syy);   /* live in-game shading */
         if (vbm && t >= 12) r -= vbm->stand_bias;
         r -= 1;                                   /* one fog step, as seen in game */
         if (r < 0) r = 0; else if (r > 3) r = 3;
-        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(vbase + r),
+        uint8_t tb2 = (vbm && vbm->box_base) ? vbm->box_base[bx_box[t]] : vbase;
+        chair_tri_fill(x0,y0, x1,y1, x2,y2, (uint8_t)(tb2 + r),
                        0, 0, 0, 0, SCREEN_W, fb);
     }
 }
