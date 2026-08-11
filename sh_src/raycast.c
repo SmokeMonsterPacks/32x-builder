@@ -2818,10 +2818,14 @@ static int standup_blocker(fx_t px, fx_t py) {
             fx_t hx, hz;
             boxmodel_footprint_bm(boxmodel_for_standup(i),
                                   world_h_for_standup(i), &hx, &hz);
-            /* facing: E0 S64 W128 N192 — N/S facers present width along X. */
+            /* facing: E0 S64 W128 N192 — N/S facers present width along X.
+             * Desk composites get a wider bubble: 0.10 lets you press your
+             * face in until the near clip eats the desktop (invisible
+             * tabletop, Mike's screenshot); 0.30 keeps every face whole. */
+            fx_t pad = standup_on_desk[i] ? FX(0.30) : FX(0.10);
             int ns = (standups[i].facing_angle == 64 || standups[i].facing_angle == 192);
-            fx_t mx = (ns ? hx : hz) + FX(0.10);
-            fx_t my = (ns ? hz : hx) + FX(0.10);
+            fx_t mx = (ns ? hx : hz) + pad;
+            fx_t my = (ns ? hz : hx) + pad;
             fx_t cdx = px - standups[i].x, cdy = py - standups[i].y;
             if (cdx > -mx && cdx < mx && cdy > -my && cdy < my) return i;
             continue;
@@ -4192,7 +4196,9 @@ static const uint8_t static_tbl[256] = {
 
 /* One projected box face, shared by draw_chair_3d and draw_panel_face. */
 typedef struct { int16_t sx[4], sy[4]; fx_t depth; uint8_t shade;
-                 uint8_t ftex; uint8_t bxi; } cface_t;
+                 uint8_t ftex; uint8_t bxi;
+                 int16_t ccx, ccy; } cface_t;   /* face-center projection;
+                                  * ccx == -32768 -> no fan (clipped) */
 
 /* The textured front face, LUT build included. Split out of draw_chair_3d and
  * noinline for the same RAM reason as draw_boxmodel_shadow: inlined, this
@@ -4263,6 +4269,23 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
         bp = bloomv;
     }
     fx_t TW = FX(bm->ftw), TH = FX(bm->fth);
+    if (fc->ccx != -32768) {
+        /* 4-triangle fan around the true-perspective center: each patch's
+         * affine error is a quarter of the 2-tri split's. Corner UV order
+         * differs per face (front vs rear have different vi windings). */
+        fx_t U[4], V[4];
+        if (fc->ftex == 2) { U[0]=TW; V[0]=TH; U[1]=0; V[1]=TH; U[2]=0; V[2]=0; U[3]=TW; V[3]=0; }
+        else               { U[0]=0;  V[0]=TH; U[1]=0; V[1]=0;  U[2]=TW; V[2]=0; U[3]=TW; V[3]=TH; }
+        for (int k = 0; k < 4; k++) {
+            int k2 = (k + 1) & 3;
+            tex_tri_lut(fb, col_start, col_end, fc->depth,
+                    ptex, bm->ftw, bm->fth, zt, flut, seed, scr, bp,
+                    fc->sx[k], fc->sy[k],  U[k],  V[k],
+                    fc->sx[k2],fc->sy[k2], U[k2], V[k2],
+                    fc->ccx,   fc->ccy,    TW/2,  TH/2);
+        }
+        return;
+    }
     if (fc->ftex == 2) {
         /* REAR face (+z, chair_face_v order bl,br,tr,tl viewed from
          * behind, model +x on the viewer's LEFT): its own UV corner
@@ -4388,6 +4411,32 @@ static void draw_chair_3d(int i, int col_start, int col_end,
             faces[nf].ftex = (bm->ftex != 0 && b == 0 && f == 5) ? 1
                            : (bm->rtex != 0 && b == 0 && f == 4) ? 2 : 0;
             faces[nf].bxi  = (uint8_t)b;
+            faces[nf].ccx = -32768;
+            if (faces[nf].ftex) {
+                /* TRUE-perspective center for the 4-triangle fan: affine UV
+                 * across two big triangles shears the bezel up close (the
+                 * PS1 wobble, Mike's warp screenshot). One more projection
+                 * halves the error. Same transform as the corner verts. */
+                int32_t mcx = ((int32_t)bx->x0 + bx->x1) >> 1;
+                int32_t mcy = ((int32_t)bx->y0 + bx->y1) >> 1;
+                int32_t mcz = (f == 4) ? bx->z1 : bx->z0;
+                fx_t wxc = (fx_t)((mcx * world_h) >> 8);
+                fx_t wyc = (fx_t)((mcy * world_h) >> 8);
+                fx_t wzc = (fx_t)((mcz * world_h) >> 8);
+                fx_t rxc = FX_MUL(wxc, fc) + FX_MUL(wzc, fs);
+                fx_t rzc = -FX_MUL(wxc, fs) + FX_MUL(wzc, fc);
+                fx_t dxc = (cx + rxc) - px, dyc = (cy + rzc) - py;
+                fx_t dc = FX_MUL(inv_det, -FX_MUL(planeY, dxc) + FX_MUL(planeX, dyc));
+                if (dc >= NEARC) {
+                    fx_t idc = fx_div_hw(FX_ONE, dc);
+                    fx_t latc = FX_MUL(inv_det, FX_MUL(dirY, dxc) - FX_MUL(dirX, dyc));
+                    faces[nf].ccx = (int16_t)((SCREEN_W >> 1)
+                        + (int)(((int32_t)(SCREEN_W >> 1) * FX_MUL(latc, idc)) >> FX_SHIFT));
+                    int fyc = horizon_y + (int)(((int64_t)focal * idc) >> FX_SHIFT);
+                    faces[nf].ccy = (int16_t)(fyc
+                        - (int)((FX_MUL(wyc, idc) * SCREEN_H) >> FX_SHIFT));
+                }
+            }
             for (int k = 0; k < 4; k++) { faces[nf].sx[k]=csx[vi[k]]; faces[nf].sy[k]=csy[vi[k]]; }
             nf++;
         }
