@@ -1242,13 +1242,14 @@ static void asset_viewer_screen(void) {
             if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
             if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
         }
-        /* Assets that own real 3D geometry: the chair (hand-authored boxes +
-         * a baked hero mesh) and the DESK (imported GLB -> 3 boxes via
-         * tools/bake_boxes.py). Everything else is sprite-only. */
-        int model_id = (sel == CHAIR_ASSET_KIND) ? MODEL_CHAIR
-                     : (sel == DESK_ASSET_KIND)  ? MODEL_DESK
-                     : (sel == PVM_ASSET_KIND)   ? MODEL_PVM : -1;
-        int mesh_shown = (model_id >= 0 && variant == 0);
+        /* Table-driven: any kind with a boxmodels[] row has a mesh view,
+         * and a row with an .alt shows its composite as a third variant
+         * (the PVM's desk set). New models never touch this code. */
+        int nvariants = raycast_kind_model_variants(sel);
+        int model_id = nvariants ? sel : -1;
+        int nvar = (nvariants == 2) ? 3 : 2;   /* BOXES / SPRITE [/ COMPOSITE] */
+        if (variant >= nvar) variant = 0;
+        int mesh_shown = (model_id >= 0 && (variant == 0 || variant == 2));
         if (pressed & SEGA_CTRL_A) {
             /* sprite_defs[] is kind-indexed and sparse — step over the null
              * padding rows or the viewer lands on an empty asset. */
@@ -1268,15 +1269,15 @@ static void asset_viewer_screen(void) {
                 if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
                 if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
             }
-            if (pressed & SEGA_CTRL_RIGHT) variant = (variant + 1) % 2;
-            if (pressed & SEGA_CTRL_LEFT)  variant = (variant + 1) % 2;
+            if (pressed & SEGA_CTRL_RIGHT) variant = (variant + 1) % nvar;
+            if (pressed & SEGA_CTRL_LEFT)  variant = (variant + 1) % nvar;
         }
         if (pressed & SEGA_CTRL_C) c_used = 0;             /* fresh hold */
         if (pad & SEGA_CTRL_C) {
             if (pressed & (SEGA_CTRL_UP | SEGA_CTRL_DOWN)) { wire ^= 1; c_used = 1; }
         }
         if ((released & SEGA_CTRL_C) && !c_used) { rotY = 32; rotX = 12; adist = FX(2.5); }
-        if (pressed & SEGA_CTRL_X) variant = (variant + 1) % 2;
+        if (pressed & SEGA_CTRL_X) variant = (variant + 1) % nvar;
         if (pressed & SEGA_CTRL_Z) wire ^= 1;
         SHARED_UC->frame_count++;
 
@@ -1294,7 +1295,8 @@ static void asset_viewer_screen(void) {
             for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
         }
         if (mesh_shown)
-            raycast_model_view(fb, rotY, rotX, zscale, variant, wire, model_id);
+            raycast_model_view(fb, rotY, rotX, zscale, variant, wire, model_id,
+                               variant == 2);
         else
             raycast_asset_preview(fb, sel, rotY, adist);
 
@@ -1335,10 +1337,10 @@ static void asset_viewer_screen(void) {
         if (model_id >= 0) {
             /* Two variants since the hero tri-mesh left the build: the live
              * box render (what the game draws up close) and the baked sprite. */
-            static const char *const vnames[2] = { "BOXES", "SPRITE" };
+            static const char *const vnames[3] = { "BOXES", "SPRITE", "DESK SET" };
             font_draw_string(fb, 8, 50, vnames[variant], ink);
-            if (variant == 0)
-                font_draw_string(fb, 64, 50, wire ? "WIRE" : "FILL", ink);
+            if (variant != 1)
+                font_draw_string(fb, 80, 50, wire ? "WIRE" : "FILL", ink);
         }
         /* SPRITE view of a directional asset: report which baked frame the
          * bearing picker landed on, so rotating can be checked to reach every

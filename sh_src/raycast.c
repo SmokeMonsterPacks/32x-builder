@@ -2773,7 +2773,7 @@ static int cell_passable(int x, int y) {
  * gray while its cart drops to the ramp's near-black end. Costs nothing per
  * pixel (same fill, darker index); the dir bake applies the same bias
  * (bake_dir_sprites.py --stand-bias), so near/far/viewer agree. */
-typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base;
+typedef struct boxmodel_s { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base;
                  const uint8_t *ftex; uint8_t ftw, fth;
                  uint8_t stand_bias;
                  /* optional per-box ramp override (composite models mix
@@ -2784,7 +2784,11 @@ typedef struct { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; uint8_t base
                   * ftex by the editor-kit contract, case values only —
                   * never both visible with the front, so it costs no
                   * frame time. */
-                 const uint8_t *rtex; } boxmodel_t;
+                 const uint8_t *rtex;
+                 /* optional COMPOSITE variant of this kind's model (the
+                  * PVM's desk-mounted set). The asset viewer walks this —
+                  * a new composite is one pointer, never a new enum. */
+                 const struct boxmodel_s *alt; } boxmodel_t;
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
 static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
@@ -4025,12 +4029,14 @@ _Static_assert(DESK_NBOXES <= BX_MAXBOXES && PVM_NBOXES <= BX_MAXBOXES,
  * 185..188, dark charcoal to light case gray). Kept in lockstep with
  * registry.json assets.sprites[pvm] by the comm_pal.h codegen. */
 #define PVM_RAMP_BASE 185
+static const boxmodel_t desk_pvm_model;
 static const boxmodel_t boxmodels[] = {
     { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND, CHAIR_BASE, 0, 0, 0, 0 },
     { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND,  CHAIR_BASE, 0, 0, 0, 0 },
     { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
       (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
-      0, (const uint8_t *)pvm_rear_tex },
+      0, (const uint8_t *)pvm_rear_tex,
+      (const struct boxmodel_s *)&desk_pvm_model },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
 
@@ -5936,22 +5942,28 @@ static void mv_line(uint8_t *fb, int x0, int y0, int x1, int y1, uint8_t c) {
     }
 }
 
+int raycast_kind_model_variants(int kind) {
+    /* 0 = sprite-only, 1 = has a box mesh, 2 = mesh + composite alt.
+     * TABLE-DRIVEN: the viewer shows whatever boxmodels[] holds — adding
+     * a model (or an alt) never touches the viewer again (Mike: 'we're
+     * burning code and copies of models'). */
+    const boxmodel_t *bm = boxmodel_for_kind(kind);
+    return bm ? (bm->alt ? 2 : 1) : 0;
+}
+
 void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
-                        int model) {
-    /* Every model renders its BOX list — the chair's baked hero tri-mesh is
-     * out of the build (disk reference only; its MESH variant was the one
-     * consumer and nothing in the game ever drew it). */
+                        int kind, int use_alt) {
     (void)variant;
     /* Viewer shade ramp tracks the in-game one (boxmodels[].base) so the
-     * BOXES view previews the real colour, not chair wood; mbm also carries
-     * the panel texture and the stand bias. */
-    const boxmodel_t *mbm = (model == MODEL_PVM)
-                          ? boxmodel_for_kind(PVM_ASSET_KIND) : 0;
-    uint8_t vbase = mbm ? mbm->base : CHAIR_BASE;
-    const cbox_t *boxes = chair_boxes; int nb = CHAIR_NBOXES;
-    if (model == MODEL_DESK) { boxes = desk_boxes; nb = DESK_NBOXES; }
-    if (model == MODEL_PVM)  { boxes = pvm_boxes;  nb = PVM_NBOXES;  }
-    if (bx_built_for != model) { build_box_mesh(boxes, nb); bx_built_for = model; }
+     * BOXES view previews the real colour; mbm also carries the panel
+     * textures and the stand bias. Same table the renderer draws from. */
+    const boxmodel_t *mbm = boxmodel_for_kind(kind);
+    if (!mbm) return;
+    if (use_alt && mbm->alt) mbm = (const boxmodel_t *)mbm->alt;
+    uint8_t vbase = mbm->base;
+    const cbox_t *boxes = mbm->boxes; int nb = mbm->nboxes;
+    int mesh_key = (kind << 1) | (use_alt ? 1 : 0);
+    if (bx_built_for != mesh_key) { build_box_mesh(boxes, nb); bx_built_for = mesh_key; }
     const int16_t  (*mverts)[3] = (const int16_t(*)[3])bx_verts; int nv = bx_nv;
     const uint16_t (*mtris)[3]  = (const uint16_t(*)[3])bx_tri;  int ntr = bx_nt;
     const uint8_t   *msh        = bx_shade;

@@ -143,9 +143,8 @@ void        raycast_asset_preview(uint8_t *fb, int sel, uint8_t yaw, fx_t dist);
  * mesh, 1 = the in-game box model (same scale, so the comparison is exact).
  * `model` is a MODEL_* id; imported models have boxes only, so they ignore
  * variant and always draw boxes. Caller clears the background. */
-#define MODEL_CHAIR 0
-#define MODEL_DESK  1
-#define MODEL_PVM   2
+/* MODEL_* enums retired: the viewer is table-driven off boxmodels[] —
+ * raycast_kind_model_variants(kind) says what a kind can show. */
 /* sprite_defs[] is indexed BY KIND and is sparse — retired kinds leave null
  * padding rows. Must match registry.json assets.sprites[].kind. */
 /* The ONLY topple-able asset. Everything else is furniture or scenery and
@@ -162,8 +161,9 @@ int         raycast_asset_valid(int sel);
 /* Directional billboard set: which baked view `yaw` resolves to, and how many
  * views exist. -1 / *nviews = 0 when the asset has no set. */
 int         raycast_asset_dir_view(int sel, uint8_t yaw, int *nviews);
+int         raycast_kind_model_variants(int kind);
 void        raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, int variant, int wire,
-                               int model);
+                               int kind, int use_alt);
 void player_update(uint16_t pad);
 /* 1 when the player has stepped into the open EXIT door — fire the procgen portal. */
 int  raycast_door_portal_check(void);
