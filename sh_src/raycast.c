@@ -4057,8 +4057,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
-    PVM_RAMP_BASE, PVM_RAMP_BASE,      /* the Master System ziggurat:     */
-    PVM_RAMP_BASE };                   /* 3 steps, charcoal               */
+    PVM_RAMP_BASE };                   /* the Master System: ONE wedge,   */
+                                       /* charcoal (was a 3-step ziggurat) */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
@@ -4370,9 +4370,9 @@ static void draw_chair_3d(int i, int col_start, int col_end,
         int csx[8], csy[8], cclip[8];
         fx_t cdep[8];
         for (int v = 0; v < 8; v++) {
-            int32_t mx = (v & 1) ? bx->x1 : bx->x0;    /* 8.8 model */
-            int32_t my = (v & 2) ? bx->y1 : bx->y0;
-            int32_t mz = (v & 4) ? bx->z1 : bx->z0;
+            int16_t cvx, cvy, cvz;                     /* 8.8 model */
+            cbox_corner(bx, v, &cvx, &cvy, &cvz);      /* wedge-aware */
+            int32_t mx = cvx, my = cvy, mz = cvz;
             fx_t wx = (fx_t)((mx * world_h) >> 8);            /* model -> world fx */
             fx_t wy = (fx_t)((my * world_h) >> 8);            /* height above floor */
             fx_t wz = (fx_t)((mz * world_h) >> 8);
@@ -5949,9 +5949,8 @@ static void build_box_mesh(const cbox_t *boxes, int nboxes) {
     for (int b = 0; b < nboxes; b++) {
         const cbox_t *bx = &boxes[b];
         for (int v = 0; v < 8; v++) {
-            bx_verts[b*8+v][0] = (int16_t)((v & 1) ? bx->x1 : bx->x0);
-            bx_verts[b*8+v][1] = (int16_t)((v & 2) ? bx->y1 : bx->y0);
-            bx_verts[b*8+v][2] = (int16_t)((v & 4) ? bx->z1 : bx->z0);
+            cbox_corner(bx, v, &bx_verts[b*8+v][0], &bx_verts[b*8+v][1],
+                               &bx_verts[b*8+v][2]);   /* wedge-aware */
         }
         for (int f = 0; f < 6; f++) {
             const uint8_t *vi = chair_face_v[f];

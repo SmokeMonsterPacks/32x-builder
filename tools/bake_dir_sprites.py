@@ -32,24 +32,32 @@ FACES = [((1,5,7,3),4),((0,2,6,4),4),((2,3,7,6),6),((0,4,5,1),2),
 
 
 def load_boxes(header="sh_src/chair3d.h", symbol="chair_boxes"):
-    """Parse a cbox_t list out of a model header: 6 values per box in struct
-    order x0,y0,z0,x1,y1,z1.
+    """Parse a cbox_t list out of a model header. Returns 11-tuples in struct
+    order x0,y0,z0,x1,y1,z1,tx0,tz0,tx1,tz1,taper.
 
     Two spellings exist and both are model space with height 1.0:
       - hand-authored (chair3d.h) writes CM(0.26) — already model units
       - bake_boxes.py output (desk3d.h) writes raw 8.8 ints — /256
+
+    A plain box is written with only its six base values and zero-fills the
+    rest; a WEDGE writes all eleven. The billboard MUST honour taper or the
+    far LOD keeps the shape the near 3D no longer has, which pops at the swap.
     """
     src = open(os.path.join(REPO, header)).read()
     body = src.split(symbol + "[")[1]
     boxes = []
     for m in re.finditer(r"\{([^}]*)\}", body):
         vals = re.findall(r"CM\(\s*(-?[0-9.]+)\s*\)", m.group(1))
-        if len(vals) == 6:
-            boxes.append(tuple(float(v) for v in vals))
-            continue
-        raw = re.findall(r"-?\d+", m.group(1))
-        if len(raw) == 6:
-            boxes.append(tuple(int(v) / 256.0 for v in raw))
+        if len(vals) in (6, 11):
+            b = [float(v) for v in vals]
+        else:
+            raw = re.findall(r"-?\d+", m.group(1))
+            if len(raw) not in (6, 11):
+                continue
+            b = [int(v) / 256.0 for v in raw]
+            if len(b) == 11:
+                b[10] *= 256.0          # taper is a flag, not a coordinate
+        boxes.append(tuple(b + [0.0] * (11 - len(b))))
     if not boxes:
         sys.exit("no %s parsed from %s" % (symbol, header))
     return boxes
@@ -62,9 +70,13 @@ def build_mesh(boxes):
     desk's large tabletop that baked in as a diagonal scar. One polygon, no
     internal edge. Depth sorting is per-face either way."""
     verts, quads = [], []
-    for (x0, y0, z0, x1, y1, z1) in boxes:
+    for (x0, y0, z0, x1, y1, z1, tx0, tz0, tx1, tz1, taper) in boxes:
         base = len(verts)
         for v in range(8):
+            top = v & 2
+            if top and taper:           # wedge: inset top rect (cbox_corner)
+                verts.append((tx1 if v & 1 else tx0, y1, tz1 if v & 4 else tz0))
+                continue
             verts.append((x1 if v & 1 else x0,
                           y1 if v & 2 else y0,
                           z1 if v & 4 else z0))
