@@ -12,7 +12,7 @@ Monitor sits OFF-CENTER (x -93 final units): reads as placed by a person,
 not by a compiler. Random-position variants arrive with the second desk
 item (one variant mechanism, designed once).
 """
-import pathlib, re
+import pathlib
 
 T = 0.775                       # desk-unit -> final-unit (0.31 / 0.4)
 DESK = [(-252, 0, -112, -98, 243, 119),
@@ -43,31 +43,19 @@ slab_parts = [(sx0, sy0, sz0, m_x0, sy1, sz1),
               (m_x0, sy0, sz0, m_x1, sy1, sz1),
               (m_x1, sy0, sz0, sx1, sy1, sz1)]
 desk_f = desk_f[:2] + slab_parts
-# THE CONSOLE (models/sega_master_system.glb -> sh_src/sms3d.h, res-48
-# bake, 4 boxes / 99.6%): axes mapped by extent ranking — the bake
-# normalizes its longest span to the height slot, so bake-y (251, the
-# console WIDTH) -> model x, bake-x (depth) -> model z, bake-z -> model
-# y. Scaled to a 120-unit width, seated right of the monitor. All new
-# box pairs resolve on one axis (cycle-checked).
-sms_src = (pathlib.Path(__file__).resolve().parent.parent
-           / "sh_src" / "sms3d.h").read_text()
-sms_boxes = [tuple(int(v) for v in m.group(1).split(","))
-             for m in re.finditer(r"\{\s*([-0-9,\s]+?)\s*\}", sms_src)]
-sy0 = min(b[1] for b in sms_boxes); sy1 = max(b[4] for b in sms_boxes)
-sz0 = min(b[2] for b in sms_boxes)
-sx_mid = (min(b[0] for b in sms_boxes) + max(b[3] for b in sms_boxes)) / 2
-S = 120.0 / (sy1 - sy0)                 # bake-width -> 120 desk units
-CON_CX = 90                             # console center on the desktop
-console_boxes = []
-for (bx0, by0, bz0, bx1, by1, bz1) in sms_boxes:
-    X0 = round((by0 - (sy0 + sy1) / 2) * S) + CON_CX
-    X1 = round((by1 - (sy0 + sy1) / 2) * S) + CON_CX
-    Y0 = desk_top + round((bz0 - sz0) * S)
-    Y1 = desk_top + round((bz1 - sz0) * S)
-    Z0 = round((bx0 - sx_mid) * S)
-    Z1 = round((bx1 - sx_mid) * S)
-    console_boxes.append((min(X0,X1), min(Y0,Y1), min(Z0,Z1),
-                          max(X0,X1), max(Y0,Y1), max(Z0,Z1)))
+# THE CONSOLE: the Master System is a flat-bottomed TRAPEZOID (Mike's
+# render) — a sloped shell that greedy AABB baking turns into a lumpy
+# staircase. Authored instead as a 3-step ziggurat at the bake's true
+# scaled dims (120 x 38 x 33 desk units): flat base, inset middle,
+# inset flat top. Steps nest strictly inside each other, so every pair
+# resolves on Y — cycle-proof by construction. The red top label is
+# banked (needs a top-face texture slot).
+CON_CX = 90
+console_boxes = [
+    (CON_CX - 60, desk_top,      -19, CON_CX + 60, desk_top + 14, 19),
+    (CON_CX - 54, desk_top + 14, -15, CON_CX + 54, desk_top + 25, 15),
+    (CON_CX - 44, desk_top + 25, -10, CON_CX + 44, desk_top + 33, 10),
+]
 boxes = [mon_f] + desk_f + console_boxes   # MONITOR FIRST: ftex binds to box 0
 lines = "\n".join(f"    {{ {b[0]:6d},{b[1]:6d},{b[2]:6d},{b[3]:6d},{b[4]:6d},{b[5]:6d} }},"
                   for b in boxes)

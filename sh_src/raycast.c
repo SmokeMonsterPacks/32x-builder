@@ -4057,8 +4057,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
-    PVM_RAMP_BASE, PVM_RAMP_BASE,      /* the Master System, 4 boxes from */
-    PVM_RAMP_BASE, PVM_RAMP_BASE };    /* the res-48 bake: charcoal       */
+    PVM_RAMP_BASE, PVM_RAMP_BASE,      /* the Master System ziggurat:     */
+    PVM_RAMP_BASE };                   /* 3 steps, charcoal               */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
