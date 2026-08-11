@@ -4052,7 +4052,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
  * model tops out at y=294 of the 0.4-cell scale = 0.46 cells). */
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
-    CHAIR_BASE, CHAIR_BASE, CHAIR_BASE };
+    CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
+    PVM_RAMP_BASE };   /* the Master System console: charcoal, not wood */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,

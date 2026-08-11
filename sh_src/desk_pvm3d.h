@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include "chair3d.h"
 
-#define DESK_PVM_NBOXES 6
+#define DESK_PVM_NBOXES 7
 
 static const cbox_t desk_pvm_boxes[DESK_PVM_NBOXES] = {
     {   -146,   198,   -56,   -40,   294,    45 },
@@ -18,6 +18,7 @@ static const cbox_t desk_pvm_boxes[DESK_PVM_NBOXES] = {
     {   -215,   188,   -96,  -146,   198,    92 },
     {   -146,   188,   -96,   -40,   198,    92 },
     {    -40,   188,   -96,   212,   198,    92 },
+    {     30,   198,   -10,   150,   221,    46 },
 };
 
 #endif /* DESK_PVM3D_H */
