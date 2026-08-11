@@ -4022,8 +4022,11 @@ static const dirset_t *dirset_for_kind(int kind) {
  * arrays and draw_chair_3d's per-call face buffer, so EVERY model that can
  * reach either path must be counted here — otherwise an oversized import runs
  * off the end of a stack array in the hot render loop. */
-#define BX_MAXBOXES CHAIR_NBOXES
-_Static_assert(DESK_NBOXES <= BX_MAXBOXES && PVM_NBOXES <= BX_MAXBOXES,
+#define BX_MAXBOXES 10   /* was CHAIR_NBOXES (9); the desk-PVM-console
+                          * composite carries 10. Costs ~170B more of the
+                          * deep render stack (faces[]) — inside budget. */
+_Static_assert(CHAIR_NBOXES <= BX_MAXBOXES && DESK_NBOXES <= BX_MAXBOXES &&
+               PVM_NBOXES <= BX_MAXBOXES && DESK_PVM_NBOXES <= BX_MAXBOXES,
                "imported box model exceeds the box-render arrays — raise BX_MAXBOXES");
 
 /* PVM ramp: the comm_pal arena rows for registry pal[0..3] (base 184 -> CRAM
@@ -4054,7 +4057,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
-    PVM_RAMP_BASE };   /* the Master System console: charcoal, not wood */
+    PVM_RAMP_BASE, PVM_RAMP_BASE,      /* the Master System, 4 boxes from */
+    PVM_RAMP_BASE, PVM_RAMP_BASE };    /* the res-48 bake: charcoal       */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
