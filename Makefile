@@ -107,7 +107,7 @@ SHOBJS += $(SHCPPS:.cpp=.o)
 # SPXCS   = $(wildcard sh_src/speex/*.c)
 # SHOBJS += $(SPXCS:.c=.o)
 
-.PHONY: all release debug deploy deploy-tv publish lint community author FORCE
+.PHONY: all release debug deploy deploy-tv publish lint procgen-test community author FORCE
 
 # Override on command line: make deploy MISTER=root@othermister.local
 # Both targets probe usb0 then usb1 over ssh before scp'ing, so USB
@@ -322,6 +322,17 @@ sh_src/raycast.o: sh_src/sprite_defs.h
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
 lint:
 	@python3 tools/lint_maps.py
+
+# Procgen invariant harness: compiles the REAL generator for the host and
+# runs it over thousands of seeds, checking the promises procgen.c makes in
+# its own comments (console present, at least one neanderthal, a crawlspace,
+# full reachability from spawn, no asset in a wall or sharing a cell). Needs
+# no console toolchain. Found three shipped-broken promises the day it was
+# written, including a set piece that had never appeared in any generated
+# level. Run it after touching any placement rule.
+procgen-test:
+	@cc -Ish_src -o /tmp/pgtest tools/test_procgen.c sh_src/procgen.c
+	@/tmp/pgtest 5000
 
 # Auto-generated header dependency files. -MMD emits one per .c next to
 # the .o; -include silently ignores them on a clean tree. Without this,

@@ -210,6 +210,26 @@ static void place_neanderthals(int count) {
                             ((fx_t)y << FX_SHIFT) + FX(0.5), facing, 2);
         placed++;
     }
+    if (placed) return;
+    /* Darts can miss, and "at least one" is a promise rather than a tendency:
+     * measured on the host harness, ~10% of seeds threw all their attempts
+     * away and shipped a level with nothing standing in it. Same lesson the
+     * desk scan learned — a full scan cannot miss. Reservoir sampling keeps
+     * the choice uniform without a candidate list in RAM. */
+    {
+        int seen = 0, bx = -1, by = -1;
+        for (int y = 2; y < MAP_H - 2; y++)
+            for (int x = 2; x < MAP_W - 2; x++) {
+                if (!footprint_clear(x, y, 1, 1)) continue;
+                if (raycast_standup_in_cell(x, y)) continue;
+                if (raycast_exit_path_cell(x, y)) continue;
+                if (xs32_range(0, seen++) == 0) { bx = x; by = y; }
+            }
+        if (bx >= 0)
+            raycast_add_standup(((fx_t)bx << FX_SHIFT) + FX(0.5),
+                                ((fx_t)by << FX_SHIFT) + FX(0.5),
+                                (uint8_t)(xs32_range(0, 3) * 64), 2);
+    }
 }
 
 /* EXACTLY ONE PVM per generated level (Mike: every procedural level has the
@@ -691,6 +711,35 @@ static void place_crawlspaces(int count) {
         ceil_h_add_run_h(x, y, dx, dy, L, CRAWL_CEIL_H);                    /* mark it low   */
         placed++;
     }
+    if (placed) return;
+    /* Same guarantee as the neanderthal above: ~9% of seeds spent every dart
+     * and left the level with no forced-crouch passage at all. Scan for the
+     * simplest legal choke — ONE wall cell with open floor either side and
+     * wall on both flanks — which is the thinnest thing that still reads as
+     * a crawl. Carving only ever OPENS a cell, so connectivity cannot break. */
+    {
+        int seen = 0, bx = -1, by = -1, bhoriz = 0;
+        for (int horiz = 0; horiz < 2; horiz++) {
+            int dx = horiz ? 1 : 0, dy = horiz ? 0 : 1;
+            for (int y = 2; y < MAP_H - 3; y++)
+                for (int x = 2; x < MAP_W - 3; x++) {
+                    if (world_map[y - dy][x - dx] != 0) continue;   /* entrance open */
+                    if (world_map[y + dy][x + dx] != 0) continue;   /* exit open     */
+                    if (world_map[y][x] != 1) continue;             /* wall to carve */
+                    if (raycast_exit_path_cell(x, y)) continue;
+                    if (world_map[y + dx][x + dy] != 1 ||           /* flanks wall   */
+                        world_map[y - dx][x - dy] != 1) continue;
+                    int ddx = x - SPAWN_CX, ddy = y - SPAWN_CY;
+                    if (ddx > -2 && ddx < 2 && ddy > -2 && ddy < 2) continue;
+                    if (xs32_range(0, seen++) == 0) { bx = x; by = y; bhoriz = horiz; }
+                }
+        }
+        if (bx >= 0) {
+            int dx = bhoriz ? 1 : 0, dy = bhoriz ? 0 : 1;
+            world_map[by][bx] = 0;
+            ceil_h_add_run_h(bx, by, dx, dy, 1, CRAWL_CEIL_H);
+        }
+    }
 }
 
 /* ── Driver ───────────────────────────────────────────────────────── */
@@ -761,10 +810,17 @@ void procgen_run(uint32_t seed) {
      * crawlspace occurrence where it was. */
     place_crawlspaces(g_procgen_params.crawlspaces);
     raycast_place_outlets(g_procgen_params.outlets * 5);
-    place_neanderthals(2 + xs32_range(0, 2));   /* 2-4: 1-2 was too sparse to find
-                                                 * on the 32x32 field. Billboard-cheap
-                                                 * now; spread out so rarely >1 large
-                                                 * on screen at once. */
+    /* 1-2 usually, 3 at the cap and rarely (Mike, 2026-08-12). This was 2-4,
+     * raised back when 1-2 felt too sparse to FIND — but that was before
+     * placement was guaranteed, so a "sparse" level was often a level with
+     * none at all. With at least one now certain, scarcity is the point: the
+     * beat is "something is standing there", and four of them on a floor
+     * reads as a crowd instead. */
+    {
+        int neander = 1 + xs32_range(0, 1);        /* 1 or 2, the norm */
+        if (xs32_range(0, 5) == 0) neander = 3;    /* 3 now and then, never more */
+        place_neanderthals(neander);
+    }
     /* 6-9 chairs: the directional-billboard LOD made count nearly free (far
      * chairs are small sprites; only the nearest 3 render true-3D), stress-
      * verified at 21 chairs with no frame drops. Furnished, not spammed. */
