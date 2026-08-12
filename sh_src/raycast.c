@@ -2780,6 +2780,16 @@ typedef struct boxmodel_s { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; u
                   * materials: the desk_pvm's monitor is case-gray, its desk
                   * wood-brown). NULL = every box uses .base. */
                  const uint8_t *box_base;
+                 /* optional per-box stand_bias override, same shape as
+                  * box_base and for the same reason. The scalar assumes ONE
+                  * secondary mass ("everything that is not box 0 is the
+                  * stand"), which a composite breaks: the desk set inherited
+                  * the PVM's bias of 2 and applied it to the DESK, subtracting
+                  * two steps from a 0..3 ramp and collapsing the pedestals'
+                  * front and side faces onto the same index — a desk with no
+                  * light gradient, lit top and flat everything else. NULL =
+                  * the scalar rule. */
+                 const uint8_t *box_bias;
                  /* optional REAR-face texture (box 0, +z): same dims as
                   * ftex by the editor-kit contract, case values only —
                   * never both visible with the front, so it costs no
@@ -2790,6 +2800,12 @@ typedef struct boxmodel_s { const cbox_t *boxes; uint8_t nboxes; uint8_t kind; u
                   * a new composite is one pointer, never a new enum. */
                  const struct boxmodel_s *alt;
                  const char *alt_name; } boxmodel_t;
+/* Shade steps to subtract from box b: the per-box table when a model carries
+ * one, else the scalar rule (box 0 is the primary mass and keeps full range). */
+static inline int boxmodel_bias(const boxmodel_t *bm, int b) {
+    if (bm->box_bias) return bm->box_bias[b];
+    return (b > 0) ? bm->stand_bias : 0;
+}
 static const boxmodel_t *boxmodel_for_kind(int kind);
 static void boxmodel_footprint(int kind, fx_t *hx, fx_t *hz);
 static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
@@ -4039,7 +4055,7 @@ static const boxmodel_t boxmodels[] = {
     { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND,  CHAIR_BASE, 0, 0, 0, 0 },
     { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
       (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
-      0, (const uint8_t *)pvm_rear_tex,
+      0, 0, (const uint8_t *)pvm_rear_tex,
       (const struct boxmodel_s *)&desk_pvm_model, "DESK SET" },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
@@ -4059,10 +4075,20 @@ static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
     PVM_RAMP_BASE, PVM_RAMP_BASE };    /* the Master System: body + sloped */
                                        /* upper, charcoal. Both wedges.    */
+/* Per-box shade bias. The DESK gets 0 — it is a full model in its own right,
+ * not a stand, and the scalar 2 it inherited from the PVM was subtracting two
+ * steps off a four-step ramp, landing the pedestals' front (-z, shade 1) and
+ * side (+-x, shade 2) faces both on 0. Flat brown, no gradient. The CONSOLE
+ * keeps 2, which is what holds the Master System at charcoal instead of the
+ * PVM ramp's case gray. */
+static const uint8_t desk_pvm_box_bias[DESK_PVM_NBOXES] = {
+    0,                                 /* monitor — primary mass, full range */
+    0, 0, 0, 0, 0,                     /* desk: pedestals + the split slab    */
+    2, 2 };                            /* Master System, charcoal             */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
-    desk_pvm_box_base, (const uint8_t *)pvm_rear_tex };
+    desk_pvm_box_base, desk_pvm_box_bias, (const uint8_t *)pvm_rear_tex };
 
 static const boxmodel_t *boxmodel_for_standup(int i) {
     if (standup_on_desk[i]) return &desk_pvm_model;
@@ -4417,7 +4443,8 @@ static void draw_chair_3d(int i, int col_start, int col_end,
             faces[nf].depth = (cdep[vi[0]]+cdep[vi[1]]+cdep[vi[2]]+cdep[vi[3]]) >> 2;
             {
                 int fsh = chair_face_shade(f, fc, fs);
-                if (b > 0) fsh = (fsh > bm->stand_bias) ? fsh - bm->stand_bias : 0;
+                int bias = boxmodel_bias(bm, b);
+                fsh = (fsh > bias) ? fsh - bias : 0;
                 faces[nf].shade = (uint8_t)fsh;
             }
             /* Face 5 is -z, the model front (the facing rotation points it
@@ -6037,7 +6064,7 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
              * chair's facing (the two rotations share one formula). Hero mesh
              * keeps its baked 1..7 lum, remapped onto the same 0..3 ramp. */
             int r = chair_face_shade(sh, cyy, syy);   /* live in-game shading */
-            if (mbm && t >= 12) r -= mbm->stand_bias;
+            if (mbm) r -= boxmodel_bias(mbm, bx_box[t]);
             r -= 1;                     /* one fog step: the game's typical viewing
                                          * distance (>2 cells) — raw ramp read tan */
             if (r < 0) r = 0; else if (r > 3) r = 3;
@@ -6108,7 +6135,7 @@ void raycast_model_view(uint8_t *fb, uint8_t rotY, uint8_t rotX, int zoom_px, in
         }
         int sh = msh[t];
         int r = chair_face_shade(sh, cyy, syy);   /* live in-game shading */
-        if (vbm && t >= 12) r -= vbm->stand_bias;
+        if (vbm) r -= boxmodel_bias(vbm, bx_box[t]);
         r -= 1;                                   /* one fog step, as seen in game */
         if (r < 0) r = 0; else if (r > 3) r = 3;
         uint8_t tb2 = (vbm && vbm->box_base) ? vbm->box_base[bx_box[t]] : vbase;
