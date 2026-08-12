@@ -74,15 +74,25 @@ CON_W = 365.0 / MM_PER_UNIT            # console width in final units (~99)
 CON_S = CON_W / fit_w                  # normalized-model -> final units
 CON_CX = 90                            # placement on the desktop, off-centre
 
+# The console's long SLOPE faces the player and its flat top sits toward the
+# BACK. In the GLB the flat top is at -z, and -z is the engine's model FRONT
+# (the face the facing rotation points at the camera), so importing the model's
+# z verbatim stood the console backwards — long slope at the rear. Negating z
+# turns it around. Negation also REVERSES the interval, so z0/z1 and tz0/tz1
+# have to swap or the box comes out with z0 > z1 and every face inside out.
+CON_FLIP_Z = True
+
 def _place(b):
     """Normalized wedge (height 1.0, centred on its own footprint) -> final
     units on the desktop. y0 = 0 lands on desk_top, so the console sits ON
     the desk rather than intersecting it."""
     def px(v): return round(CON_CX + v * CON_S)
     def py(v): return round(desk_top + v * CON_S)
-    def pz(v): return round(v * CON_S)
-    return (px(b[0]), py(b[1]), pz(b[2]), px(b[3]), py(b[4]), pz(b[5]),
-            px(b[6]), pz(b[7]), px(b[8]), pz(b[9]), b[10])
+    def pz(v): return round(-v * CON_S if CON_FLIP_Z else v * CON_S)
+    z0, z1 = (pz(b[5]), pz(b[2])) if CON_FLIP_Z else (pz(b[2]), pz(b[5]))
+    tz0, tz1 = (pz(b[9]), pz(b[7])) if CON_FLIP_Z else (pz(b[7]), pz(b[9]))
+    return (px(b[0]), py(b[1]), z0, px(b[3]), py(b[4]), z1,
+            px(b[6]), tz0, px(b[8]), tz1, b[10])
 
 console_boxes = [_place(b) for b in fit_boxes]
 boxes = [mon_f] + desk_f + console_boxes   # MONITOR FIRST: ftex binds to box 0
