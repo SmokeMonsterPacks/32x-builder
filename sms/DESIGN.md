@@ -186,6 +186,25 @@ not fade out. Then the SPACE-A engine takes the channels. Preview:
 `sound/sms_liminal/CHIME-putrats.wav`; the sim asserts the whole
 stream (chime + engine) byte-for-byte.
 
+## 4c. Game-on-glass: the SMS picture on the in-world PVM (banked)
+
+The PVM defaults to static when an SMS game powers up. The old idea was
+snooping VRAM for the picture; unnecessary in this architecture — the
+SMS display never touches VRAM. TILEBUF in Z80 RAM is the entire
+display state and the 68K already copies it out every dirty frame
+(sms_game_tiles in md_main.c). Remaining work:
+- 68K -> SH-2 channel: COMM4 (index) + COMM6 (tile word), 68K free-runs
+  the rotation from its idle loop, SH-2 samples ~dozens of pairs per
+  frame into a local copy. No handshake — the joypad-bridge starvation
+  history says never add request/response COMM traffic under render
+  load. Convergence tearing reads as a CRT locking onto a signal, which
+  is the aesthetic, not a bug.
+- Glass render v1: 32x24 tile grid -> lit/unlit phosphor cells on the
+  PVM texture (nonzero tile = lit). v2: real glyphs via the SH-2 font.
+- Static until the Z80's first DIRTY — signal acquisition, diegetic.
+Pairs with the diegetic PVM+console trigger that eventually replaces
+the TESTING menu rows.
+
 ## 5. SNAIL (Snail Maze homage)
 
 Reference: the built-in game in the SMS v1.3 BIOS (boot with no cartridge,
