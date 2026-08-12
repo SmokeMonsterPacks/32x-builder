@@ -25,11 +25,12 @@
  *   - The faces stay PLANAR. Each side's top and bottom edges are parallel
  *     (both run along one axis), and two parallel lines are coplanar — so the
  *     quad rasteriser and the winding backface cull work untouched.
- *   - The solid stays CONVEX and inside its base AABB, so box_nearer's
- *     separating-axis test stays CORRECT as written: a gap between two AABBs
- *     is still a gap between the hulls. It is merely conservative — a wedge
- *     pair can fall through to the 0 (order-is-a-no-op) case where a tighter
- *     test would have ranked them.
+ *   - The solid stays CONVEX, so box_nearer's separating-axis test still
+ *     holds: a gap between two bounding boxes is a gap between the hulls. It
+ *     is merely conservative — a wedge pair can fall through to the 0
+ *     (order-is-a-no-op) case where a tighter test would have ranked them.
+ *     Those bounds must come from cbox_bounds, NOT the six base fields; see
+ *     the note there, a wedge's top may overhang its base.
  *   - Shading stays a table lookup. A shallow taper's sides read correctly on
  *     chair_face_shade's six-way axis mapping; a STEEP one would want a baked
  *     normal, which is the extension point if a future model needs it.
@@ -43,6 +44,15 @@ typedef struct {
     uint8_t taper;
 } cbox_t;
 #define CM(v) ((int16_t)((v) * 256))
+
+/* Write a box with BOX6 and a wedge with WEDGE. Brace-eliding the wedge
+ * fields is legal and zero-fills correctly, but -Wmissing-field-initializers
+ * then fires on every row of every model table, which buries the warnings that
+ * mean something. These say the same thing and say it out loud. */
+#define BOX6(x0, y0, z0, x1, y1, z1) \
+    { (x0), (y0), (z0), (x1), (y1), (z1), 0, 0, 0, 0, 0 }
+#define WEDGE(x0, y0, z0, x1, y1, z1, tx0, tz0, tx1, tz1) \
+    { (x0), (y0), (z0), (x1), (y1), (z1), (tx0), (tz0), (tx1), (tz1), 1 }
 
 /* One corner in model units. Bit0 = the x1 side, bit1 = top, bit2 = the z1
  * side — the indexing chair_face_v is written against. Shared by the in-game
@@ -74,8 +84,10 @@ static inline void cbox_bounds(const cbox_t *b, int16_t *lo, int16_t *hi) {
     lo[1] = b->y0; hi[1] = b->y1;
     lo[2] = b->z0; hi[2] = b->z1;
     if (!b->taper) return;
-    if (b->tx0 < lo[0]) lo[0] = b->tx0;   if (b->tx1 > hi[0]) hi[0] = b->tx1;
-    if (b->tz0 < lo[2]) lo[2] = b->tz0;   if (b->tz1 > hi[2]) hi[2] = b->tz1;
+    if (b->tx0 < lo[0]) lo[0] = b->tx0;
+    if (b->tx1 > hi[0]) hi[0] = b->tx1;
+    if (b->tz0 < lo[2]) lo[2] = b->tz0;
+    if (b->tz1 > hi[2]) hi[2] = b->tz1;
 }
 /* NO box interpenetrates or spans past another's occlusion plane: the painter
  * sort keys on per-triangle centroid depth, and any triangle whose depth span
@@ -92,15 +104,15 @@ static inline void cbox_bounds(const cbox_t *b, int16_t *lo, int16_t *hi) {
  * are unchanged — only their depth is pulled back. They stay wholly within
  * the posts' z-span [0.20, 0.26], so the disjoint painter sort is preserved. */
 static const cbox_t chair_boxes[CHAIR_NBOXES] = {
-    { CM(-0.26), CM(0.42), CM(-0.26), CM( 0.26), CM(0.48), CM( 0.20) },  /* seat */
-    { CM(-0.26), CM(0.00), CM(-0.26), CM(-0.20), CM(0.42), CM(-0.20) },  /* front-L */
-    { CM( 0.20), CM(0.00), CM(-0.26), CM( 0.26), CM(0.42), CM(-0.20) },  /* front-R */
-    { CM(-0.26), CM(0.00), CM( 0.20), CM(-0.20), CM(0.48), CM( 0.26) },  /* post BL low */
-    { CM( 0.20), CM(0.00), CM( 0.20), CM( 0.26), CM(0.48), CM( 0.26) },  /* post BR low */
-    { CM(-0.26), CM(0.48), CM( 0.20), CM(-0.20), CM(1.00), CM( 0.26) },  /* post BL up */
-    { CM( 0.20), CM(0.48), CM( 0.20), CM( 0.26), CM(1.00), CM( 0.26) },  /* post BR up */
-    { CM(-0.20), CM(0.90), CM( 0.23), CM( 0.20), CM(1.00), CM( 0.245) }, /* top rail — recessed, thin */
-    { CM(-0.20), CM(0.68), CM( 0.23), CM( 0.20), CM(0.76), CM( 0.245) }, /* mid slat — recessed, thin */
+    BOX6(CM(-0.26), CM(0.42), CM(-0.26), CM( 0.26), CM(0.48), CM( 0.20)),  /* seat */
+    BOX6(CM(-0.26), CM(0.00), CM(-0.26), CM(-0.20), CM(0.42), CM(-0.20)),  /* front-L */
+    BOX6(CM( 0.20), CM(0.00), CM(-0.26), CM( 0.26), CM(0.42), CM(-0.20)),  /* front-R */
+    BOX6(CM(-0.26), CM(0.00), CM( 0.20), CM(-0.20), CM(0.48), CM( 0.26)),  /* post BL low */
+    BOX6(CM( 0.20), CM(0.00), CM( 0.20), CM( 0.26), CM(0.48), CM( 0.26)),  /* post BR low */
+    BOX6(CM(-0.26), CM(0.48), CM( 0.20), CM(-0.20), CM(1.00), CM( 0.26)),  /* post BL up */
+    BOX6(CM( 0.20), CM(0.48), CM( 0.20), CM( 0.26), CM(1.00), CM( 0.26)),  /* post BR up */
+    BOX6(CM(-0.20), CM(0.90), CM( 0.23), CM( 0.20), CM(1.00), CM( 0.245)), /* top rail — recessed, thin */
+    BOX6(CM(-0.20), CM(0.68), CM( 0.23), CM( 0.20), CM(0.76), CM( 0.245)), /* mid slat — recessed, thin */
 };
 #undef CM
 

@@ -538,8 +538,8 @@ lines.append("")
 lines.append(f"static const cbox_t {PREFIX.lower()}_boxes[{PREFIX}_NBOXES] = {{")
 for bi_, mb in enumerate(model_boxes):
     x0, y0, z0, x1, y1, z1 = mb
-    lines.append(f"    {{ {q(x0):5d}, {q(y0):5d}, {q(z0):5d}, "
-                 f"{q(x1):5d}, {q(y1):5d}, {q(z1):5d} }},"
+    lines.append(f"    BOX6({q(x0):5d}, {q(y0):5d}, {q(z0):5d}, "
+                 f"{q(x1):5d}, {q(y1):5d}, {q(z1):5d}),"
                  + ("   /* hand-added */" if bi_ >= n_carved else ""))
 lines.append("};")
 lines.append("")

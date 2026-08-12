@@ -4089,8 +4089,10 @@ static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
     for (int b = 0; b < bm->nboxes; b++) {
         int16_t qlo[3], qhi[3];
         cbox_bounds(&bm->boxes[b], qlo, qhi);   /* wedge top can overhang */
-        if (qlo[0] < x0) x0 = qlo[0];   if (qhi[0] > x1) x1 = qhi[0];
-        if (qlo[2] < z0) z0 = qlo[2];   if (qhi[2] > z1) z1 = qhi[2];
+        if (qlo[0] < x0) x0 = qlo[0];
+        if (qhi[0] > x1) x1 = qhi[0];
+        if (qlo[2] < z0) z0 = qlo[2];
+        if (qhi[2] > z1) z1 = qhi[2];
     }
     *hx = (fx_t)((((int32_t)(x1 - x0) / 2) * wh) >> 8);
     *hz = (fx_t)((((int32_t)(z1 - z0) / 2) * wh) >> 8);

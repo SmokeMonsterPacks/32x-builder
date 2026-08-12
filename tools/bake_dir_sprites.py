@@ -45,19 +45,27 @@ def load_boxes(header="sh_src/chair3d.h", symbol="chair_boxes"):
     """
     src = open(os.path.join(REPO, header)).read()
     body = src.split(symbol + "[")[1]
+    body = body[:body.index("};")] if "};" in body else body
     boxes = []
-    for m in re.finditer(r"\{([^}]*)\}", body):
-        vals = re.findall(r"CM\(\s*(-?[0-9.]+)\s*\)", m.group(1))
-        if len(vals) in (6, 11):
+    for m in re.finditer(r"\b(BOX6|WEDGE)\s*\(", body):
+        # Paren-match rather than regex the interior: BOX6(CM(...), ...) nests.
+        i = m.end()
+        depth, start = 1, i
+        while depth and i < len(body):
+            depth += (body[i] == '(') - (body[i] == ')')
+            i += 1
+        inner = body[start:i - 1]
+        vals = re.findall(r"CM\(\s*(-?[0-9.]+)\s*\)", inner)
+        if vals:
             b = [float(v) for v in vals]
         else:
-            raw = re.findall(r"-?\d+", m.group(1))
-            if len(raw) not in (6, 11):
-                continue
-            b = [int(v) / 256.0 for v in raw]
-            if len(b) == 11:
-                b[10] *= 256.0          # taper is a flag, not a coordinate
-        boxes.append(tuple(b + [0.0] * (11 - len(b))))
+            b = [int(v) / 256.0 for v in re.findall(r"-?\d+", inner)]
+        want = 10 if m.group(1) == "WEDGE" else 6
+        if len(b) != want:
+            continue
+        b += [0.0] * (10 - len(b))
+        b.append(1.0 if m.group(1) == "WEDGE" else 0.0)
+        boxes.append(tuple(b))
     if not boxes:
         sys.exit("no %s parsed from %s" % (symbol, header))
     return boxes
