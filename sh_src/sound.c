@@ -653,7 +653,7 @@ void amb_pump(void) {
             /* Crouched + moving: the sliding drag replaces the carpet,
              * footstep loudness class (it's locomotion, not an event). */
             int sd = (int)amb_sliding_samples[crawl_pos] << 2;
-            step_delta = (sd * step_vol) >> 9;
+            step_delta = (sd * step_vol) >> 8;   /* 2x per Mike's ears (was >>9) */
             uint32_t adv = (uint32_t)crawl_frac + SLIDING_STEP_FX;
             crawl_pos  += adv >> 16;
             crawl_frac  = (uint16_t)adv;
@@ -675,7 +675,8 @@ void amb_pump(void) {
             uint32_t slim = slide_loop ? AMB_SLIDING_SAMPLE_COUNT
                                        : AMB_SHUFFLE_SAMPLE_COUNT;
             int sl = (int)ssrc[slide_pos] << 2;
-            step_delta += (sl * step_vol) >> 8;
+            /* Corridor sliding loop 2x per Mike's ears; landing stays put. */
+            step_delta += (sl * step_vol) >> (slide_loop ? 7 : 8);
             uint32_t adv = (uint32_t)slide_frac + slide_step_fx;
             slide_pos  += adv >> 16;
             slide_frac  = (uint16_t)adv;
