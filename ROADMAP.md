@@ -47,6 +47,19 @@ player-crossing chained triggers).
 
 ## Visual / atmospheric
 
+### Game-on-glass: the live SMS picture on the PVM  (NEXT UP, queued 2026-08-12)
+**Status:** designed, unblocked — full plan in `sms/DESIGN.md` 4c. The
+old VRAM-snoop question is moot: the SMS mini-game's display never
+touches VRAM; TILEBUF in Z80 RAM is the whole picture and the 68K
+already copies it out every dirty frame (`sms_game_tiles`). Work: 68K
+free-runs an index+word rotation on COMM4/COMM6 (no handshake — the
+joypad-bridge starvation lesson), SH-2 samples a few dozen pairs per
+frame into a local copy, renders 32x24 lit/unlit phosphor cells on the
+PVM glass texture (v2: real glyphs via the SH-2 font). Static until the
+Z80's first DIRTY; the convergence tearing is the signal-lock look and
+stays. ~1 day; the only tuning risk is the sampling rate. Pairs with
+the diegetic PVM+console trigger that replaces the TESTING menu rows.
+
 ### Ceiling lights as actual grid-tile illumination
 **Status:** ✅ done — scanline trapezoid fill from 4 projected corners
 of each axis-aligned ceiling tile. Per-edge slope precomputed once,
