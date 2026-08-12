@@ -3643,8 +3643,19 @@ void player_update(uint16_t pad) {
         prev_a = (uint16_t)(pad & SEGA_CTRL_A);
     }
 
-    /* Track walking state and advance bob phase. */
-    is_walking = (dx != 0 || dy != 0);
+    /* Track walking state and advance bob phase. WALKING = the position
+     * actually changed after collision, not "movement input held":
+     * pressed face-first into a wall you go nowhere, so the carpet
+     * footsteps / crawl slide stay silent instead of marching in place.
+     * Wall SLIDING still counts — the clipped axis zeroes but the other
+     * carries, the position changes, the steps play. (Also stills the
+     * head-bob against walls, which matches what your eyes see.) */
+    {
+        static fx_t prev_px_w, prev_py_w;
+        is_walking = (player.x != prev_px_w || player.y != prev_py_w);
+        prev_px_w = player.x;
+        prev_py_w = player.y;
+    }
     /* Turning-in-place counts as motion for the res/LOD gates (a spin redraws
      * every column); detected by angle delta so it covers every turn path. */
     {
