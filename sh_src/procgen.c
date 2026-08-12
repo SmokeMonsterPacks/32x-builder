@@ -218,31 +218,115 @@ static void place_neanderthals(int count) {
  * the DESK-MOUNTED composite, and the FACING RULE is law: the screen must
  * face an open floor cell, never a wall — a monitor nobody could watch is
  * set dressing gone wrong. Cells with no open cardinal are skipped. */
+/* PARKED, not dropped. A desk standing in open floor reads as scenery the
+ * generator sprinkled; a desk with its BACK TO A WALL reads as one somebody
+ * pushed there and sat at. That single test does all the work Mike asked for:
+ *
+ *   dead end / nook   3 walls, 1 way out   -> back to the dead end, facing out
+ *   corner of a room  2 walls              -> tucked in, facing the room
+ *   against a wall    1 wall               -> the ordinary office answer
+ *   middle of a room  0 walls              -> REJECTED, nothing to back onto
+ *   1-wide corridor   walls on the sides   -> REJECTED for free: facing either
+ *                                             way leaves the back open, and a
+ *                                             desk mid-corridor is a roadblock
+ *                                             nobody would have left there.
+ *
+ * Returns the facings that satisfy it (watchable floor ahead, wall behind) and
+ * reports how walled-in the cell is, so the caller can hold out for a nook.
+ * Facing: E0 S64 W128 N192 -> front dir (+x),(+y),(-x),(-y); d^2 is the
+ * opposite cardinal in that order, which is what "behind" means. */
+/* Grid steps from spawn the strict pass demands, so the desk is something you
+ * go and find. Deliberately modest: the map is 32x32 and the walk is not a
+ * straight line, so 10 already means several rooms of travel. Push it much
+ * higher and the strict pass starves on small maps and quietly hands every
+ * level to the relaxed one, which is the rule without the hunt. */
+#define DESK_HUNT_MIN 10
+
+static int desk_park_facings(int x, int y, uint8_t *out, int *nwall) {
+    static const int8_t fdx[4] = { 1, 0, -1, 0 };
+    static const int8_t fdy[4] = { 0, 1, 0, -1 };
+    int isopen[4], n = 0;
+    *nwall = 0;
+    for (int d = 0; d < 4; d++) {
+        /* WALKABLE is the test, not placeable: footprint_clear demands a
+         * 1-cell margin too, and requiring that of a neighbor turned the rule
+         * into "needs a plaza" — zero monitors ever placed. */
+        isopen[d] = cells_open(x + fdx[d], y + fdy[d], x + fdx[d], y + fdy[d]);
+        if (!isopen[d]) (*nwall)++;
+    }
+    for (int d = 0; d < 4; d++)
+        if (isopen[d] && !isopen[d ^ 2]) out[n++] = (uint8_t)(d * 64);
+    return n;
+}
+
+/* Pick one parked spot, scanning the WHOLE grid rather than sampling it.
+ *
+ * Random attempts were fine for the old rule, which accepted almost any open
+ * cell. This one rejects most of the floor, and 64 darts at a target that
+ * small can miss — a miss means the level ships with no monitor at all, and
+ * "every procedural level has the monitor" is a standing promise. A full scan
+ * cannot miss: if a single qualifying cell exists anywhere, it is found.
+ *
+ * Reservoir sampling keeps the choice uniform without a candidate list in RAM
+ * (each match has a 1/seen chance of replacing the keeper, so every match ends
+ * up equally likely). Runs once per level generation. */
+static int desk_park_scan(int need_nook, int need_far,
+                          int *bx, int *by, uint8_t *bfacing) {
+    int seen = 0;
+    for (int y = 2; y < MAP_H - 2; y++)
+        for (int x = 2; x < MAP_W - 2; x++) {
+            uint8_t cand[4]; int nwall;
+            if (!footprint_clear(x, y, 1, 1)) continue;
+            /* Facing test before the standup/exit lookups: it is plain
+             * neighbour reads and it rejects most of the floor, so the
+             * costlier queries only run on cells that could actually win. */
+            int n = desk_park_facings(x, y, cand, &nwall);
+            if (!n) continue;                 /* nothing to back onto */
+            if (need_nook && nwall < 2) continue;   /* holding out for a nook */
+            if (need_far) {
+                /* Make it a HUNT. A desk parked in the first room you
+                 * walk into is found, not discovered — the point is to give
+                 * a reason to check rooms and look around corners. Manhattan
+                 * distance is the right measure here and not a shortcut: you
+                 * walk corridors, so grid steps are closer to real travel
+                 * than a straight line through walls would be. */
+                int dx = x - SPAWN_CX, dy = y - SPAWN_CY;
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+                if (dx + dy < DESK_HUNT_MIN) continue;
+            }
+            if (raycast_standup_in_cell(x, y)) continue;
+            if (raycast_exit_path_cell(x, y)) continue;
+            seen++;
+            if (xs32_range(0, seen - 1) == 0) {
+                *bx = x; *by = y;
+                *bfacing = cand[xs32_range(0, n - 1)];
+            }
+        }
+    return seen;
+}
+
 static void place_pvms(int count) {
-    int placed = 0, attempts = count * 32;   /* one MUST land: try harder */
-    while (attempts-- > 0 && placed < count) {
-        int x = xs32_range(2, MAP_W - 3);
-        int y = xs32_range(2, MAP_H - 3);
-        if (!footprint_clear(x, y, 1, 1)) continue;
-        if (raycast_standup_in_cell(x, y)) continue;
-        if (raycast_exit_path_cell(x, y)) continue;
-        /* facing: E0 S64 W128 N192 -> front dir (+x),(+y),(-x),(-y). Collect
-         * the cardinals whose neighbor is walkable floor; pick one at random. */
-        static const int8_t fdx[4] = { 1, 0, -1, 0 };
-        static const int8_t fdy[4] = { 0, 1, 0, -1 };
-        uint8_t open[4]; int nopen = 0;
-        for (int d = 0; d < 4; d++)
-            /* WALKABLE is the test, not placeable: footprint_clear demands
-             * a 1-cell margin too, and requiring that of a neighbor turned
-             * the rule into "needs a plaza" — zero monitors ever placed. */
-            if (cells_open(x + fdx[d], y + fdy[d], x + fdx[d], y + fdy[d]))
-                open[nopen++] = (uint8_t)(d * 64);
-        if (!nopen) continue;                 /* boxed in: no watchable side */
-        uint8_t facing = open[xs32_range(0, nopen - 1)];
+    for (int placed = 0; placed < count; placed++) {
+        int x = 0, y = 0; uint8_t facing = 0;
+        /* Three tiers, best first. Dropping the NOOK before dropping the
+         * DISTANCE is deliberate: a plain wall far away is still something
+         * you had to go and find, while a perfect corner two steps from
+         * spawn is not a discovery at all.
+         *   1  a nook or corner, far from spawn        the one we want
+         *   2  any wall at its back, far from spawn    still a hunt
+         *   3  any wall at its back, anywhere          last resort
+         * If even tier 3 finds nothing, the map has no floor cell touching a
+         * wall — meaning it has no walls. Place nothing rather than maroon
+         * the desk in open floor, which is the exact thing this rule exists
+         * to prevent. */
+        if (!desk_park_scan(1, 1, &x, &y, &facing)
+            && !desk_park_scan(0, 1, &x, &y, &facing)
+            && !desk_park_scan(0, 0, &x, &y, &facing)) return;
         raycast_add_standup(((fx_t)x << FX_SHIFT) + FX(0.5),
-                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing, PVM_ASSET_KIND);
+                            ((fx_t)y << FX_SHIFT) + FX(0.5), facing,
+                            PVM_ASSET_KIND);
         raycast_standup_make_desk();          /* the composite, not the stand */
-        placed++;
     }
 }
 
