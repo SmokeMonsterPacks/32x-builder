@@ -1598,6 +1598,20 @@ static uint8_t row_color[SCREEN_H];
 /* Precomputed cameraX value per screen column. Replaces a per-column divide
  * (one of the few remaining ones in the wall loop) with a single table load. */
 static fx_t cameraX_table[SCREEN_W];
+/* ULTRA rest-pair camera jitter: HALF of cameraX's per-column step (which is
+ * 2*FX_ONE/SCREEN_W). The twin frame shifts every wall ray — and the floor/
+ * ceiling row spans, via +plane*this — by half a pixel, so the parked 60Hz
+ * flip pair blends into an effective double-width image on a CRT. */
+#define ULTRA_JIT_FX ((fx_t)(FX_ONE / SCREEN_W))
+/* The twin is MERGED, never alternated (the B00288-290 arc: 30Hz/phase
+ * temporal flip never fused on the PVM — texel fields, v-phase and shade
+ * bands each read as shimmer, and pinning one leak surfaced the next).
+ * m_main renders pass A (ultra_twin=1: frozen, no jitter) and pass B
+ * (ultra_twin=2: frozen + this half-column shift), then checkerboard-merges
+ * them into ONE static frame — differing pixels alternate A/B spatially,
+ * which the CRT fuses into the supersample. So the jitter is applied to
+ * EVERYTHING again (walls, floor, ceiling, slab): every difference it
+ * creates is detail for the merge, and nothing on screen ever changes. */
 
 static void build_shading_tables(void) {
     int mid = SCREEN_H / 2;
@@ -3666,7 +3680,10 @@ void player_update(uint16_t pad) {
     /* Running = actually moving while sprinting (A held). The pump reads this
      * to play the carpet footsteps at a faster cadence to match the stride. */
     is_running = (is_walking && sprinting) ? 1 : 0;
-    if (is_walking) bob_phase += 20;         /* ~4.7 Hz — tight micro-bob cadence */
+    /* Bob cadence matches the footstep audio: 1.5x while sprinting, so
+     * eyes and ears agree on stride rate. Amplitude deliberately
+     * unchanged (deeper bob at these framerates reads as judder). */
+    if (is_walking) bob_phase += is_running ? 30 : 20;   /* ~4.7 / ~7 Hz */
 
     /* INTERACT: the run button (A) doubles as "use" when you're within reach of
      * the door — a rising-edge press toggles it open/closed. Holding A still
@@ -6549,6 +6566,11 @@ RAMTEXT void raycast_draw_ceiling_grid(int col_start, int col_end) {
     fx_t leftDirY  = dirY - planeY;
     fx_t rightDirX = dirX + planeX;
     fx_t rightDirY = dirY + planeY;
+    if (SHARED_UC->ultra_twin == 2) {   /* ULTRA pass B: half-column shift (merged statically) */
+        fx_t jx = FX_MUL(planeX, ULTRA_JIT_FX), jy = FX_MUL(planeY, ULTRA_JIT_FX);
+        leftDirX += jx; rightDirX += jx;
+        leftDirY += jy; rightDirY += jy;
+    }
 
     uint8_t *fb = fb_pixels();
     /* horizon_y shifts with pitch; focal_const stays unshifted so
@@ -6719,6 +6741,11 @@ RAMTEXT static void raycast_draw_low_ceiling(int col_start, int col_end, int sla
     fx_t planeY = FX_MUL( dirX, FX(0.66));
     fx_t leftDirX  = dirX - planeX, leftDirY  = dirY - planeY;
     fx_t rightDirX = dirX + planeX, rightDirY = dirY + planeY;
+    if (SHARED_UC->ultra_twin == 2) {   /* ULTRA pass B: half-column shift (merged statically) */
+        fx_t jx = FX_MUL(planeX, ULTRA_JIT_FX), jy = FX_MUL(planeY, ULTRA_JIT_FX);
+        leftDirX += jx; rightDirX += jx;
+        leftDirY += jy; rightDirY += jy;
+    }
 
     uint8_t *fb = fb_pixels();
     int horizon_y = SCREEN_H / 2 - (int)SHARED_UC->pitch_y;
@@ -7448,6 +7475,11 @@ RAMTEXT void raycast_draw_carpet(int col_start, int col_end) {
     fx_t leftDirY  = dirY - planeY;
     fx_t rightDirX = dirX + planeX;
     fx_t rightDirY = dirY + planeY;
+    if (SHARED_UC->ultra_twin == 2) {   /* ULTRA pass B: half-column shift (merged statically) */
+        fx_t jx = FX_MUL(planeX, ULTRA_JIT_FX), jy = FX_MUL(planeY, ULTRA_JIT_FX);
+        leftDirX += jx; rightDirX += jx;
+        leftDirY += jy; rightDirY += jy;
+    }
 
     uint8_t *fb = fb_pixels();
     /* horizon_y is the on-screen dividing line between ceiling and floor;
@@ -8070,6 +8102,8 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
      * the gates here. */
     const int hr0 = SHARED_UC->wall_halfres;  /* 0 full, 1 half, 2 quarter */
     const int vert = SHARED_UC->wall_vert;    /* 1 = store even rows only (vertical half-res) */
+    /* ULTRA pass B: shift every ray half a column (hoisted — uncached read). */
+    const fx_t ujit = (SHARED_UC->ultra_twin == 2) ? ULTRA_JIT_FX : 0;
     const int cstep0 = (hr0 >= 2) ? 4 : (hr0 ? 2 : 1);
     /* SEAMS=SMOOTH only bites when the fill is coarsened (cstep>1). The half→full
      * dissolve runs at FULL res (cstep==1) and re-doubles pairs over the wall
@@ -8198,7 +8232,7 @@ RAMTEXT void raycast_draw_walls(int col_start, int col_end) {
         for (int j = 1; j < cstep; j++) PART_TOP(col + j) = 0;
         BG_DIST(col) = 255;
         for (int j = 1; j < cstep; j++) BG_DIST(col + j) = 255;
-        fx_t cameraX = cameraX_table[col];
+        fx_t cameraX = cameraX_table[col] + ujit;
         fx_t rayDirX = dirX + FX_MUL(planeX, cameraX);
         fx_t rayDirY = dirY + FX_MUL(planeY, cameraX);
 
@@ -9958,6 +9992,15 @@ RAMTEXT void raycast_clear_half(int col_start, int col_end) {
 void raycast_render(void) {
     uint16_t prof_start = prof_frt_read();
 
+    /* ULTRA TWIN: m_main's rest-pair render — the same world state again with
+     * the half-column camera jitter. Every piece of adaptive state below is
+     * FROZEN (no EMA sample, no AUTO/ratchet/dissolve stepping, no split
+     * nudge, no dense latch): the pass functions re-read last frame's
+     * published values, so the twin differs from its partner by the jitter
+     * and nothing else. A res decision flipping between the pair would show
+     * as 30Hz wobble in the parked flip. */
+    const int ultra_twin = SHARED_UC->ultra_twin != 0;
+
     /* Frame-period EMA for adaptive resolution (WALLS=AUTO). Delta between
      * successive raycast_render entries = full frame period in FRT ticks. The
      * 16-bit FRT wraps past 65536 (sub-11fps), so unwrap a single overflow like
@@ -9965,11 +10008,14 @@ void raycast_render(void) {
      * few frames, not to one-frame spikes. */
     static uint16_t frame_prev_frt = 0;
     static uint32_t frame_ema = 9000;    /* ~F:20 seed so AUTO doesn't lurch at boot */
-    uint16_t fdraw = (uint16_t)(prof_start - frame_prev_frt);
-    frame_prev_frt = prof_start;
-    uint32_t fdelta = (fdraw < 3000) ? (uint32_t)fdraw + 65536u : fdraw;
-    frame_ema = (frame_ema - (frame_ema >> 3)) + (fdelta >> 3);
+    if (!ultra_twin) {
+        uint16_t fdraw = (uint16_t)(prof_start - frame_prev_frt);
+        frame_prev_frt = prof_start;
+        uint32_t fdelta = (fdraw < 3000) ? (uint32_t)fdraw + 65536u : fdraw;
+        frame_ema = (frame_ema - (frame_ema >> 3)) + (fdelta >> 3);
+    }
 
+    if (!ultra_twin) {
     /* Resolve the effective wall half-res from the menu mode. Lobby always full.
      * AUTO: hysteresis on the frame period — drop to half above ~F:13.3, return
      * to full below ~F:16; the deadband stops per-frame flip-flop (and the loop
@@ -10086,6 +10132,7 @@ void raycast_render(void) {
         else if (prof_pass_walls < WALL_DENSE_OFF) dense_latch = 0;
         SHARED_UC->wall_dense = lod ? dense_latch : 0;
     }
+    }   /* !ultra_twin: end of the frozen adaptive-state block */
 
     /* Vertical head bob is applied below via the framebuffer line table —
      * no position translation needed (lateral sway felt like drunk
@@ -10131,7 +10178,7 @@ void raycast_render(void) {
      * no per-column cost model — converges in a few frames as the view changes.
      * On emulators H/S read 0, so split stays at SCREEN_W/2 (static 50/50). */
     static int split = SCREEN_W / 2;
-    {
+    if (!ultra_twin) {   /* twin reuses the partner frame's split unchanged */
         int h = (int)prof_primary_half_ticks;            /* last frame, primary  */
         int s = (int)SHARED_UC->secondary_render_ticks;  /* last frame, secondary */
         int sum = h + s;

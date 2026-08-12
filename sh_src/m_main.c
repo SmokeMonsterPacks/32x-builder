@@ -16,6 +16,8 @@
  * place. */
 uint32_t lastTick = 0;
 uint16_t currentFB = 0;
+extern char _end[];   /* linker: .bss end — the hero overlay parks just above
+                       * (see mars.ld); the ULTRA merge borrows it as scratch */
 
 /* On-screen debug metrics — off by default, toggled by the six-button
  * controller's MODE button (edge-detected once per frame from any loop). */
@@ -2261,6 +2263,123 @@ int m_main(void) {
         { uint16_t n = prof_read_frt(); prof_post_hud = (uint16_t)(n - t_post); t_post = n; }
         swapBuffers();
         { uint16_t n = prof_read_frt(); prof_post_swap = (uint16_t)(n - t_post); }
+
+        /* ── ULTRA REST PAIR (TESTING>ULTRA) ────────────────────────────────
+         * The stillness ratchet already spends stationary frames on full res;
+         * this is the rung above it, using the one renderer the 32X gives us
+         * for free: the VDP itself. Hold still ~1s and the loop renders a
+         * TWIN of the frame on screen — identical world state, camera half a
+         * column over — into the other framebuffer, then parks flipping the
+         * pair at 60Hz with both SH-2s idle. CRT phosphor + eye blend the two
+         * into an effective 640-wide antialiased image (on a sharp scaler it
+         * reads as deliberate VHS shimmer instead). Movement never knows this
+         * exists: any button/dpad bit breaks the park and the next normal
+         * frame simply overwrites the pair — teardown is one loop exit.
+         *
+         * Arm gates: everything frame-paced must be idle. Held buttons (C
+         * tilt, A+B crouch, MODE combos) keep it disarmed via the pad mask;
+         * the YM patch drip-feed and TL slider are one-write-per-frame
+         * streams that would stall parked; wall_halfres==0 waits out the
+         * ratchet's own climb to full so the pair can't capture a half-res
+         * frame. The twin shares frame A's frame_count, so the distant-wall
+         * strobe and PVM static freeze identically in both buffers; the
+         * fluorescent shimmer lives in CRAM, so it stays alive through the
+         * park (at 60Hz — nearer a real tube than the render loop gets). */
+        /* Dwell is RENDERED frames on top of the arm gates, and the gates
+         * already stage the entry: the stillness ratchet needs ~2 frames to
+         * publish full res, the dissolve one more to decay — so 2 here lands
+         * the park ~5 frames (~350ms) after the last input. As fast as the
+         * pipeline allows without capturing a half-res or dissolve frame. */
+        #define ULTRA_DWELL_FRAMES 2
+        {
+            static uint16_t ultra_dwell = 0;
+            int ultra_ok = SHARED_UC->ultra_enable
+                && (pad & ~SEGA_CTRL_TYPE) == 0
+                && !SHARED_UC->is_walking && !SHARED_UC->is_turning
+                && !menu_is_active()
+                && g_pullup == 0 && g_crawl == 0
+                && !g_smsboot_frames && g_warp_request < 0
+                && g_ym_upload == 0 && !g_ym_tl_dirty
+                && !SHARED_UC->hero_dying          /* death anim owns the frame pacing */
+                && SHARED_UC->wall_halfres == 0
+                && SHARED_UC->wall_dissolve == 0;  /* focus-pull frame settled */
+            if (!ultra_ok) ultra_dwell = 0;
+            else if (ultra_dwell <= ULTRA_DWELL_FRAMES) {
+                if (ultra_dwell++ == ULTRA_DWELL_FRAMES) {
+                    /* STATIC SUPERSAMPLE (the B00288→290 arc): a 30Hz/phase
+                     * temporal flip never fused on the PVM — texel fields,
+                     * texture v-phase and shade bands all read as shimmer,
+                     * and pinning one leak only surfaced the next. So the
+                     * pair becomes ONE frame instead: render the standing
+                     * frame and its half-column twin back to back (adaptive
+                     * state frozen for both), then checkerboard-merge them.
+                     * Agreeing pixels stay; differing pixels alternate A/B
+                     * on the spatial checkerboard, which the CRT fuses the
+                     * same way the flip was supposed to — statically. The
+                     * park holds one motionless frame; nothing can shimmer. */
+                    SHARED_UC->ultra_twin = 1;   /* pass A: frozen state, no jitter */
+                    raycast_render();
+                    uint8_t *fbu = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+                    /* Stash A above _end — the hero-overlay region plus the
+                     * stack-spill gap. Every tenant up there (menu pane
+                     * capture, box-intro verts, hero cels) is dead during
+                     * gameplay, and this runs at main-loop depth so the gap
+                     * is idle too; 71,680B tops out ~66KB under the Master
+                     * stack. The displayed buffer isn't CPU-readable (the FB
+                     * window maps the draw side only), hence the re-render
+                     * instead of a copy of what's on screen. */
+                    uint32_t *ua_src = (uint32_t *)fbu;
+                    uint32_t *ua_dst = (uint32_t *)(((uintptr_t)_end + 7) & ~(uintptr_t)7);
+                    for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++)
+                        ua_dst[i] = ua_src[i];
+                    SHARED_UC->ultra_twin = 2;   /* pass B: frozen + half-column jitter */
+                    raycast_render();
+                    SHARED_UC->ultra_twin = 0;
+                    /* Merge A into B, word-granular (a byte store of 0 would
+                     * hit the FB's dropped-zero-byte quirk). Row parity flips
+                     * which byte of a differing pair comes from which pass —
+                     * a 1px checkerboard everywhere the half-column shift
+                     * changed anything. */
+                    {
+                        const uint16_t *upa = (const uint16_t *)ua_dst;
+                        uint16_t *upb = (uint16_t *)fbu;
+                        int i = 0;
+                        for (int y = 0; y < SCREEN_H; y++) {
+                            int a_hi = y & 1;
+                            for (int x = 0; x < SCREEN_W / 2; x++, i++) {
+                                uint16_t a = upa[i], b = upb[i];
+                                if (a == b) continue;
+                                upb[i] = a_hi ? (uint16_t)((a & 0xFF00) | (b & 0x00FF))
+                                              : (uint16_t)((b & 0xFF00) | (a & 0x00FF));
+                            }
+                        }
+                    }
+                    /* Overlays once, on the merged frame — crisp, no drift. */
+                    if (g_automap_on) automap_draw(fbu);
+                    if (g_metrics_on) { prof_sample_and_draw(fbu); pos_draw(fbu); }
+                    if (g_padtest_on) pad_test_draw(fbu, pad);
+                    swapBuffers();
+                    /* PARK on the single merged frame: no flipping — just the
+                     * vblank tick so the CRAM window stays honest (the
+                     * fluorescent shimmer lives on) and the pad poll. Any
+                     * button exits; the next loop iteration re-reads the pad
+                     * and handles it (START menu, UP walks, ...) one frame
+                     * late. The secondary's COMM4 idle loop keeps pumping
+                     * ambience on its own the whole time. */
+                    for (;;) {
+                        HwMdReadPad(0);
+                        if (MARS_SYS_COMM8 & ~SEGA_CTRL_TYPE) break;
+                        SHARED_UC->primary_vwait = 1;
+                        while (lastTick == MARS_SYS_COMM12);
+                        SHARED_UC->primary_vwait = 0;
+                        raycast_shimmer();
+                        raycast_pal_flush();
+                        lastTick = MARS_SYS_COMM12;
+                    }
+                    ultra_dwell = 0;
+                }
+            }
+        }
     }
 
     /* EXIT TO LOBBY: fade the level out, level the camera (stale hold-C

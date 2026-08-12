@@ -239,6 +239,22 @@ typedef struct {
      * a standing corridor at F:07-11 and the rung only arms moving at ~F:09 or
      * worse -- it never entered its own trigger condition. TESTING>AUTOQTR. */
     volatile uint8_t auto_qtr;
+    /* ULTRA rest pair (TESTING>ULTRA). After ~1s of stillness the primary
+     * renders a TWIN of the frame on screen — same world state, camera shifted
+     * HALF A COLUMN — into the other framebuffer, then parks in a loop that
+     * flips the pair at 60Hz with both CPUs idle. On a CRT the phosphor+eye
+     * blend the two into an effective 640-wide antialiased image. Any input
+     * breaks the park and the normal loop simply overwrites the pair. */
+    volatile uint8_t ultra_enable;
+    /* Nonzero while an ULTRA pass renders: 1 = pass A (no jitter), 2 = pass
+     * B (every pass on both CPUs shifts sampling half a column). m_main
+     * checkerboard-merges the two into ONE static frame — differences are
+     * spatial dither the CRT fuses, never temporal (the B00288-290 lesson:
+     * a 30Hz flip pair reads as shimmer no matter which leak you pin).
+     * Either value makes raycast_render freeze EVERY piece of adaptive
+     * state (frame EMA, AUTO/ratchet/dissolve, split nudge, dense latch) so
+     * the passes stay decision-identical and differ only by the jitter. */
+    volatile uint8_t ultra_twin;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to

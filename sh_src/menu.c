@@ -60,7 +60,7 @@ void    m_main_automap_zoom(int dir);
 #define AUDIO_CONTENT_ROWS    5   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE, HELLO */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
-#define TESTING_CONTENT_ROWS  9   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, SMSBOOT, SMSGAME */
+#define TESTING_CONTENT_ROWS 10   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, ULTRA, SMSBOOT, SMSGAME */
 #define COLOR_CONTENT_ROWS    6   /* SURFACE, R, G, B, WARMTH, SAT */
 #define CREDITS_CONTENT_ROWS  0   /* read-only display, no selection cursor */
 #define CREDITS_DRAWN_ROWS    4   /* MAP / BY / BUILD / DATE lines it paints */
@@ -212,11 +212,11 @@ void menu_update(uint16_t pad) {
     }
 
     /* COLOR tab: A resets the whole palette to the shipped defaults. */
-    if (menu_tab == TAB_TESTING && menu_row >= 8 && (pressed & SEGA_CTRL_A)) {
+    if (menu_tab == TAB_TESTING && menu_row >= 9 && (pressed & SEGA_CTRL_A)) {
         /* SMSBOOT/SMSGAME are ACTIONS, not toggles — they must fire on A
          * like the GAME/MAPS rows do. (They also fire on LEFT/RIGHT via the
          * dispatch below, but nobody's thumb believes that for a GO row.) */
-        if (menu_row == 8) g_sms_request = 1;
+        if (menu_row == 9) g_sms_request = 1;
         else               g_smsgame_request = 1;
         menu_active = 0;
         menu_genesis_blank();
@@ -325,12 +325,13 @@ void menu_update(uint16_t pad) {
         else if (menu_row == 5) SHARED_UC->hole_jamb ^= 1;   /* exit-hole jamb + cavity skin A/B */
         else if (menu_row == 6) SHARED_UC->auto_qtr ^= 1;    /* AUTO motion-gated quarter rung A/B */
         else if (menu_row == 7) SHARED_UC->unlit_kill ^= 1;  /* unlit-floor zone fills A/B (R:) */
-        else if (menu_row == 8) {                            /* the spike */
+        else if (menu_row == 8) SHARED_UC->ultra_enable ^= 1; /* rest-pair 60Hz flip A/B */
+        else if (menu_row == 9) {                            /* the spike */
             g_sms_request = 1;
             menu_active = 0;
             menu_genesis_blank();
         }
-        else if (menu_row == 9) {                            /* the mini-game */
+        else if (menu_row == 10) {                           /* the mini-game */
             g_smsgame_request = 1;
             menu_active = 0;
             menu_genesis_blank();
@@ -523,8 +524,9 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 64, menu_row == 5, "HOLEJAMB", SHARED_UC->hole_jamb ? " ON" : "OFF");
         draw_row(fb, 72, menu_row == 6, "AUTOQTR", SHARED_UC->auto_qtr ? " ON" : "OFF");
         draw_row(fb, 80, menu_row == 7, "UNLITF", SHARED_UC->unlit_kill ? "OFF" : " ON");
-        draw_row(fb, 88, menu_row == 8, "SMSBOOT", "GO");
-        draw_row(fb, 96, menu_row == 9, "SMSGAME", "GO");
+        draw_row(fb, 88, menu_row == 8, "ULTRA", SHARED_UC->ultra_enable ? " ON" : "OFF");
+        draw_row(fb, 96, menu_row == 9, "SMSBOOT", "GO");
+        draw_row(fb, 104, menu_row == 10, "SMSGAME", "GO");
     } else if (menu_tab == TAB_COLOR) {
         char v[6];
         draw_row(fb, 32, menu_row == 1, "SURFACE", pal_surf_names[pal_sel]);
