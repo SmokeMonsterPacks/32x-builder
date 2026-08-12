@@ -156,6 +156,31 @@ one-shots) ducks to silence over ~0.5 s on SMS entry and ramps back on
 exit — amb_volume and step_volume cover the whole mixer (Mike's call,
 2026-08-09: the PSG owns the stage during the SMS window).
 
+## 4b. Menu screen + boot chime (derived from BIOS 1.3)
+
+Findings from `srcref/sms/bios13.asm`, the mechanisms we derived from
+(no Sega tile or tone data is copied — it could not run here anyway;
+the BIOS targets mode-4 hardware the harness does not have):
+- Logo reveal: the SEGA tiles sit in the tilemap behind two masking
+  sprites that shrink one pixel column per update (MaskingSpriteTiles
+  $00,$01,$03..$7F) while HScroll slides the logo in.
+- Chime: a 4-voice song engine (ancestor of the Alex Kidd driver);
+  three voices in tone-ramp mode sweep up and land on a chord, with
+  envelope and vibrato tables and a noise accent. The Snail Maze songs
+  live in the same format directly below it.
+
+Ours, in the maze blob: a BACK / ROOMS banner in 3x5 block glyphs of
+boot-font '%' tiles, revealed by a tile-column wipe (one column per
+frame — the harness has no sprites or scroll, so the wipe is tile-
+granular); ESCAPE THE BACKROOMS + PRESS BUTTON text; A/B/C starts the
+maze. The chime is the SE-GA gesture REVERSED (Mike's sms_putrats.wav
+concept — the startup sound played backwards): the G-minor chord
+(G3/D4/G4) swells in from silence over ~0.6 s, holds, sweeps DOWN a
+24-step divider table to the low cluster, and cuts — reversed tapes do
+not fade out. Then the SPACE-A engine takes the channels. Preview:
+`sound/sms_liminal/CHIME-putrats.wav`; the sim asserts the whole
+stream (chime + engine) byte-for-byte.
+
 ## 5. SNAIL (Snail Maze homage)
 
 Reference: the built-in game in the SMS v1.3 BIOS (boot with no cartridge,

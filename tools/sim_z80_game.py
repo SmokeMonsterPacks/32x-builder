@@ -152,12 +152,23 @@ class Z80:
             self.fc = r > 0xFFFF
             self.set_hl(r & 0xFFFF)
             return
+        if op == 0x09:                                # add hl,bc
+            r = self.hl() + self.bc()
+            self.fc = r > 0xFFFF
+            self.set_hl(r & 0xFFFF)
+            return
         if op == 0x29:                                # add hl,hl
             r = self.hl() * 2
             self.fc = r > 0xFFFF
             self.set_hl(r & 0xFFFF)
             return
         if op == 0x1A:  self.a = self.m[self.de()]; return
+        if op == 0x12:                                # ld (de),a
+            addr = self.de()
+            self.m[addr] = self.a
+            if addr == PSG_PORT:
+                self.psg.append(self.a)
+            return
         if op == 0x2F:  self.a ^= 0xFF; return        # cpl
         if op == 0x0F:                                # rrca
             c = self.a & 1
@@ -339,14 +350,25 @@ def check(name, cond):
         fails += 1
 
 
-# boot: run until the init frame is built (no FRAME tick needed for init)
+# boot: lands on the MENU (banner wipe + chime), not the game
 for _ in range(400000):
     cpu.step()
-check("boot: DIRTY set after init", mem[DIRTY] == 1)
-check("boot: player at spawn (2,2), vp_y=0", tile(2, 2) == T_PLAYER)
-check("boot: border wall drawn", tile(0, 0) == T_WALL and tile(0, 31) == T_WALL)
-check("boot: floor drawn", tile(1, 1) == T_FLOOR)
-check("boot: exit visible at (16,31)", tile(16, 31) == T_EXIT)
+check("boot: menu not game (no frame, no player)",
+      mem[DIRTY] == 0 and find_player() is None)
+settle(34)                           # 32 wipe columns + the text step
+check("menu: BACK banner drawn", tile(4, 8) == 44 and tile(4, 9) == 44)
+check("menu: ROOMS banner drawn", tile(10, 6) == 44)
+check("menu: PRESS BUTTON prompt", tile(20, 10) == 27)
+mem[DIRTY] = 0
+settle(80)                           # chime completes at frame 106
+check("menu: no redraw while idle", mem[DIRTY] == 0)
+run_frame(0x10)                      # button 1 (B) starts the maze
+check("button starts game: player at spawn (2,2)",
+      mem[DIRTY] == 1 and tile(2, 2) == T_PLAYER)
+run_frame(0x00)
+check("game: border wall drawn", tile(0, 0) == T_WALL and tile(0, 31) == T_WALL)
+check("game: floor drawn", tile(1, 1) == T_FLOOR)
+check("game: exit visible at (16,31)", tile(16, 31) == T_EXIT)
 
 mem[DIRTY] = 0                       # 68K consumed the frame
 settle(2, 0)                         # idle frames: nothing redraws
@@ -436,13 +458,32 @@ def ref_psg(seed, frames):
     def tone(base, d):
         return [base | (d & 0xF), (d >> 4) & 0x3F]
 
-    out = [0x9F, 0xBF, 0xDF, 0xFF]               # boot silence only
+    out = [0x9F, 0xBF, 0xDF, 0xFF]               # boot silence
+    # chime (frames 0-106): REVERSED SE-GA (sms_putrats) — the chord
+    # swells in from silence (0-36), holds (37-81), sweeps DOWN the
+    # table (82-105), and cuts (106). Engine ticks from frame 107.
+    CH = [(0x80, 1023, 19, 571), (0xA0, 762, 16, 381), (0xC0, 570, 12, 285)]
     b_i, b_att, b_fade, b_t = 0, 15, 0, 0
     motif, mi = [], 0
     m_att, m_fade, note_t, gap = 15, 0, 0, 0
     e_att, e_fade = 15, 0
     echo = []                                    # [countdown, div]
-    for _ in range(frames):
+    ch_att = 15
+    for f in range(frames):
+        if f < 107:
+            if f == 0:
+                for base, _, _, tgt in CH:
+                    out += tone(base, tgt)
+            if f <= 36 and f % 3 == 0:
+                ch_att -= 1
+                out += [0x90 | ch_att, 0xB0 | ch_att, 0xD0 | ch_att]
+            elif 82 <= f <= 105:
+                i = 105 - f
+                for base, start, stp, _ in CH:
+                    out += tone(base, start - stp * i)
+            elif f == 106:
+                out += [0x9F, 0xBF, 0xDF]
+            continue
         if b_t == 0:
             d = BASS[b_i & 3]
             b_i += 1 if (step() & 3) else 2

@@ -74,6 +74,14 @@ BANKS 1
 .DEFINE VAR_EATT  $1CA5   ; music: echo attenuation
 .DEFINE VAR_EFADE $1CA6   ; music: frames to next echo fade step
 .DEFINE ECHO_Q    $1CA8   ; music: 4 slots x (countdown, div_lo, div_hi)
+.DEFINE VAR_GSTATE $1CB4  ; 0 = menu screen, 1 = playing the maze
+.DEFINE VAR_REVEAL $1CB5  ; menu: banner wipe column (0..31, 32 = text, 33 = done)
+.DEFINE VAR_MUSON  $1CB6  ; 1 = chime finished, SPACE-A engine owns the PSG
+.DEFINE VAR_CHF    $1CB7  ; chime: frame counter
+.DEFINE VAR_CHATT  $1CB8  ; chime: fade attenuation
+.DEFINE VAR_CHSUB  $1CB9  ; chime: frames to next fade step
+.DEFINE VAR_TMPR   $1CBA  ; banner scratch: band row0
+.DEFINE VAR_TMPC   $1CBB  ; banner scratch: screen column
 .DEFINE PSG       $7F11   ; SN76489, memory-mapped in Z80 space (no OUT)
 .DEFINE HEART     $1F00   ; liveness ripple for save-state forensics
 .DEFINE PAD_MBX   $1FF4
@@ -105,7 +113,11 @@ BANKS 1
    ld a, (MAP_META + 1)
    ld (VAR_PY), a
    call music_init
-   call build_frame
+   xor a                   ; boot into the MENU: banner wipe + boot chime
+   ld (VAR_GSTATE), a      ; (derived from BIOS 1.3's masked-sprite reveal
+   ld (VAR_REVEAL), a      ; and tone-ramp SE-GA swell — mechanisms, not
+   ld (VAR_MUSON), a       ; Sega's data). A button hands over to the maze.
+   ld (VAR_CHF), a
 
 ; ---------------- main loop: one logic step per 68K frame tick ------
 loop:
@@ -116,7 +128,13 @@ loop:
    cp (hl)
    jr z, loop
    ld (hl), a
-   call music_tick         ; music runs through the escape screen too
+   ld a, (VAR_GSTATE)
+   or a
+   jr nz, game_frame
+   call menu_tick
+   jp loop
+game_frame:
+   call music_or_chime     ; music runs through the escape screen too
    ld a, (STATE_MBX)
    or a
    jr nz, loop             ; escaped: idle until the 68K tears us down
@@ -350,7 +368,7 @@ clr_esc:
    ld b, 13
    call copy_str
    ld hl, TILEBUF + 14*32 + 6
-   ld de, s_press
+   ld de, s_pexit
    ld b, 19
    call copy_str
    ld a, 1
@@ -363,6 +381,257 @@ copy_str:
    inc de
    inc hl
    djnz copy_str
+   ret
+
+; ---------------- menu screen (DESIGN.md 4b) -----------------------------
+; Derived from BIOS 1.3's boot: their SEGA logo hides behind two masking
+; sprites shrunk a pixel column per update while HScroll slides it in;
+; ours is a tile-granular wipe, one banner column per frame, because the
+; harness has no sprites and no scroll. Their chime is three voices in
+; tone-ramp mode landing on a chord with envelopes; ours is a 24-frame
+; table sweep landing on G minor (G3/D4/G4), hold, stepped fade, then
+; the SPACE-A engine takes the channels. Any of A/B/C starts the maze.
+
+menu_tick:
+   ld a, (VAR_REVEAL)
+   cp 33
+   jr nc, menu_music       ; wipe + text done
+   cp 32
+   jr z, menu_text
+   ld (VAR_TMPC), a        ; reveal one more banner column
+   ld hl, band_back
+   call band_col
+   ld hl, band_rooms
+   call band_col
+   ld a, (VAR_REVEAL)
+   inc a
+   ld (VAR_REVEAL), a
+   ld a, 1
+   ld (DIRTY_MBX), a
+   jr menu_music
+menu_text:
+   ld hl, TILEBUF + 17*32 + 6
+   ld de, s_title
+   ld b, 20
+   call copy_str
+   ld hl, TILEBUF + 20*32 + 10
+   ld de, s_press
+   ld b, 12
+   call copy_str
+   ld a, 33
+   ld (VAR_REVEAL), a
+   ld a, 1
+   ld (DIRTY_MBX), a
+menu_music:
+   call music_or_chime
+   ld a, (PAD_MBX)         ; A/B/C edge starts the game
+   ld b, a
+   ld hl, VAR_PPREV
+   ld c, (hl)
+   ld (hl), b
+   ld a, c
+   cpl
+   and b
+   and $70
+   ret z
+   ld a, 1
+   ld (VAR_GSTATE), a
+   jp build_frame          ; full rebuild overwrites the whole menu
+
+; one banner column for one band. VAR_TMPC = screen column.
+; band data: row0, col0, nletters, glyph ids...
+band_col:
+   ld a, (hl)
+   ld (VAR_TMPR), a
+   inc hl
+   ld a, (VAR_TMPC)
+   sub (hl)
+   ret c                   ; left of the band
+   inc hl
+   ld e, a                 ; e = local column
+   srl a
+   srl a                   ; letter cell = local/4 (3 wide + 1 gap)
+   cp (hl)
+   ret nc                  ; past the last letter
+   inc hl
+   ld c, a
+   ld b, 0
+   add hl, bc              ; hl -> this letter's glyph id
+   ld a, e
+   and 3
+   cp 3
+   ret z                   ; the gap column
+   ld b, 4                 ; mask = 4 >> (local & 3)
+mask_sh:
+   or a
+   jr z, mask_done
+   srl b
+   dec a
+   jr mask_sh
+mask_done:
+   ld a, (hl)              ; glyph data = banner_glyphs + id*5
+   ld l, a
+   ld h, 0
+   ld e, a
+   ld d, 0
+   add hl, hl
+   add hl, hl
+   add hl, de
+   ld de, banner_glyphs
+   add hl, de
+   push hl
+   ld a, (VAR_TMPR)        ; dest = TILEBUF + row0*32 + column
+   ld l, a
+   ld h, 0
+   add hl, hl
+   add hl, hl
+   add hl, hl
+   add hl, hl
+   add hl, hl
+   ld a, (VAR_TMPC)
+   ld e, a
+   ld d, 0
+   add hl, de
+   ld de, TILEBUF
+   add hl, de
+   ex de, hl
+   pop hl                  ; hl = glyph rows, de = dest, b = mask
+   ld c, 5
+brow:
+   ld a, (hl)
+   and b
+   jr z, brow_skip
+   ld a, 44                ; '%' block
+   ld (de), a
+brow_skip:
+   inc hl
+   ld a, e
+   add a, 32
+   ld e, a
+   jr nc, brow_nc
+   inc d
+brow_nc:
+   dec c
+   jr nz, brow
+   ret
+
+; ---------------- boot chime: the SE-GA gesture REVERSED -----------------
+; Mike's sms_putrats concept — the SMS startup sound played backwards.
+; Forward BIOS chime = sweep up, land on a chord, decay. Ours runs the
+; tape the other way: the G-minor chord (G3/D4/G4) swells IN from
+; silence (frames 0-36, att 15 -> 2 every 3 frames), holds (37-81),
+; then sweeps DOWNWARD through the table in reverse (82-105) to the low
+; cluster and CUTS (106) — then the SPACE-A engine owns the channels.
+music_or_chime:
+   ld a, (VAR_MUSON)
+   or a
+   jp nz, music_tick
+chime_tick:
+   ld a, (VAR_CHF)
+   cp 37
+   jr c, ch_fadein
+   cp 82
+   jp c, ch_adv            ; the hold
+   cp 106
+   jr c, ch_sweepdown
+   ld a, $9F               ; the cut: reversed tapes don't fade out
+   ld (PSG), a
+   ld a, $BF
+   ld (PSG), a
+   ld a, $DF
+   ld (PSG), a
+   ld a, 1
+   ld (VAR_MUSON), a       ; chime over — engine ticks from the next frame
+   jp ch_adv
+ch_fadein:
+   or a
+   jr nz, fadein_att
+   ld de, 571              ; G3 — the chord is present from frame 0,
+   ld a, e                 ; hidden behind att 15, and emerges
+   and $0F
+   or $80
+   ld (PSG), a
+   call emit_data_de
+   ld de, 381              ; D4
+   ld a, e
+   and $0F
+   or $A0
+   ld (PSG), a
+   call emit_data_de
+   ld de, 285              ; G4
+   ld a, e
+   and $0F
+   or $C0
+   ld (PSG), a
+   call emit_data_de
+   ld a, 15
+   ld (VAR_CHATT), a
+   ld a, 1
+   ld (VAR_CHSUB), a       ; first swell step fires THIS frame
+fadein_att:
+   ld hl, VAR_CHSUB
+   dec (hl)
+   jp nz, ch_adv
+   ld (hl), 3
+   ld a, (VAR_CHATT)
+   dec a
+   ld (VAR_CHATT), a
+   ld b, a
+   or $90
+   ld (PSG), a
+   ld a, b
+   or $B0
+   ld (PSG), a
+   ld a, b
+   or $D0
+   ld (PSG), a
+   jp ch_adv
+ch_sweepdown:
+   ld b, a                 ; index = 105 - frame: 23 down to 0
+   ld a, 105
+   sub b
+   ld l, a                 ; hl = sweep_tab + index*6
+   ld h, 0
+   add hl, hl
+   ld e, l
+   ld d, h
+   add hl, hl
+   add hl, de
+   ld de, sweep_tab
+   add hl, de
+   ld e, (hl)
+   inc hl
+   ld d, (hl)
+   inc hl
+   push hl
+   ld a, e
+   and $0F
+   or $80
+   ld (PSG), a
+   call emit_data_de
+   pop hl
+   ld e, (hl)
+   inc hl
+   ld d, (hl)
+   inc hl
+   push hl
+   ld a, e
+   and $0F
+   or $A0
+   ld (PSG), a
+   call emit_data_de
+   pop hl
+   ld e, (hl)
+   inc hl
+   ld d, (hl)
+   ld a, e
+   and $0F
+   or $C0
+   ld (PSG), a
+   call emit_data_de
+ch_adv:
+   ld hl, VAR_CHF
+   inc (hl)
    ret
 
 ; ---------------- generative liminal music: SPACE-A (DESIGN.md 4a) -------
@@ -709,7 +978,52 @@ motif2: .DB 3
 motif3: .DB 4
         .DW 254, 240, 285, 190                           ; A4 Bb4 G4 D5
 
+; chime sweep: 24 frames x (ch0, ch1, ch2) dividers.
+; ch0: 1023-19f -> lands G3 571; ch1: 762-16f -> D4 381; ch2: 570-12f -> G4 285.
+sweep_tab:
+   .DW 1023, 762, 570
+   .DW 1004, 746, 558
+   .DW 985, 730, 546
+   .DW 966, 714, 534
+   .DW 947, 698, 522
+   .DW 928, 682, 510
+   .DW 909, 666, 498
+   .DW 890, 650, 486
+   .DW 871, 634, 474
+   .DW 852, 618, 462
+   .DW 833, 602, 450
+   .DW 814, 586, 438
+   .DW 795, 570, 426
+   .DW 776, 554, 414
+   .DW 757, 538, 402
+   .DW 738, 522, 390
+   .DW 719, 506, 378
+   .DW 700, 490, 366
+   .DW 681, 474, 354
+   .DW 662, 458, 342
+   .DW 643, 442, 330
+   .DW 624, 426, 318
+   .DW 605, 410, 306
+   .DW 586, 394, 294
+
+; 3x5 banner glyphs, one byte per row, bits %100/%010/%001 = columns
+banner_glyphs:
+   .DB 6,5,6,5,6     ; 0 B
+   .DB 2,5,7,5,5     ; 1 A
+   .DB 3,4,4,4,3     ; 2 C
+   .DB 5,6,6,5,5     ; 3 K
+   .DB 6,5,6,6,5     ; 4 R
+   .DB 2,5,5,5,2     ; 5 O
+   .DB 5,7,5,5,5     ; 6 M
+   .DB 3,4,2,1,6     ; 7 S
+
+; bands: row0, col0, nletters, glyph ids
+band_back:  .DB 4, 8, 4, 0, 1, 2, 3          ; BACK, rows 4-8
+band_rooms: .DB 10, 6, 5, 4, 5, 5, 6, 7      ; ROOMS, rows 10-14
+
 ; boot-font tile ids: A=12..Z=37, 0=space ('#'-less world)
+s_title:   .DB 16,30,14,12,27,16,0,31,19,16,0,13,12,14,22,29,26,26,24,30 ; ESCAPE THE BACKROOMS
+s_press:   .DB 27,29,16,30,30,0,13,32,31,31,26,25                    ; PRESS BUTTON
 s_escaped: .DB 36,26,32,0,16,30,14,12,27,16,15                       ; YOU ESCAPED
 s_back:    .DB 31,19,16,0,13,12,14,22,29,26,26,24,30                 ; THE BACKROOMS
-s_press:   .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT
+s_pexit:   .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT

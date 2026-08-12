@@ -167,8 +167,9 @@ def run_engine(cfg, seed):
 
 
 # ---------------- WAV: piecewise-constant SN76489 render ----------------
-def render_wav(ev, path):
-    n = SECONDS * SR
+def render_wav(ev, path, seconds=SECONDS):
+    n = seconds * SR
+    frames_end = seconds * 60
     t_all = np.arange(n) / SR
     audio = np.zeros(n)
     # per channel: build (start_frame, divider, atten) segments
@@ -185,7 +186,7 @@ def render_wav(ev, path):
         for i, (f0, d, a) in enumerate(segs):
             if d is None and ch != 3:
                 continue
-            f1 = segs[i + 1][0] if i + 1 < len(segs) else FRAMES
+            f1 = segs[i + 1][0] if i + 1 < len(segs) else frames_end
             s0, s1 = f0 * SR // 60, min(n, f1 * SR // 60)
             if s1 <= s0 or a >= 15:
                 continue
@@ -421,6 +422,36 @@ def run_engine_space(seed, frames=FRAMES, vibrato=False):
                 ev.append((f, 1, None, e_att))
     return ev
 
+
+# ---- the boot chime: the SE-GA gesture reversed (sms_putrats) ----------
+# Mirrors chime_tick in games/maze/game.asm: G-minor chord (G3/D4/G4)
+# swells in from silence, holds, sweeps DOWN the 24-step table to the
+# low cluster, cuts. Preview of exactly what boots in the mini-game.
+def chime_events():
+    CH = [(0, 571, 19, 1023), (1, 381, 16, 762), (2, 285, 12, 570)]
+    ev = []
+    att = 15
+    for f in range(107):
+        if f == 0:
+            att -= 1
+            for ch, tgt, _, _ in CH:
+                ev.append((f, ch, tgt, att))
+        elif f <= 36 and f % 3 == 0:
+            att -= 1
+            for ch, _, _, _ in CH:
+                ev.append((f, ch, None, att))
+        elif 82 <= f <= 105:
+            i = 105 - f
+            for ch, _, stp, start in CH:
+                ev.append((f, ch, start - stp * i, att))
+        elif f == 106:
+            for ch, _, _, _ in CH:
+                ev.append((f, ch, None, 15))
+    return ev
+
+
+render_wav(chime_events(), OUT / "CHIME-putrats.wav", seconds=3)
+print("CHIME-putrats: the reversed boot chime preview")
 
 port_events = run_engine_port(0xACE1 ^ 0x0202 ^ 0x101F)   # sim maze's seed
 render_wav(port_events, OUT / "B2-lydian-port.wav")
