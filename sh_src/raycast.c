@@ -2994,7 +2994,7 @@ void raycast_exit_pullup(int t, int total) {
     if (g_exit_hole_cx < 0 || total <= 0) { pitch_smooth_y = 0; return; }
     if (t <= 1) {
         sx = player.x; sy = player.y;
-        SHARED_UC->slide_sfx = 1;      /* the shift/scrape one-shot (amb_slide) */
+        SHARED_UC->slide_sfx = 2;      /* corridor shuffle, 30% drag (amb_shuffle) */
     }
     /* No footsteps during the climb: player_update is frozen, so is_walking
      * would hold whatever it was at the trigger — force it quiet. */
@@ -3056,7 +3056,7 @@ void raycast_exit_pullup(int t, int total) {
         fx_t sway = FX_MUL(PU_SHIMMY, SIN_FX((uint8_t)(f << 1)));
         sway = (fx_t)(((int64_t)sway * (256 - f)) >> 8);   /* decay to still */
         if (g_exit_hole_axis) player.x += sway; else player.y += sway;
-        if (t == c_end + 1) SHARED_UC->slide_sfx = 1;      /* the torso scrape */
+        if (t == c_end + 1) SHARED_UC->slide_sfx = 2;      /* torso scrape, 30% drag */
     }
     if (t >= total) pitch_smooth_y = 0;
 }
@@ -3234,7 +3234,7 @@ void raycast_crawl_corridor(int t, int total) {
     uint8_t ph = (uint8_t)(p2 << 1);
     int cxs = SCREEN_W >> 1;
     int cys = SCREEN_H >> 1;
-    if (t == 1 || t == total / 2) SHARED_UC->slide_sfx = 1;   /* the scrapes */
+    if (t == 1 || t == total / 2) SHARED_UC->slide_sfx = 2;   /* the scrapes, 30% drag */
 
     /* POLYGONS, the box's own language: the duct is camera-space QUADS --
      * four walls per axial segment, thin darker rib collars at the cell
@@ -3380,7 +3380,7 @@ void raycast_arrival_drop(int t, int total) {
                    - (((AD_START_EYE - AD_IMPACT_EYE) * f2) >> 8);
     } else {
         eye_smooth = AD_IMPACT_EYE;
-        if (t == fall + 1) SHARED_UC->slide_sfx = 1;   /* the landing scuff */
+        if (t == fall + 1) SHARED_UC->slide_sfx = 1;   /* the landing scuff, native rate */
     }
     SHARED_UC->eye_h = (uint8_t)eye_smooth;
     is_walking = 0; is_running = 0;

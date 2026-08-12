@@ -5,7 +5,7 @@
 #include "amb_neon.h"
 #include "amb_hello_adp.h"
 #include "amb_death_tape.h"
-#include "amb_slide.h"
+#include "amb_shuffle.h"
 #include "amb_step.h"
 #include "amb_crt_on.h"
 #include "amb_crt_off.h"
@@ -426,13 +426,26 @@ int amb_voice_speed_pct(void) {
  * restarting from the beginning (sounds more natural). */
 static uint32_t step_pos_fx = 0;
 
-/* Exit-hole climb slide (cardboard slide + bang, 1.1 s) — a ONE-SHOT: the
- * primary requests it via SHARED_UC->slide_sfx at the pull-up's first frame;
- * the pump latches, plays the sample through once at native rate, then goes
- * quiet. Baked 11 kHz/16-bit like the footsteps; mixes on the footstep
- * channel's budget (which is silent during the climb — input is frozen). */
-static uint32_t slide_pos_fx = 0;
+/* Exit-passage shuffle (Mike's shuffle.wav, 0.51 s) — one sample, two
+ * behaviors, replacing the old cardboard slide+bang. The primary
+ * requests via SHARED_UC->slide_sfx:
+ *   1 = landing scuff: ONE-SHOT at native rate when the player drops
+ *       into a room. Always takes over (stops a running loop — the
+ *       climb ends by falling, so this doubles as the loop's off).
+ *   2 = corridor shuffle: LOOP at 30% speed (~1.7 s per pass) while
+ *       climbing/scraping through the exit passage. Re-requests while
+ *       already looping are ignored so the later scrape triggers don't
+ *       click the loop back to its start. */
+/* SPLIT cursor (integer sample + 16-bit fraction), NOT a single 16.16:
+ * 86,031 samples overflows a 16.16 index at 65,536 — the same trap the
+ * 30 s hello shipped with (it looped its first ~11 s for weeks). */
+static uint32_t slide_pos = 0;      /* integer sample index */
+static uint16_t slide_frac = 0;     /* fractional-step accumulator */
+static uint32_t slide_step_fx = 0;  /* 16.16 per-output-sample advance */
 static int      slide_active = 0;
+static int      slide_loop = 0;     /* mode 2: wrap at the end instead of stopping */
+#define SHUFFLE_STEP_FX \
+    ((uint32_t)(((uint64_t)AMB_SHUFFLE_SAMPLE_RATE << 16) / AMB_MIX_RATE))
 static int      crt_active = 0, crt_rev = 0;
 static uint32_t crt_pos_fx = 0;
 #define STEP_STEP_FX \
@@ -479,11 +492,22 @@ void amb_pump(void) {
     uint32_t step_adv = ((int)SHARED_UC->is_running)
                         ? (STEP_STEP_FX + (STEP_STEP_FX >> 1)) : STEP_STEP_FX;
 
-    /* Climb-slide one-shot request from the primary. */
-    if (SHARED_UC->slide_sfx) {
-        SHARED_UC->slide_sfx = 0;
-        slide_active = 1;
-        slide_pos_fx = 0;
+    /* Shuffle request from the primary. Mode picks speed AND behavior:
+     * 1 = landing one-shot (native rate, always takes over),
+     * 2 = corridor loop (30%; ×77/256 ≈ 0.301; no-op if already looping). */
+    {
+        int req = (int)SHARED_UC->slide_sfx;
+        if (req) {
+            SHARED_UC->slide_sfx = 0;
+            if (!(req == 2 && slide_active && slide_loop)) {
+                slide_active = 1;
+                slide_loop = (req == 2);
+                slide_pos = 0;
+                slide_frac = 0;
+                slide_step_fx = (req == 2) ? ((SHUFFLE_STEP_FX * 77u) >> 8)
+                                           : SHUFFLE_STEP_FX;
+            }
+        }
     }
 
     /* CRT power one-shot from the primary (PVM A toggle). Two real bakes
@@ -615,15 +639,19 @@ void amb_pump(void) {
             step_pos_fx += step_adv;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
         }
-        /* Climb slide one-shot — 8-bit source (like the hello, << 2 to the
-         * mix scale) read at its own rate against the 16 kHz output, one
-         * pass, a step louder than the carpet: it's the event. */
+        /* Shuffle one-shot — 8-bit source (like the hello, << 2 to the
+         * mix scale) read at the per-trigger step (landing native, climb
+         * 30%), one pass, a step louder than the carpet: it's the event. */
         if (slide_active) {
-            int sl = (int)amb_slide_samples[slide_pos_fx >> 16] << 2;
+            int sl = (int)amb_shuffle_samples[slide_pos] << 2;
             step_delta += (sl * step_vol) >> 8;
-            slide_pos_fx += ((uint32_t)AMB_SLIDE_SAMPLE_RATE << 16)
-                            / AMB_MIX_RATE;
-            if ((slide_pos_fx >> 16) >= AMB_SLIDE_SAMPLE_COUNT) slide_active = 0;
+            uint32_t adv = (uint32_t)slide_frac + slide_step_fx;
+            slide_pos  += adv >> 16;
+            slide_frac  = (uint16_t)adv;
+            if (slide_pos >= AMB_SHUFFLE_SAMPLE_COUNT) {
+                if (slide_loop) slide_pos = 0;   /* corridor: seamless wrap */
+                else            slide_active = 0;
+            }
         }
         /* CRT power one-shot — same 8-bit path as the slide, same loudness
          * (it's the event you just caused, inches from your hand). */

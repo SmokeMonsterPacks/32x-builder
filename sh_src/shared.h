@@ -81,9 +81,11 @@ typedef struct {
      * menu. 0..255, 128 = current half-amp baseline, 256 would be
      * full but capped at 255. Applied as a >> 8 scale in the pump. */
     volatile uint8_t step_volume;
-    /* ONE-SHOT slide/scrape SFX request (the exit-hole climb). Primary sets
-     * to 1; the secondary's pump latches it at the next buffer fill, plays
-     * amb_slide once, and writes 0 back. */
+    /* ONE-SHOT shuffle SFX request (exit passage). Primary sets the MODE;
+     * the secondary's pump latches it at the next buffer fill, plays
+     * amb_shuffle once, and writes 0 back.
+     *   1 = landing scuff, native rate (drop into a room)
+     *   2 = corridor climb/scrape, dragged to 30% speed */
     volatile uint8_t slide_sfx;
     /* ONE-SHOT CRT power SFX request (the PVM's A toggle). Primary sets
      * 1 = power-on clip, 2 = power-off clip; the mixer starts the chosen
