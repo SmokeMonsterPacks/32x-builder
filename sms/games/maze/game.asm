@@ -115,6 +115,21 @@ BANKS 1
    ld (VAR_PX), a
    ld a, (MAP_META + 1)
    ld (VAR_PY), a
+   ; TILEBUF sits ABOVE the uploaded image, so a re-upload never touches it
+   ; and Z80 RAM hands us the LAST session's frame. build_frame and
+   ; build_escape rewrite all 768 cells, but the title card only paints its
+   ; banner and text — everything around them was last run's leftovers, and
+   ; they piled up boot after boot (Mike: clean, then extra chars, then a
+   ; screen of garbage). Start from a dark screen, every time.
+   ld hl, TILEBUF
+   ld bc, 768
+clr_tilebuf:
+   ld (hl), 0
+   inc hl
+   dec bc
+   ld a, b
+   or c
+   jr nz, clr_tilebuf
    call music_init
    xor a                   ; boot into the MENU: banner wipe + boot chime
    ld (VAR_GSTATE), a      ; (derived from BIOS 1.3's masked-sprite reveal

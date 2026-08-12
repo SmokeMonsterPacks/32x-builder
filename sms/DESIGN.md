@@ -62,6 +62,12 @@ Rules the harness enforces or assumes:
   $FF, so the game zeroes its own state first (the phantom-command lesson).
 - Win check before wall check where the goal is a wall cell (the procgen
   exit door is one).
+- TILEBUF and the var block sit ABOVE the uploaded image, so a re-upload
+  does NOT clear them: a game inherits the previous session's screen (and
+  a loaded savestate inherits that slot's). Clear TILEBUF at startup, or
+  any screen that does not paint all 768 cells shows last run's leftovers
+  — they compound boot after boot. The simulator boots from a $55 fill to
+  keep this honest.
 
 ## 3. Directory layout
 

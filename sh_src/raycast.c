@@ -979,6 +979,12 @@ uint8_t partition_height[NUM_PARTITIONS_MAX] = {0};
 /* Eye-height below which the body fits through low openings (crawlspaces).
  * The eye eases to CROUCH_EYE(=40) crouched, STAND_EYE(=128) standing. */
 #define CRAWL_PASS_EYE 100
+/* Bulkheads (doorway headers/soffits) sit far higher than a duct slab, so
+ * they only ever asked for a dipped head — but one global pass height made
+ * them demand the full A+B crawl, which reads as the architecture fighting
+ * you. Headers now clear on a duck (see DUCK_EYE); duct slabs keep the
+ * deliberate crawl. Must stay ABOVE DUCK_EYE so a completed duck fits. */
+#define BULKHEAD_PASS_EYE 96
 #define NUM_PARTITIONS num_partitions
 #define NUM_STANDUPS num_standups
 
@@ -2058,6 +2064,11 @@ static inline uint8_t *fb_pixels(void) {
  * from the floor). Held in SHARED_UC->eye_h so both CPUs' wall draw see it. */
 #define STAND_EYE  128
 #define CROUCH_EYE 40          /* ~1/6 up the wall — down near the carpet */
+/* Automatic duck under a bulkhead: a dipped head, not a crouch. Deliberately
+ * ABOVE sound.c's crawl threshold (eye_h <= 80) so ducking through a header
+ * keeps the walking footsteps instead of switching to the crawl drag — you
+ * are walking, just stooped. */
+#define DUCK_EYE   88
 /* Crouch tone-gradient shift: how many row_color steps to slide the
  * floor/ceiling fade as the eye drops (more bright carpet before the fade,
  * ceiling fogs sooner). Applied identically in clear_half, the carpet, and
@@ -2688,6 +2699,12 @@ int raycast_exit_hole_check(void) {
  * the exit-hole check (committed, never stumbled into: the caller only calls
  * on a FRESH A press). Returns 1 if a set was toggled, so the caller can gate
  * any competing A action behind it. */
+/* "I am looking AT the console": half-angle of the aim cone as a tangent
+ * (15 deg; 20 deg = 0.364, 30 deg = 0.577), plus the set's own half-width so
+ * the cone is measured to its body rather than to a point. */
+#define PVM_USE_CONE_TAN FX(0.268)
+#define PVM_USE_HALF_W   FX(0.35)
+
 int raycast_pvm_use(void) {
     int best = -1;
     fx_t bestm = 0;
@@ -2696,7 +2713,24 @@ int raycast_pvm_use(void) {
         if (standups[i].kind != PVM_ASSET_KIND || standup_down[i]) continue;
         fx_t dx = standups[i].x - player.x, dy = standups[i].y - player.y;
         if (FX_ABS(dx) >= FX(1.2) || FX_ABS(dy) >= FX(1.2)) continue;
-        if (FX_MUL(pdx, dx) + FX_MUL(pdy, dy) <= 0) continue;   /* behind us */
+        fx_t dot = FX_MUL(pdx, dx) + FX_MUL(pdy, dy);
+        if (dot <= 0) continue;                                 /* behind us */
+        /* The DESK unit boots the Master System — a whole-screen commitment,
+         * so it asks for a deliberate look rather than a shoulder brush.
+         * Measured to the SET, not to a mathematical point: the view axis
+         * may miss the origin by tan(15 deg) of the distance PLUS the set's
+         * own half-width. A pure point-cone was far too strict up close —
+         * standing right in front of a monitor, its body subtends much more
+         * than 15 degrees, so looking straight at it still missed the
+         * origin and the press died. cross is the perpendicular distance
+         * from the view ray (pd is unit), so no sqrt anywhere. Ordinary
+         * sets keep the loose reach — slapping one on as you pass is the
+         * point of them. */
+        if (standup_on_desk[i]) {
+            fx_t cross = FX_MUL(pdx, dy) - FX_MUL(pdy, dx);
+            if (FX_ABS(cross) > FX_MUL(dot, PVM_USE_CONE_TAN) + PVM_USE_HALF_W)
+                continue;
+        }
         fx_t m = FX_ABS(dx) + FX_ABS(dy);
         if (best < 0 || m < bestm) { best = i; bestm = m; }
     }
@@ -2991,6 +3025,12 @@ static int standup_blocker(fx_t px, fx_t py) {
 }
 static int standup_collides(fx_t px, fx_t py) { return standup_blocker(px, py) >= 0; }
 
+/* Raised when a move was refused ONLY because a bulkhead header wanted the
+ * head lower. player_update consumes it as an automatic duck, so the player
+ * walks through doorway soffits without ever pressing crouch. Duct slabs
+ * never raise it — those keep the deliberate crawl. Primary CPU only. */
+static uint8_t duck_bump = 0;
+
 static int position_clear(fx_t px, fx_t py) {
     /* Check all 4 corners of the player's bounding box against wall
      * cells. The 4-CARDINAL check (N/S/E/W edges) missed diagonal
@@ -3041,13 +3081,25 @@ static int position_clear(fx_t px, fx_t py) {
         }
     }
     if (standup_collides(px, py))   return 0;
-    /* Low-ceiling crawlspace: a low-ceiling cell hangs below standing head
-     * height, so you can't enter it unless crouched (eye below CRAWL_PASS_EYE).
-     * Per-cell via ceil_h[], so this gates every crawlspace, anywhere. */
-    if (g_lowceil_active && (int)SHARED_UC->eye_h >= CRAWL_PASS_EYE) {
+    /* Low-ceiling cells hang below standing head height, so entering one costs
+     * head room — but HOW MUCH depends on the cell. A duct slab still demands
+     * the deliberate A+B crawl; a bulkhead header only wants a dipped head, so
+     * a refusal there raises duck_bump and player_update ducks for you on the
+     * next frame — walk into a doorway and you stoop through it instead of
+     * bouncing off. Per-cell via ceil_h[], so this covers every map. */
+    if (g_lowceil_active) {
         int cx = FX_INT(px), cy = FX_INT(py);
-        if ((unsigned)cx < MAP_W && (unsigned)cy < MAP_H &&
-            CEIL_H(cy, cx) != CEIL_H_FULL) return 0;
+        if ((unsigned)cx < MAP_W && (unsigned)cy < MAP_H) {
+            uint8_t ch = CEIL_H(cy, cx);
+            if (ch != CEIL_H_FULL) {
+                int header = (ch >= BULKHEAD_CEIL_H);
+                int need = header ? BULKHEAD_PASS_EYE : CRAWL_PASS_EYE;
+                if ((int)SHARED_UC->eye_h >= need) {
+                    if (header) duck_bump = 1;
+                    return 0;
+                }
+            }
+        }
     }
     return 1;
 }
@@ -3550,13 +3602,28 @@ void player_update(uint16_t pad) {
      * they crawl all the way out — releasing A+B mid-tunnel does NOT stand them
      * up (they'd clip through the ceiling). Standing only returns once the body
      * clears the zone. */
+    /* ...but a BULKHEAD is a doorway header, not a duct: it only asks you to
+     * stoop. Inside one, or refused entry to one (duck_bump), the eye dips to
+     * DUCK_EYE automatically and you keep walking at normal speed — no crouch
+     * button, no crawl pace. Ducts still latch the full crouch above. */
+    int auto_duck = 0;
     if (g_lowceil_active) {
         int cx = FX_INT(player.x), cy = FX_INT(player.y);
-        if ((unsigned)cx < MAP_W && (unsigned)cy < MAP_H &&
-            CEIL_H(cy, cx) != CEIL_H_FULL) crouching = 1;
+        if ((unsigned)cx < MAP_W && (unsigned)cy < MAP_H) {
+            uint8_t ch = CEIL_H(cy, cx);
+            if (ch != CEIL_H_FULL) {
+                /* Only a full-height header ducks. Anything lower — ducts and
+                 * any authored height between — keeps the crawl it has always
+                 * had, so community maps can't be surprised by this. */
+                if (ch >= BULKHEAD_CEIL_H) auto_duck = 1;   /* header: dip */
+                else                       crouching = 1;   /* duct: stay down */
+            }
+        }
     }
+    if (duck_bump) { auto_duck = 1; duck_bump = 0; }
     {
-        int target = crouching ? CROUCH_EYE : STAND_EYE;
+        int target = crouching ? CROUCH_EYE
+                   : (auto_duck ? DUCK_EYE : STAND_EYE);
         int d = target - eye_smooth;
         /* Drop into crouch 2× faster than we rise: d<0 (eye falling toward the
          * floor) eases at 50%/frame, d>0 (standing back up) stays at 25%. */
@@ -3581,7 +3648,7 @@ void player_update(uint16_t pad) {
     /* Hold A to run — bumps walk speed and turn rate together so you can
      * quickly reorient while sprinting. No running while crouched; crawling
      * is slow. */
-    int sprinting = !crouching && (pad & SEGA_CTRL_A) != 0;
+    int sprinting = !crouching && !auto_duck && (pad & SEGA_CTRL_A) != 0;
     fx_t walk = crouching ? FX(0.064) : (sprinting ? FX(0.15) : FX(0.08));
     /* crawl was FX(0.04); +60% -- ducts and headers are set dressing to move
      * through, not a molasses toll. Still slower than the 0.08 walk. */
@@ -4470,6 +4537,10 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
     flut[8] = flut[3]; flut[9] = flut[4];            /* set so nothing floats  */
     unsigned seed = (power && !scr)
         ? (((unsigned)SHARED_UC->frame_count * 2654435761u) | 1) : 0;
+    /* This face will paint live noise — tell the ULTRA park to stay away this
+     * frame (a parked frame freezes the static into a photograph). Once per
+     * face, not per pixel: the write is uncached. */
+    if (seed) SHARED_UC->pvm_static_live = 1;
     if (!power) scr = 0;                 /* dark glass wins over telegraph */
     /* Rear face: Mike's back panel, case values only — no glass texels,
      * so the screen branches (static/telegraph/bloom) never trigger. */
@@ -10081,6 +10152,10 @@ RAMTEXT void raycast_clear_half(int col_start, int col_end) {
 
 void raycast_render(void) {
     uint16_t prof_start = prof_frt_read();
+    /* Re-asserted by draw_panel_face if this frame paints live tube noise;
+     * the ULTRA park reads it after the render to decide whether parking
+     * would freeze something that is supposed to move. */
+    SHARED_UC->pvm_static_live = 0;
 
     /* ULTRA TWIN: m_main's rest-pair render — the same world state again with
      * the half-column camera jitter. Every piece of adaptive state below is

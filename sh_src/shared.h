@@ -255,6 +255,15 @@ typedef struct {
      * state (frame EMA, AUTO/ratchet/dissolve, split nudge, dense latch) so
      * the passes stay decision-identical and differ only by the jitter. */
     volatile uint8_t ultra_twin;
+    /* Set by EITHER CPU during a render that actually painted live PVM static
+     * (a powered screen with no telegraph/glass picture on it). The ULTRA park
+     * holds one motionless frame by design — "nothing can shimmer" — and the
+     * tube's noise IS shimmer, so a parked frame freezes it into a still
+     * photograph of static. Standing still to look at a monitor is exactly the
+     * condition that arms the park, so the two features met head-on the moment
+     * ULTRA started arming. m_main clears this before each render and gates the
+     * park on it: supersample the quiet rooms, leave the live tubes alone. */
+    volatile uint8_t pvm_static_live;
     /* Caveman death: 0 = alive, 1..255 = the "broken analogue tape" death phase.
      * Primary ramps it over ~2.5s once the neanderthal is knocked down; the audio
      * mixer reads it to warp the Voyager hello — speed up, reverse, drift to

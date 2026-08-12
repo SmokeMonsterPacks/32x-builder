@@ -297,6 +297,12 @@ for y in range(32):
         if maze[y][x]:
             mem[MAP_BITS + y * 4 + (x >> 3)] |= 0x80 >> (x & 7)
 mem[MAP_META:MAP_META + 4] = bytes([2, 2, 31, 16])
+# Boot with DIRTY Z80 RAM. TILEBUF lives above the uploaded image, so a
+# re-upload never clears it and the program inherits the previous session's
+# frame — the title card only paints its banner and text, so anything it
+# does not cover was last run's leftovers, compounding every boot until the
+# screen was full of them. The program must clear TILEBUF itself.
+mem[TILEBUF:TILEBUF + 768] = b"\x55" * 768
 # the level name, centered in the 16-tile field ("SIMMAZE")
 NAME_TILES = [30, 20, 24, 24, 12, 37, 16]
 mem[0x1C84 + 4:0x1C84 + 4 + 7] = bytes(NAME_TILES)
@@ -363,6 +369,9 @@ check("menu: TEST banner drawn", tile(4, 8) == 44 and tile(4, 10) == 44)
 check("menu: PATTERN banner drawn", tile(10, 2) == 44 and tile(10, 3) == 44)
 check("menu: name on the title card", tile(17, 12) == 30)  # S of SIMMAZE
 check("menu: A TO BEGIN EXERCISE prompt", tile(20, 6) == 12)
+check("menu: stale TILEBUF cleared (no leftovers from a prior boot)",
+      all(tile(r, c) == 0 for r in (0, 1, 2, 3, 9, 15, 22, 23)
+                          for c in range(32)))
 mem[DIRTY] = 0
 settle(80)                           # chime completes at frame 106
 check("menu: no redraw while idle", mem[DIRTY] == 0)

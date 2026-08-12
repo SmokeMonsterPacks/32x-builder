@@ -2380,6 +2380,12 @@ int m_main(void) {
             if (SHARED_UC->hero_dying && SHARED_UC->hero_dying < 255) gate |= 0x0100;
             if (SHARED_UC->wall_halfres != 0)    gate |= 0x0200;
             if (SHARED_UC->wall_dissolve != 0)   gate |= 0x0400;
+            /* A powered tube is painting live noise somewhere on screen. The
+             * park's whole promise is that nothing moves in a held frame, so
+             * parking here turns running static into a photograph of static
+             * (Mike, 2026-08-12 — the moment ULTRA first started arming).
+             * Quiet rooms still supersample; rooms with a live screen don't. */
+            if (SHARED_UC->pvm_static_live)      gate |= 0x0800;
             g_ultra_gate = gate;
             int ultra_ok = (gate == 0);
             if (!ultra_ok) ultra_dwell = 0;
