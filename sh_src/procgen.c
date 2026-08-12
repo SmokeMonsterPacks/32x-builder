@@ -259,6 +259,21 @@ static int desk_park_facings(int x, int y, uint8_t *out, int *nwall) {
     return n;
 }
 
+/* A desk BACKS ONTO a wall, so it cannot be judged by the all-open 3x3
+ * footprint the free-standing placers use. That test and the wall-at-back
+ * test below are mutually exclusive — an open 3x3 means no wall neighbour to
+ * back onto — so requiring both rejected every cell on the grid and
+ * place_pvms returned having placed nothing. Every generated level shipped
+ * without the console (proven over 5000 seeds on a host harness, 2026-08-12).
+ * The desk needs its own cell open and distance from spawn; the approach side
+ * is guaranteed by desk_park_facings, which only offers a facing whose front
+ * cell is open. */
+static int desk_cell_free(int x, int y) {
+    if (world_map[y][x] != 0) return 0;
+    return !(x >= SPAWN_CX - 1 && x <= SPAWN_CX + 1 &&
+             y >= SPAWN_CY - 1 && y <= SPAWN_CY + 1);
+}
+
 /* Pick one parked spot, scanning the WHOLE grid rather than sampling it.
  *
  * Random attempts were fine for the old rule, which accepted almost any open
@@ -276,7 +291,7 @@ static int desk_park_scan(int need_nook, int need_far,
     for (int y = 2; y < MAP_H - 2; y++)
         for (int x = 2; x < MAP_W - 2; x++) {
             uint8_t cand[4]; int nwall;
-            if (!footprint_clear(x, y, 1, 1)) continue;
+            if (!desk_cell_free(x, y)) continue;
             /* Facing test before the standup/exit lookups: it is plain
              * neighbour reads and it rejects most of the floor, so the
              * costlier queries only run on cells that could actually win. */
