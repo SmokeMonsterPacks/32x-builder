@@ -4405,8 +4405,20 @@ static void draw_panel_face(uint8_t *fb, int col_start, int col_end,
          * affine error is a quarter of the 2-tri split's. Corner UV order
          * differs per face (front vs rear have different vi windings). */
         fx_t U[4], V[4];
+        /* FRONT U runs TW->0, not 0->TW. The in-game face reads mirrored
+         * against the asset viewer and the dir bake, which both show the
+         * panel as authored — so the flip belongs HERE, on the one path that
+         * is wrong, and not in the texture. Mirroring the texture instead was
+         * tried and it just moved the problem: pvm_front_tex feeds the near
+         * face, the viewer, and both baked billboards, so flipping the data
+         * turned the other three around with it.
+         *
+         * Comparing UV corner order between the paths is NOT enough to tell
+         * which is mirrored — the corners are identical here and in
+         * raycast_model_view. What differs is upstream, in the vertex
+         * transform each path runs before these UVs are ever applied. */
         if (fc->ftex == 2) { U[0]=TW; V[0]=TH; U[1]=0; V[1]=TH; U[2]=0; V[2]=0; U[3]=TW; V[3]=0; }
-        else               { U[0]=0;  V[0]=TH; U[1]=0; V[1]=0;  U[2]=TW; V[2]=0; U[3]=TW; V[3]=TH; }
+        else               { U[0]=TW; V[0]=TH; U[1]=TW; V[1]=0; U[2]=0;  V[2]=0; U[3]=0;  V[3]=TH; }
         for (int k = 0; k < 4; k++) {
             int k2 = (k + 1) & 3;
             tex_tri_lut(fb, col_start, col_end, fc->depth,
