@@ -4038,6 +4038,9 @@ typedef struct {
 
 /* Extra ramp bases for the desk set's slots 1 and 2, NULL-terminated. */
 static const uint8_t deskset_vbase[] = { CHAIR_BASE, SMS_RAMP_BASE, 0 };
+/* The free-standing PVM's one extra slot: its stand, on the same charcoal
+ * ramp the near geometry now uses (pvm_box_base). */
+static const uint8_t pvm_vbase[] = { SMS_RAMP_BASE, 0 };
 static const dirset_t dirsets[] = {
     { (const dirview_t *)chair_dir_views, chair_dir_sect_v, chair_dir_sect_view,
       chair_dir_sect_mirror, CHAIR_DIR_SECTORS, CHAIR_DIR_H, CHAIR_DIR_WMAX,
@@ -4047,7 +4050,7 @@ static const dirset_t dirsets[] = {
       DESK_DIR_VSPAN },
     { (const dirview_t *)pvm_dir_views,   pvm_dir_sect_v,   pvm_dir_sect_view,
       pvm_dir_sect_mirror,   PVM_DIR_SECTORS,   PVM_DIR_H,   PVM_DIR_WMAX,
-      PVM_DIR_VSPAN, 0 },
+      PVM_DIR_VSPAN, pvm_vbase },
     /* The desk set. Slot 0 (values 1..4) is the monitor on PVM_RAMP_BASE, the
      * set's own .base; slot 1 is the desk and slot 2 the console, matching
      * desk_pvm_box_base exactly — the far LOD wears the same three materials
@@ -4119,12 +4122,25 @@ _Static_assert(CHAIR_NBOXES <= BX_MAXBOXES && DESK_NBOXES <= BX_MAXBOXES &&
  * registry.json assets.sprites[pvm] by the comm_pal.h codegen. */
 #define PVM_RAMP_BASE 185
 static const boxmodel_t desk_pvm_model;
+/* The free-standing PVM's STAND (boxes 1..5: base plate and four legs) had
+ * the same shade collapse the desk and the console did — stand_bias 2 held it
+ * near-black by spending two of its four levels, so its top, sides and front
+ * all landed on the same two indices. It wants the same answer: darkness from
+ * the PALETTE, not from the bias. SMS_RAMP_BASE is already four charcoal
+ * steps and a black metal stand is exactly what it suits, so this costs no
+ * new CRAM. The monitor (box 0) keeps the case-gray PVM ramp. */
+static const uint8_t pvm_box_base[PVM_NBOXES] = {
+    PVM_RAMP_BASE,                                          /* monitor */
+    SMS_RAMP_BASE, SMS_RAMP_BASE, SMS_RAMP_BASE,
+    SMS_RAMP_BASE, SMS_RAMP_BASE };                         /* stand    */
+static const uint8_t pvm_box_bias[PVM_NBOXES] = { 0, 0, 0, 0, 0, 0 };
+
 static const boxmodel_t boxmodels[] = {
     { chair_boxes, CHAIR_NBOXES, CHAIR_ASSET_KIND, CHAIR_BASE, 0, 0, 0, 0 },
     { desk_boxes,  DESK_NBOXES,  DESK_ASSET_KIND,  CHAIR_BASE, 0, 0, 0, 0 },
     { pvm_boxes,   PVM_NBOXES,   PVM_ASSET_KIND,   PVM_RAMP_BASE,
       (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
-      0, 0, (const uint8_t *)pvm_rear_tex,
+      pvm_box_base, pvm_box_bias, (const uint8_t *)pvm_rear_tex,
       (const struct boxmodel_s *)&desk_pvm_model, "DESK SET" },
 };
 #define BOXMODEL_COUNT (int)(sizeof boxmodels / sizeof boxmodels[0])
