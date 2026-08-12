@@ -6,6 +6,7 @@
 #include "amb_hello_adp.h"
 #include "amb_death_tape.h"
 #include "amb_shuffle.h"
+#include "amb_sliding.h"
 #include "amb_step.h"
 #include "amb_crt_on.h"
 #include "amb_crt_off.h"
@@ -446,6 +447,15 @@ static int      slide_active = 0;
 static int      slide_loop = 0;     /* mode 2: wrap at the end instead of stopping */
 #define SHUFFLE_STEP_FX \
     ((uint32_t)(((uint64_t)AMB_SHUFFLE_SAMPLE_RATE << 16) / AMB_MIX_RATE))
+#define SLIDING_STEP_FX \
+    ((uint32_t)(((uint64_t)AMB_SLIDING_SAMPLE_RATE << 16) / AMB_MIX_RATE))
+
+/* Crawl-move drag (amb_sliding, native rate): loops while the player
+ * moves CROUCHED (crawlspaces), replacing the carpet footsteps — knees
+ * and fabric, not soles on carpet. Freezes in place when movement
+ * stops and resumes mid-drag, same behavior the footsteps use. */
+static uint32_t crawl_pos = 0;
+static uint16_t crawl_frac = 0;
 static int      crt_active = 0, crt_rev = 0;
 static uint32_t crt_pos_fx = 0;
 #define STEP_STEP_FX \
@@ -491,10 +501,17 @@ void amb_pump(void) {
      * per fill — the state only needs to be fresh per buffer, not per sample. */
     uint32_t step_adv = ((int)SHARED_UC->is_running)
                         ? (STEP_STEP_FX + (STEP_STEP_FX >> 1)) : STEP_STEP_FX;
+    /* Crouched movement swaps footsteps for the sliding drag. eye_h is
+     * uncached — read once per fill. 80 ≈ committed crouch (128 stand,
+     * 40 full crawl); the exit-drop's 56 impact can't false-positive
+     * because input is frozen there (walking = 0). */
+    int crawling = walking && ((int)SHARED_UC->eye_h <= 80);
 
-    /* Shuffle request from the primary. Mode picks speed AND behavior:
-     * 1 = landing one-shot (native rate, always takes over),
-     * 2 = corridor loop (30%; ×77/256 ≈ 0.301; no-op if already looping). */
+    /* Exit-passage SFX request from the primary. Mode picks sample AND
+     * behavior — two different sounds sharing one voice:
+     * 1 = landing scuff (amb_shuffle), ONE-SHOT, always takes over,
+     * 2 = corridor loop (amb_sliding, Mike's dedicated corridor sound,
+     *     native rate); no-op if already looping. */
     {
         int req = (int)SHARED_UC->slide_sfx;
         if (req) {
@@ -504,7 +521,7 @@ void amb_pump(void) {
                 slide_loop = (req == 2);
                 slide_pos = 0;
                 slide_frac = 0;
-                slide_step_fx = (req == 2) ? ((SHUFFLE_STEP_FX * 77u) >> 8)
+                slide_step_fx = (req == 2) ? SLIDING_STEP_FX
                                            : SHUFFLE_STEP_FX;
             }
         }
@@ -632,26 +649,37 @@ void amb_pump(void) {
          * >>9 (was >>8) halves its contribution so it shares the
          * budget evenly with buzz/neon/hello. Source baked 11kHz/8-bit. */
         int step_delta = 0;
-        if (walking) {
+        if (crawling) {
+            /* Crouched + moving: the sliding drag replaces the carpet,
+             * footstep loudness class (it's locomotion, not an event). */
+            int sd = (int)amb_sliding_samples[crawl_pos] << 2;
+            step_delta = (sd * step_vol) >> 9;
+            uint32_t adv = (uint32_t)crawl_frac + SLIDING_STEP_FX;
+            crawl_pos  += adv >> 16;
+            crawl_frac  = (uint16_t)adv;
+            if (crawl_pos >= AMB_SLIDING_SAMPLE_COUNT) crawl_pos = 0;
+        } else if (walking) {
             uint32_t step_idx = step_pos_fx >> 16;
             int step = ((int)amb_step_samples[step_idx] * AMB_STEP_RESCALE) >> 7;
             step_delta = (step * step_vol) >> 9;
             step_pos_fx += step_adv;
             if ((step_pos_fx >> 16) >= AMB_STEP_SAMPLE_COUNT) step_pos_fx = 0;
         }
-        /* Shuffle one-shot — 8-bit source (like the hello, << 2 to the
-         * mix scale) read at the per-trigger step (landing native, climb
-         * 30%), one pass, a step louder than the carpet: it's the event. */
+        /* Exit-passage voice — 8-bit sources, << 2 to the mix scale, a
+         * step louder than the carpet: it's the event. Landing plays
+         * amb_shuffle once; the corridor loops amb_sliding until the
+         * landing takes the voice over. */
         if (slide_active) {
-            /* Both modes at unity. The 30%-dragged corridor loop is a
-             * PLACEHOLDER pending Mike's dedicated corridor sound (he
-             * vetoed the dragged character; the landing wav stays). */
-            int sl = (int)amb_shuffle_samples[slide_pos] << 2;
+            const int8_t *ssrc = slide_loop ? amb_sliding_samples
+                                            : amb_shuffle_samples;
+            uint32_t slim = slide_loop ? AMB_SLIDING_SAMPLE_COUNT
+                                       : AMB_SHUFFLE_SAMPLE_COUNT;
+            int sl = (int)ssrc[slide_pos] << 2;
             step_delta += (sl * step_vol) >> 8;
             uint32_t adv = (uint32_t)slide_frac + slide_step_fx;
             slide_pos  += adv >> 16;
             slide_frac  = (uint16_t)adv;
-            if (slide_pos >= AMB_SHUFFLE_SAMPLE_COUNT) {
+            if (slide_pos >= slim) {
                 if (slide_loop) slide_pos = 0;   /* corridor: seamless wrap */
                 else            slide_active = 0;
             }
