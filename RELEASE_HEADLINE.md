@@ -1,24 +1,30 @@
-## Audio
+## Rest-mode supersampling
 
-- The fluorescent hum is now synthesized in real time on the YM2612 FM chip. The 875KB looped hum recording has been removed from the ROM.
-- Hum volume follows the ambience slider.
-- The neon chime and ambient bed volumes are increased.
-- Footstep and neon samples requantized from 16-bit to 8-bit. No change to trim or timing.
-- The Voyager broadcast is unchanged.
-- Known: the synthesized hum can exhibit brief amplitude dips. Under investigation.
+- Standing still (~350 ms, no buttons held) renders the scene twice — once normally, once with sampling shifted half a column — and merges the pair on a 1-pixel checkerboard into a single parked frame. On a CRT the dither fuses into sub-pixel detail on wall edges, textures, and floor/ceiling patterns.
+- The parked frame is static: no page flipping while parked. Fluorescent palette flicker continues; ambience playback is unaffected.
+- Any input exits immediately and the next frame renders normally. Adaptive resolution while moving is unchanged.
+- Toggle: TESTING > ULTRA. Default on.
 
-## Monitors
+## Desk console
 
-- Monitor power-on and power-off sounds replaced with dedicated recordings: degauss on power-on, relay click on power-off. Levels raised.
-- Power-on now displays a raster strike: a white line, then the picture opens vertically. Duration 3 frames.
-- Power-off displays the inverse: the picture collapses to a dim line that falls off the bottom of the glass. Duration 2 frames.
+- Procgen PVMs are now the desk-mounted composite; placement requires walkable neighbor cells. The canonical map's console sits at its authored nook, facing east, and boots the Master System.
+- Console geometry is imported from the GLB as an authored 3-step ziggurat. The bake format gains a wedge primitive (a box with an inset top) for the sloped face, which points toward the player.
+- New hand-edited bezel and rear-panel art. A single-file web editor round-trips the front and rear textures through editable PNGs, matched to the engine's mirrored sampling.
+- Per-box shade ramps: desk, PVM, and Master System each carry their own gradient; the Master System is on a charcoal ramp.
+- Monitor power-on settle flicker fixed.
 
-## Master System minigame
+## Asset viewer
 
-- Generative music (SPACE-A, phrase and echo engine) plays on the Z80 during minigame sessions.
-- The 32X audio mix ducks while the minigame window is active; the PSG owns playback.
-- SMS games can now be compiled from C source (devkitSMS toolchain).
+- Composites (desk set, console) are first-class viewer entries; every asset opens the same way.
+- Size control moved to the bare d-pad.
 
-## Size
+## Movement and audio
 
-- ROM: 2,342,912 bytes to 1,400,832 bytes.
+- Footsteps require actual displacement: walking into a wall no longer steps in place. Head-bob cadence follows the footstep rate, including sprint.
+- Exit passage: dedicated corridor slide loop at native rate; landing scuff unchanged; both slide levels doubled.
+- Crouched movement replaces footsteps with a drag sound.
+
+## Master System
+
+- Boot menu screen: BACK/ROOMS banner wipe, startup chime reversed.
+- TEST PATTERN: the minigame presents as a diagnostic screen; the level name appears in the title.
