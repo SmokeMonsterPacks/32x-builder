@@ -214,6 +214,20 @@ uint8_t world_map[MAP_H][MAP_W];
                              * CRAM: 140..143 sit between the EXIT sign's plate
                              * and COMM_BASE, so the community arena is
                              * untouched. */
+/* MASTER SYSTEM console ramp, four near-black steps at 190..193.
+ *
+ * A CORE ramp parked in the community arena's free tail next to the PVM's,
+ * not a community upload. It is not in registry.json on purpose: a sprite
+ * palette is capped at 7 colours there and pvm already spends 5, and an entry
+ * of its own would mint a phantom sprite kind with no texture that the asset
+ * viewer would then cycle through.
+ *
+ * It exists because the console needs to stay BLACK and still show a light
+ * gradient, and the PVM's ramp cannot do both — its top two steps are case
+ * gray, so holding the console dark there meant biasing it down onto two
+ * indices and losing the gradient entirely. Its own ramp buys all four steps
+ * inside charcoal. */
+#define SMS_RAMP_BASE 190
 #define COMM_BASE     144   /* start of the COMMUNITY CRAM ARENA (144..255):
                              * each contributor sprite owns an 8-slot block
                              * holding ITS OWN median-cut palette (base+1..
@@ -1799,6 +1813,18 @@ void raycast_set_brightness(int lvl) {
                         comm_pal[i].r * lvl / FADE_STEPS,
                         comm_pal[i].g * lvl / FADE_STEPS,
                         comm_pal[i].b * lvl / FADE_STEPS);
+    /* Master System console (SMS_RAMP_BASE, see the define). Four near-black
+     * steps, darkest first, so chair_face_shade's 0..3 lands on all of them.
+     * Stamped HERE inside pal_apply rather than once in build_palette, so it
+     * fades with the room — the ramp right above it is the cautionary tale. */
+    {
+        static const uint8_t sms_l[4] = { 2, 4, 7, 11 };
+        for (int i = 0; i < 4; i++)
+            Hw32xSetBGColor(SMS_RAMP_BASE + i,
+                            sms_l[i] * lvl / FADE_STEPS,
+                            sms_l[i] * lvl / FADE_STEPS,
+                            (sms_l[i] + 1) * lvl / FADE_STEPS);
+    }
 }
 
 static void build_palette(void) {
@@ -4073,18 +4099,23 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
-    PVM_RAMP_BASE, PVM_RAMP_BASE };    /* the Master System: body + sloped */
-                                       /* upper, charcoal. Both wedges.    */
-/* Per-box shade bias. The DESK gets 0 — it is a full model in its own right,
- * not a stand, and the scalar 2 it inherited from the PVM was subtracting two
- * steps off a four-step ramp, landing the pedestals' front (-z, shade 1) and
- * side (+-x, shade 2) faces both on 0. Flat brown, no gradient. The CONSOLE
- * keeps 2, which is what holds the Master System at charcoal instead of the
- * PVM ramp's case gray. */
+    SMS_RAMP_BASE, SMS_RAMP_BASE };    /* the Master System: body + sloped */
+                                       /* upper, on its OWN charcoal ramp  */
+/* Per-box shade bias — every box 0 now, which is the point. The scalar 2 this
+ * composite inherited from the PVM (where it drops the CART to near-black) was
+ * being applied to the DESK, taking two steps off a four-step ramp and landing
+ * the pedestals' front (-z, shade 1) and side (+-x, shade 2) faces both on 0:
+ * flat brown, no gradient.
+ *
+ * The CONSOLE had the identical collapse for the identical reason, and biasing
+ * is the wrong tool for it either way — bias buys darkness by SPENDING shade
+ * levels, so a model that must be both dark and lit cannot have both. Its own
+ * ramp (SMS_RAMP_BASE) buys the darkness in the palette instead and leaves all
+ * four levels to do their job. */
 static const uint8_t desk_pvm_box_bias[DESK_PVM_NBOXES] = {
     0,                                 /* monitor — primary mass, full range */
     0, 0, 0, 0, 0,                     /* desk: pedestals + the split slab    */
-    2, 2 };                            /* Master System, charcoal             */
+    0, 0 };                            /* Master System, dark via its ramp    */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
