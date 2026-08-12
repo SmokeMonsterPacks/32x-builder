@@ -2353,12 +2353,15 @@ int m_main(void) {
          * strobe and PVM static freeze identically in both buffers; the
          * fluorescent shimmer lives in CRAM, so it stays alive through the
          * park (at 60Hz — nearer a real tube than the render loop gets). */
-        /* Dwell is RENDERED frames on top of the arm gates, and the gates
-         * already stage the entry: the stillness ratchet needs ~2 frames to
-         * publish full res, the dissolve one more to decay — so 2 here lands
-         * the park ~5 frames (~350ms) after the last input. As fast as the
-         * pipeline allows without capturing a half-res or dissolve frame. */
-        #define ULTRA_DWELL_FRAMES 2
+        /* Dwell is RENDERED frames on top of the arm gates — and it was a
+         * second belt on the same braces. The gates already prove the frame
+         * is full-res with the dissolve settled, which costs two frames on
+         * its own (f1 is_walking clears at half res, f2 reaches full but
+         * fires the focus-pull); the dwell only sat on top of that. At 0 the
+         * park fires on f3, the first frame the gates are actually open,
+         * capturing exactly the same frame three frames sooner. The floor
+         * below this is the ratchet's, not ULTRA's. */
+        #define ULTRA_DWELL_FRAMES 0
         {
             static uint16_t ultra_dwell = 0;
             /* One bit per gate, published to the HUD — a silent decline is
