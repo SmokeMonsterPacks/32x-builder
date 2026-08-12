@@ -1486,6 +1486,12 @@ static void climb_commit(void) {
  * keeps its stale map cache through the corridor (its half is overdrawn
  * too); the portal's normal init path makes it coherent at arrival. */
 static void corridor_enter(void) {
+    /* Start the corridor shuffle loop at the COMMITMENT, not the pullup:
+     * the whole passage is ~26 fast frames and the pump adds 64-128 ms
+     * of buffer latency, so every frame of head start is audible. The
+     * later climb triggers are no-ops against a running loop; the
+     * landing scuff takes over at impact. */
+    SHARED_UC->slide_sfx = 2;
     if (!g_next_seed_set) {            /* belt: gate always sets it */
         g_next_seed = SHARED_UC->frame_count * 1000003u + (uint32_t)player.x;
         g_next_seed_set = 1;
