@@ -80,7 +80,7 @@ if GAME == "maze":
         "#define Z80_GAME_TILEBUF_ROWS 24\n"
         "#define Z80_GAME_TILEBUF_COLS 32\n"
         "#define Z80_GAME_TILEBUF_LEN 768\n"
-        "#define Z80_GAME_MAP_LEN 132   /* 128B 1bpp map + spawn/exit meta */\n"
+        "#define Z80_GAME_MAP_LEN 148   /* 128B 1bpp map + spawn/exit + 16B name */\n"
         f"{consts}\n"
         "static const unsigned char z80_sms_game[] = {\n    "
         + ",\n    ".join(lines)

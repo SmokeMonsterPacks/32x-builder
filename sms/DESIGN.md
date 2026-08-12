@@ -16,9 +16,9 @@ boot font). The Z80 never touches the VDP. Ares' MD core has no mode 4
 and duplicates Z80 control-port writes; both problems are bypassed
 entirely by this split.
 
-Level injection: the blob reserves a 132-byte region at a fixed address.
-The SH-2 packs the live 32x32 `world_map` to 1 bit per cell plus spawn
-and exit cells and streams it over COMM as 66 indexed words (command
+Level injection: the blob reserves a 148-byte region at a fixed address.
+The SH-2 packs the live 32x32 `world_map` to 1 bit per cell plus spawn,
+exit, and the 16-tile level name, and streams it as 74 indexed words (command
 0x0B); the 68000 writes it into the region after the code copy and before
 the Z80 leaves reset (command 0x0C). Teardown parks the Z80 and sweeps
 the play rows (command 0x0D). The SH-2 owns the exit path (START in
@@ -39,7 +39,8 @@ lines, parsed by `tools/gen_z80_game.py` into `md_src/z80_sms_game.h`.
 | TILEBUF     | $1900-$1BFF   | 768  | game writes, 68K reads (24 rows x 32)  |
 | MAP_BITS    | $1C00-$1C7F   | 128  | 68K patches (1bpp map, $80>>(x&7))     |
 | MAP_META    | $1C80-$1C83   | 4    | 68K patches (spawn_x/y, exit_x/y)      |
-| game vars   | $1C90-...     | free | game                                   |
+| MAP_NAME    | $1C84-$1C93   | 16   | 68K patches (level name, tile ids)     |
+| game vars   | $1CA0-...     | free | game                                   |
 | HEART       | $1F00         | 1    | game increments (liveness forensics)   |
 | stack       | grows < $1F80 | ~128 | game                                   |
 | PAD_MBX     | $1FF4         | 1    | 68K writes pad byte each frame         |
@@ -169,11 +170,15 @@ the BIOS targets mode-4 hardware the harness does not have):
   envelope and vibrato tables and a noise accent. The Snail Maze songs
   live in the same format directly below it.
 
-Ours, in the maze blob: a BACK / ROOMS banner in 3x5 block glyphs of
-boot-font '%' tiles, revealed by a tile-column wipe (one column per
-frame — the harness has no sprites or scroll, so the wipe is tile-
-granular); ESCAPE THE BACKROOMS + PRESS BUTTON text; A/B/C starts the
-maze. The chime is the SE-GA gesture REVERSED (Mike's sms_putrats.wav
+Ours, in the maze blob (branding: TEST PATTERN, Mike 2026-08-11 — the
+clinical Async-style register, not "Escape the Backrooms"): a TEST /
+PATTERN banner in 3x5 block glyphs of boot-font '%' tiles, revealed by
+a tile-column wipe (one column per frame — the harness has no sprites
+or scroll, so the wipe is tile-granular); beneath it the LEVEL'S NAME,
+patched in with the map as 16 tile-id bytes at MAP_NAME $1C84 (procgen
+levels use cur_map_name's syllable hash, so each generated level is its
+own specimen id); A TO BEGIN EXERCISE. The debrief screen is EXERCISE
+COMPLETE + the level name + PRESS START TO EXIT. A starts the maze. The chime is the SE-GA gesture REVERSED (Mike's sms_putrats.wav
 concept — the startup sound played backwards): the G-minor chord
 (G3/D4/G4) swells in from silence over ~0.6 s, holds, sweeps DOWN a
 24-step divider table to the low cluster, and cuts — reversed tapes do

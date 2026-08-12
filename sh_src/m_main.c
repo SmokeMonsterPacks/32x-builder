@@ -1121,8 +1121,8 @@ static void sms_boot_screen(void) {
 static void sms_game_screen(void) {
     uint16_t saved_mode = MARS_VDP_DISPMODE;
     sms_audio_duck();
-    unsigned char pack[132];
-    for (int i = 0; i < 132; i++) pack[i] = 0;
+    unsigned char pack[148];
+    for (int i = 0; i < 148; i++) pack[i] = 0;
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++)
             if (world_map[y][x] != 0)
@@ -1147,6 +1147,28 @@ static void sms_game_screen(void) {
     pack[129] = (unsigned char)sy;
     pack[130] = (unsigned char)ex;
     pack[131] = (unsigned char)ey;
+    {   /* TEST PATTERN <name>: the level's name rides the patch as 16
+         * boot-font tile ids, centered — the Z80 stamps it on the title
+         * card and the debrief. Procgen names are the syllable hashes
+         * from cur_map_name, so every generated level is its own
+         * clinical specimen id. Mapping mirrors mars.c NextChr. */
+        char mn[18];
+        cur_map_name(mn);
+        int len = 0;
+        while (mn[len] && len < 16) len++;
+        int off = 132 + (16 - len) / 2;
+        for (int i = 0; i < len; i++) {
+            char ch = mn[i];
+            unsigned char t = 1;
+            if (ch >= '0' && ch <= '9')      t = (unsigned char)(ch - '0' + 2);
+            else if (ch >= 'A' && ch <= 'Z') t = (unsigned char)(ch - 'A' + 12);
+            else if (ch >= 'a' && ch <= 'z') t = (unsigned char)(ch - 'a' + 12);
+            else if (ch == ' ')              t = 0;
+            else if (ch == '.')              t = 39;
+            else if (ch == '-')              t = 40;
+            pack[off + i] = t;
+        }
+    }
     /* Black BOTH 32X buffers (word stores — the FB drops zero BYTE writes)
      * so the Master System's tiles overlay a black room, the compositing
      * the diag spike proved. */

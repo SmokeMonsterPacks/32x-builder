@@ -1,12 +1,12 @@
 ; =====================================================================
-; SMS MINI-GAME: ESCAPE THE BACKROOMS (in-game blob flavor)
+; SMS MINI-GAME: TEST PATTERN (in-game blob flavor)
 ;
 ; This is the Master System game the 32X boots INSIDE the running
 ; Backrooms build. It is not a 32KB cartridge image: it executes from
 ; the Genesis Z80's 8KB RAM ($0000-$1FFF), where the 68K uploads it
 ; through the $A00000 window. The 68K then PATCHES the live level in:
 ; the SH-2 packs world_map to 1bpp + spawn + exit and streams it over
-; COMM, and the 68K writes those 132 bytes into MAP_BITS/MAP_META
+; COMM, and the 68K writes those 148 bytes into MAP_BITS/MAP_META
 ; below before releasing the Z80 from reset. Procgen or curated makes
 ; no difference — by then the map is just bytes in SDRAM.
 ;
@@ -24,6 +24,7 @@
 ;   TILEBUF   $1900  768B frame, row-major 24x32
 ;   MAP_BITS  $1C00  128B, 32 rows x 4 bytes, bit $80>>(x&7) = wall
 ;   MAP_META  $1C80  spawn_x, spawn_y, exit_x, exit_y
+;   MAP_NAME  $1C84  16 tile-id bytes, the level's name (title + debrief)
 ;   PAD_MBX   $1FF4  pad byte (SEGA low byte: U1 D2 L4 R8 B10 C20 A40 ST80)
 ;   DIRTY_MBX $1FF5  Z80 sets 1 = new frame in TILEBUF; 68K clears
 ;   STATE_MBX $1FF6  0 = playing, 1 = escaped
@@ -54,34 +55,36 @@ BANKS 1
 .DEFINE TILEBUF   $1900
 .DEFINE MAP_BITS  $1C00
 .DEFINE MAP_META  $1C80
-.DEFINE VAR_PX    $1C90   ; player cell x
-.DEFINE VAR_PY    $1C91   ; player cell y
-.DEFINE VAR_VPY   $1C92   ; viewport top map row (0..8)
-.DEFINE VAR_PPREV $1C93   ; previous pad byte (edge detect)
-.DEFINE VAR_FLAST $1C94   ; last FRAME_MBX seen
-.DEFINE VAR_RPT   $1C95   ; held-direction auto-repeat counter
-.DEFINE VAR_LFSR  $1C96   ; music: 16-bit Galois LFSR state
-.DEFINE VAR_BI    $1C98   ; music: bass walker index
-.DEFINE VAR_BATT  $1C99   ; music: bass attenuation
-.DEFINE VAR_BFADE $1C9A   ; music: frames to next bass fade step
-.DEFINE VAR_BT    $1C9B   ; music: frames to next bass note (16-bit)
-.DEFINE VAR_MPTR  $1C9D   ; music: current motif read pointer (16-bit)
-.DEFINE VAR_MLEFT $1C9F   ; music: notes left in the motif
-.DEFINE VAR_MATT  $1CA0   ; music: melody attenuation
-.DEFINE VAR_MFADE $1CA1   ; music: frames to next melody fade step
-.DEFINE VAR_NOTET $1CA2   ; music: frames to next note in the motif
-.DEFINE VAR_GAP   $1CA3   ; music: frames of silence between phrases (16-bit)
-.DEFINE VAR_EATT  $1CA5   ; music: echo attenuation
-.DEFINE VAR_EFADE $1CA6   ; music: frames to next echo fade step
-.DEFINE ECHO_Q    $1CA8   ; music: 4 slots x (countdown, div_lo, div_hi)
-.DEFINE VAR_GSTATE $1CB4  ; 0 = menu screen, 1 = playing the maze
-.DEFINE VAR_REVEAL $1CB5  ; menu: banner wipe column (0..31, 32 = text, 33 = done)
-.DEFINE VAR_MUSON  $1CB6  ; 1 = chime finished, SPACE-A engine owns the PSG
-.DEFINE VAR_CHF    $1CB7  ; chime: frame counter
-.DEFINE VAR_CHATT  $1CB8  ; chime: fade attenuation
-.DEFINE VAR_CHSUB  $1CB9  ; chime: frames to next fade step
-.DEFINE VAR_TMPR   $1CBA  ; banner scratch: band row0
-.DEFINE VAR_TMPC   $1CBB  ; banner scratch: screen column
+.DEFINE MAP_NAME  $1C84   ; 16 tile-id bytes: the level's name, patched in
+                          ; by the 68K with the map (TEST PATTERN <name>)
+.DEFINE VAR_PX    $1CA0   ; player cell x
+.DEFINE VAR_PY    $1CA1   ; player cell y
+.DEFINE VAR_VPY   $1CA2   ; viewport top map row (0..8)
+.DEFINE VAR_PPREV $1CA3   ; previous pad byte (edge detect)
+.DEFINE VAR_FLAST $1CA4   ; last FRAME_MBX seen
+.DEFINE VAR_RPT   $1CA5   ; held-direction auto-repeat counter
+.DEFINE VAR_LFSR  $1CA6   ; music: 16-bit Galois LFSR state
+.DEFINE VAR_BI    $1CA8   ; music: bass walker index
+.DEFINE VAR_BATT  $1CA9   ; music: bass attenuation
+.DEFINE VAR_BFADE $1CAA   ; music: frames to next bass fade step
+.DEFINE VAR_BT    $1CAB   ; music: frames to next bass note (16-bit)
+.DEFINE VAR_MPTR  $1CAD   ; music: current motif read pointer (16-bit)
+.DEFINE VAR_MLEFT $1CAF   ; music: notes left in the motif
+.DEFINE VAR_MATT  $1CB0   ; music: melody attenuation
+.DEFINE VAR_MFADE $1CB1   ; music: frames to next melody fade step
+.DEFINE VAR_NOTET $1CB2   ; music: frames to next note in the motif
+.DEFINE VAR_GAP   $1CB3   ; music: frames of silence between phrases (16-bit)
+.DEFINE VAR_EATT  $1CB5   ; music: echo attenuation
+.DEFINE VAR_EFADE $1CB6   ; music: frames to next echo fade step
+.DEFINE ECHO_Q    $1CB8   ; music: 4 slots x (countdown, div_lo, div_hi)
+.DEFINE VAR_GSTATE $1CC4  ; 0 = menu screen, 1 = playing the maze
+.DEFINE VAR_REVEAL $1CC5  ; menu: banner wipe column (0..31, 32 = text, 33 = done)
+.DEFINE VAR_MUSON  $1CC6  ; 1 = chime finished, SPACE-A engine owns the PSG
+.DEFINE VAR_CHF    $1CC7  ; chime: frame counter
+.DEFINE VAR_CHATT  $1CC8  ; chime: fade attenuation
+.DEFINE VAR_CHSUB  $1CC9  ; chime: frames to next fade step
+.DEFINE VAR_TMPR   $1CCA  ; banner scratch: band row0
+.DEFINE VAR_TMPC   $1CCB  ; banner scratch: screen column
 .DEFINE PSG       $7F11   ; SN76489, memory-mapped in Z80 space (no OUT)
 .DEFINE HEART     $1F00   ; liveness ripple for save-state forensics
 .DEFINE PAD_MBX   $1FF4
@@ -359,13 +362,13 @@ clr_esc:
    ld a, b
    or c
    jr nz, clr_esc
-   ld hl, TILEBUF + 8*32 + 10
-   ld de, s_escaped
-   ld b, 11
+   ld hl, TILEBUF + 8*32 + 7
+   ld de, s_complete
+   ld b, 17
    call copy_str
-   ld hl, TILEBUF + 10*32 + 9
-   ld de, s_back
-   ld b, 13
+   ld hl, TILEBUF + 11*32 + 8
+   ld de, MAP_NAME          ; the debrief names the specimen
+   ld b, 16
    call copy_str
    ld hl, TILEBUF + 14*32 + 6
    ld de, s_pexit
@@ -399,9 +402,9 @@ menu_tick:
    cp 32
    jr z, menu_text
    ld (VAR_TMPC), a        ; reveal one more banner column
-   ld hl, band_back
+   ld hl, band_test
    call band_col
-   ld hl, band_rooms
+   ld hl, band_pattern
    call band_col
    ld a, (VAR_REVEAL)
    inc a
@@ -410,13 +413,13 @@ menu_tick:
    ld (DIRTY_MBX), a
    jr menu_music
 menu_text:
-   ld hl, TILEBUF + 17*32 + 6
-   ld de, s_title
-   ld b, 20
+   ld hl, TILEBUF + 17*32 + 8
+   ld de, MAP_NAME          ; the level's name, patched in with the map
+   ld b, 16
    call copy_str
-   ld hl, TILEBUF + 20*32 + 10
+   ld hl, TILEBUF + 20*32 + 6
    ld de, s_press
-   ld b, 12
+   ld b, 19
    call copy_str
    ld a, 33
    ld (VAR_REVEAL), a
@@ -432,7 +435,7 @@ menu_music:
    ld a, c
    cpl
    and b
-   and $70
+   and $40                 ; A begins the exercise
    ret z
    ld a, 1
    ld (VAR_GSTATE), a
@@ -1008,22 +1011,19 @@ sweep_tab:
 
 ; 3x5 banner glyphs, one byte per row, bits %100/%010/%001 = columns
 banner_glyphs:
-   .DB 6,5,6,5,6     ; 0 B
-   .DB 2,5,7,5,5     ; 1 A
-   .DB 3,4,4,4,3     ; 2 C
-   .DB 5,6,6,5,5     ; 3 K
-   .DB 6,5,6,6,5     ; 4 R
-   .DB 2,5,5,5,2     ; 5 O
-   .DB 5,7,5,5,5     ; 6 M
-   .DB 3,4,2,1,6     ; 7 S
+   .DB 7,2,2,2,2     ; 0 T
+   .DB 7,4,6,4,7     ; 1 E
+   .DB 3,4,2,1,6     ; 2 S
+   .DB 6,5,6,4,4     ; 3 P
+   .DB 2,5,7,5,5     ; 4 A
+   .DB 6,5,6,6,5     ; 5 R
+   .DB 5,7,7,5,5     ; 6 N
 
 ; bands: row0, col0, nletters, glyph ids
-band_back:  .DB 4, 8, 4, 0, 1, 2, 3          ; BACK, rows 4-8
-band_rooms: .DB 10, 6, 5, 4, 5, 5, 6, 7      ; ROOMS, rows 10-14
+band_test:    .DB 4, 8, 4, 0, 1, 2, 0             ; TEST, rows 4-8
+band_pattern: .DB 10, 2, 7, 3, 4, 0, 0, 1, 5, 6   ; PATTERN, rows 10-14
 
 ; boot-font tile ids: A=12..Z=37, 0=space ('#'-less world)
-s_title:   .DB 16,30,14,12,27,16,0,31,19,16,0,13,12,14,22,29,26,26,24,30 ; ESCAPE THE BACKROOMS
-s_press:   .DB 27,29,16,30,30,0,13,32,31,31,26,25                    ; PRESS BUTTON
-s_escaped: .DB 36,26,32,0,16,30,14,12,27,16,15                       ; YOU ESCAPED
-s_back:    .DB 31,19,16,0,13,12,14,22,29,26,26,24,30                 ; THE BACKROOMS
-s_pexit:   .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT
+s_press:    .DB 12,0,31,26,0,13,16,18,20,25,0,16,35,16,29,14,20,30,16 ; A TO BEGIN EXERCISE
+s_complete: .DB 16,35,16,29,14,20,30,16,0,14,26,24,27,23,16,31,16    ; EXERCISE COMPLETE
+s_pexit:    .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT

@@ -297,6 +297,9 @@ for y in range(32):
         if maze[y][x]:
             mem[MAP_BITS + y * 4 + (x >> 3)] |= 0x80 >> (x & 7)
 mem[MAP_META:MAP_META + 4] = bytes([2, 2, 31, 16])
+# the level name, centered in the 16-tile field ("SIMMAZE")
+NAME_TILES = [30, 20, 24, 24, 12, 37, 16]
+mem[0x1C84 + 4:0x1C84 + 4 + 7] = bytes(NAME_TILES)
 
 cpu = Z80(mem)
 
@@ -356,13 +359,14 @@ for _ in range(400000):
 check("boot: menu not game (no frame, no player)",
       mem[DIRTY] == 0 and find_player() is None)
 settle(34)                           # 32 wipe columns + the text step
-check("menu: BACK banner drawn", tile(4, 8) == 44 and tile(4, 9) == 44)
-check("menu: ROOMS banner drawn", tile(10, 6) == 44)
-check("menu: PRESS BUTTON prompt", tile(20, 10) == 27)
+check("menu: TEST banner drawn", tile(4, 8) == 44 and tile(4, 10) == 44)
+check("menu: PATTERN banner drawn", tile(10, 2) == 44 and tile(10, 3) == 44)
+check("menu: name on the title card", tile(17, 12) == 30)  # S of SIMMAZE
+check("menu: A TO BEGIN EXERCISE prompt", tile(20, 6) == 12)
 mem[DIRTY] = 0
 settle(80)                           # chime completes at frame 106
 check("menu: no redraw while idle", mem[DIRTY] == 0)
-run_frame(0x10)                      # button 1 (B) starts the maze
+run_frame(0x40)                      # A begins the exercise
 check("button starts game: player at spawn (2,2)",
       mem[DIRTY] == 1 and tile(2, 2) == T_PLAYER)
 run_frame(0x00)
@@ -410,7 +414,7 @@ check(f"viewport scrolled: player row {p[0]} = 22 (map y=30, vp=8)",
 # route to the exit door at (31,16): align y=16 (the bar's gap row), then
 # walk right through the gap to x=30, then step INTO the door. Steer off
 # the game's own player vars so the route can't drift.
-VAR_PX, VAR_PY = 0x1C90, 0x1C91
+VAR_PX, VAR_PY = 0x1CA0, 0x1CA1
 
 
 def tap(pad):
@@ -546,8 +550,12 @@ check("music: melody onsets occurred",
 rows = frame_rows()
 esc = "".join(chr(t - 12 + ord('A')) if 12 <= t <= 37 else ' '
               for t in mem[TILEBUF + 8 * 32:TILEBUF + 8 * 32 + 32])
-check(f"escape screen: 'YOU ESCAPED' drawn ({esc.strip()!r})",
-      "YOUESCAPED" in esc.replace(" ", ""))
+check(f"debrief: 'EXERCISE COMPLETE' drawn ({esc.strip()!r})",
+      "EXERCISECOMPLETE" in esc.replace(" ", ""))
+nm = "".join(chr(t - 12 + ord('A')) if 12 <= t <= 37 else ' '
+             for t in mem[TILEBUF + 11 * 32:TILEBUF + 11 * 32 + 32])
+check(f"debrief: level name stamped ({nm.strip()!r})",
+      "SIMMAZE" in nm.replace(" ", ""))
 p2 = find_player()
 settle(3, 0x08)
 check("escaped: further input ignored", mem[STATE] == 1)
