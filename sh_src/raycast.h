@@ -11,6 +11,10 @@
  * debug automap reads unmistakably against the yellow world. */
 #define AMAP_RED        122   /* wall / partition lines */
 #define AMAP_RED_BRIGHT 123   /* player arrow */
+/* Asset-viewer label ink. Shared with m_main.c, painted by raycast_pal_apply.
+ * Outside every ramp so no fog or shade walk can land on it, same as the
+ * automap reds above. */
+#define VIEWER_INK      194
 /* The hand-authored entry maps (fixed_map, lobby_map) are 32x32. They load into
  * the top-left of the larger live grid with the rest filled solid wall (they're
  * self-sealed entry rooms). Procgen fills the full MAP_W x MAP_H. */

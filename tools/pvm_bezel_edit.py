@@ -49,10 +49,14 @@ def read_header():
     return w, h, vals
 
 def do_export():
-    # The engine samples the front face MIRRORED horizontally; flip both
-    # directions in this tool so the editor is WYSIWYG with the glass.
+    # NO horizontal flip, either way. This tool used to mirror on export and
+    # again on import, on the belief that the engine samples the front face
+    # mirrored. The round trip stayed consistent, so the PNG always looked
+    # right — but the panel reached the glass reversed. Both draw paths
+    # (draw_panel_face and the viewer) assign the same front UV corners
+    # 0,1,2,3 -> (0,TH)(0,0)(TW,0)(TW,TH), which is NOT mirrored, so the
+    # compensation had nothing to compensate for.
     w, h, vals = read_header()
-    vals = [vals[y*w + (w-1-x)] for y in range(h) for x in range(w)]
     im = Image.new("RGB", (w, h))
     im.putdata([LEGEND[v] for v in vals])
     im.resize((w * SCALE, h * SCALE), Image.NEAREST).save(PNG)
@@ -70,7 +74,6 @@ def do_import():
                 # nearest legend color: tolerate editor anti-alias slop
                 px = min(RLOOK, key=lambda c: sum((a-b)**2 for a, b in zip(c, px)))
             out.append(RLOOK[px])
-    out = [out[y*w + (w-1-x)] for y in range(h) for x in range(w)]   # WYSIWYG flip
     rows = []
     for y in range(h):
         rows.append("    { " + ",".join(f"{v}" for v in out[y*w:(y+1)*w]) + " },")

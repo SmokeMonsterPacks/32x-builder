@@ -1197,8 +1197,9 @@ static void asset_viewer_screen(void) {
     raycast_backdrop_wall(1);                /* CRAM 0 = flat tuned wallpaper yellow */
     HwMdReadPad(0);
     uint16_t prev = MARS_SYS_COMM8;          /* seed: ignore the held commit button */
-    const int ink = 121;                     /* FRAME_BASE+4: brightest jamb brown —
-                                              * warm ink on the wallpaper backdrop */
+    const int ink = VIEWER_INK;              /* navy, its own CRAM entry — the
+                                              * jamb brown it used sat too close
+                                              * in tone to the yellow backdrop */
     int sel = 3;                             /* start on CHAIR — the one with a 3D mesh */
     int variant = 0;                         /* box models: 0 BOXES (live 3D), 1 SPRITE */
     uint8_t rotY, rotX;                      /* engine angle units, 0..255 */

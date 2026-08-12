@@ -228,6 +228,10 @@ uint8_t world_map[MAP_H][MAP_W];
  * indices and losing the gradient entirely. Its own ramp buys all four steps
  * inside charcoal. */
 #define SMS_RAMP_BASE 190
+/* VIEWER_INK (asset-viewer label navy) lives in raycast.h — m_main.c draws
+ * with it. A dedicated entry rather than a borrowed ramp step: the viewer
+ * labels sit on a flat wallpaper-yellow backdrop, and the jamb brown they
+ * used to use was close enough in tone to read as part of the wall. */
 #define COMM_BASE     144   /* start of the COMMUNITY CRAM ARENA (144..255):
                              * each contributor sprite owns an 8-slot block
                              * holding ITS OWN median-cut palette (base+1..
@@ -1826,6 +1830,9 @@ void raycast_set_brightness(int lvl) {
                             sms_l[i] * lvl / FADE_STEPS,
                             (sms_l[i] + 1) * lvl / FADE_STEPS);
     }
+    Hw32xSetBGColor(VIEWER_INK, 2 * lvl / FADE_STEPS,
+                                3 * lvl / FADE_STEPS,
+                               14 * lvl / FADE_STEPS);   /* navy label ink */
 }
 
 static void build_palette(void) {
