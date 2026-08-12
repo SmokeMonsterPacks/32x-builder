@@ -643,11 +643,10 @@ void amb_pump(void) {
          * mix scale) read at the per-trigger step (landing native, climb
          * 30%), one pass, a step louder than the carpet: it's the event. */
         if (slide_active) {
-            /* Loop mode gets a 2x boost: at 30% speed the scuff's energy
-             * drops into a soft low-mid rumble and the passage is short —
-             * it has to register immediately. Native landing stays at
-             * unity. Peak ±1024×vol goes through the soft-clipper. */
-            int sl = (int)amb_shuffle_samples[slide_pos] << (slide_loop ? 3 : 2);
+            /* Both modes at unity. The 30%-dragged corridor loop is a
+             * PLACEHOLDER pending Mike's dedicated corridor sound (he
+             * vetoed the dragged character; the landing wav stays). */
+            int sl = (int)amb_shuffle_samples[slide_pos] << 2;
             step_delta += (sl * step_vol) >> 8;
             uint32_t adv = (uint32_t)slide_frac + slide_step_fx;
             slide_pos  += adv >> 16;
