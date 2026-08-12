@@ -1143,10 +1143,12 @@ static void sms_boot_screen(void) {
  * step into the door to escape. START exits any time (and is the prompt on
  * the YOU ESCAPED screen — the SH-2 owns that exit path, so no Z80 state
  * can trap the player). */
-static void sms_game_screen(void) {
-    uint16_t saved_mode = MARS_VDP_DISPMODE;
-    sms_audio_duck();
-    unsigned char pack[148];
+/* Pack the live level for the Z80: 1bpp map, spawn = the player's cell,
+ * exit = the level's real exit (fallback: farthest open cell), and the
+ * level name as 16 centered boot-font tile ids (TEST PATTERN <name> —
+ * procgen syllable hashes become specimen ids; mapping mirrors mars.c
+ * NextChr). Shared by the fullscreen game and the glass session. */
+static void sms_pack_level(unsigned char *pack) {
     for (int i = 0; i < 148; i++) pack[i] = 0;
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++)
@@ -1172,27 +1174,59 @@ static void sms_game_screen(void) {
     pack[129] = (unsigned char)sy;
     pack[130] = (unsigned char)ex;
     pack[131] = (unsigned char)ey;
-    {   /* TEST PATTERN <name>: the level's name rides the patch as 16
-         * boot-font tile ids, centered — the Z80 stamps it on the title
-         * card and the debrief. Procgen names are the syllable hashes
-         * from cur_map_name, so every generated level is its own
-         * clinical specimen id. Mapping mirrors mars.c NextChr. */
-        char mn[18];
-        cur_map_name(mn);
-        int len = 0;
-        while (mn[len] && len < 16) len++;
-        int off = 132 + (16 - len) / 2;
-        for (int i = 0; i < len; i++) {
-            char ch = mn[i];
-            unsigned char t = 1;
-            if (ch >= '0' && ch <= '9')      t = (unsigned char)(ch - '0' + 2);
-            else if (ch >= 'A' && ch <= 'Z') t = (unsigned char)(ch - 'A' + 12);
-            else if (ch >= 'a' && ch <= 'z') t = (unsigned char)(ch - 'a' + 12);
-            else if (ch == ' ')              t = 0;
-            else if (ch == '.')              t = 39;
-            else if (ch == '-')              t = 40;
-            pack[off + i] = t;
-        }
+    char mn[18];
+    cur_map_name(mn);
+    int len = 0;
+    while (mn[len] && len < 16) len++;
+    int off = 132 + (16 - len) / 2;
+    for (int i = 0; i < len; i++) {
+        char ch = mn[i];
+        unsigned char t = 1;
+        if (ch >= '0' && ch <= '9')      t = (unsigned char)(ch - '0' + 2);
+        else if (ch >= 'A' && ch <= 'Z') t = (unsigned char)(ch - 'A' + 12);
+        else if (ch >= 'a' && ch <= 'z') t = (unsigned char)(ch - 'a' + 12);
+        else if (ch == ' ')              t = 0;
+        else if (ch == '.')              t = 39;
+        else if (ch == '-')              t = 40;
+        pack[off + i] = t;
+    }
+}
+
+/* Game-on-glass session toggle (DESIGN.md 4c): boot the mini-game
+ * HEADLESS and let every powered PVM show its picture. The Z80 reset
+ * pulse wipes the YM both ways — re-arm the hum patch like every other
+ * SMS transition does. */
+static void sms_glass_toggle(void) {
+    if (raycast_glass_active()) {
+        HwMdSmsGlassStop();
+        raycast_glass_set_active(0);
+    } else {
+        unsigned char pack[148];
+        sms_pack_level(pack);
+        HwMdSmsGameMap(pack);
+        HwMdSmsGlassBoot();
+        raycast_glass_set_active(1);
+    }
+    g_ym_upload = 1;       /* the glass boot/park reset the YM (same line) */
+}
+
+/* Console boot beat: rendered frames the picture plays ON THE MONITOR
+ * before the screen takes the room. Short on purpose — the monitor is the
+ * establishing shot, not the show. The picture now converges in a single
+ * frame (raycast_glass_sample gathers rather than samples), so this is
+ * pure pacing, not a wait for data. */
+#define GLASS_BEAT_FRAMES 8
+
+/* from_glass: the console path — a glass session is already running the
+ * Z80, so hand it over instead of rebooting (the chime and the music play
+ * straight through the cut). Otherwise (TESTING>SMSGAME) boot it cold. */
+static void sms_game_screen(int from_glass) {
+    uint16_t saved_mode = MARS_VDP_DISPMODE;
+    sms_audio_duck();
+    unsigned char pack[148];
+    if (!from_glass) {
+        raycast_glass_set_active(0);   /* fullscreen takes the one Z80 */
+        sms_pack_level(pack);
     }
     /* Black BOTH 32X buffers (word stores — the FB drops zero BYTE writes)
      * so the Master System's tiles overlay a black room, the compositing
@@ -1202,8 +1236,13 @@ static void sms_game_screen(void) {
         for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
         swapBuffers();
     }
-    HwMdSmsGameMap(pack);
-    HwMdSmsGameBoot();
+    if (from_glass) {
+        HwMdSmsGlassHandoff();         /* same Z80, no second chime */
+        raycast_glass_set_active(0);   /* the monitors let go of the signal */
+    } else {
+        HwMdSmsGameMap(pack);
+        HwMdSmsGameBoot();
+    }
     /* Wait for START. No timeout: this is a game, not a diagnostic — and
      * the exit runs entirely on this CPU, so no Z80 wedge can eat it. */
     uint16_t prev = MARS_SYS_COMM8;
@@ -2124,6 +2163,7 @@ int m_main(void) {
         uint16_t pad = MARS_SYS_COMM8;
 
         menu_update(pad);
+        raycast_glass_sample();   /* game-on-glass: drink the COMM broadcast */
         /* YM hum service. Two jobs, both on this CPU because only it may
          * drive COMM0:
          * 1) PATCH DRIP-FEED — one register per frame, fire-and-forget.
@@ -2176,10 +2216,11 @@ int m_main(void) {
             sms_boot_screen();
         }
         if (g_smsboot_frames && --g_smsboot_frames == 0)
-            g_smsgame_request = 1;
+            g_smsgame_request = 2;    /* 2 = from the glass beat (handoff) */
         if (g_smsgame_request) {
+            int from_glass = (g_smsgame_request == 2);
             g_smsgame_request = 0;
-            sms_game_screen();
+            sms_game_screen(from_glass);
             raycast_pvm_desk_off();   /* the console dies as the world returns */
         }
         if (g_viewer_request) {
@@ -2256,12 +2297,16 @@ int m_main(void) {
                  * flip a set. */
                 else if (!(pad & (SEGA_CTRL_MODE | SEGA_CTRL_B))
                          && (fresh & SEGA_CTRL_A)) {
-                    /* Desk console (returns 2): the monitor wakes with the
-                     * full strike, and after a beat of static the screen
-                     * swallows you — the countdown lets the birth play
-                     * against the degauss before the cut. */
-                    if (raycast_pvm_use() == 2 && !g_smsboot_frames)
-                        g_smsboot_frames = 14;
+                    /* Desk console (returns 2): the Master System boots ON
+                     * THE MONITOR — chime, TEST PATTERN, the signal locking
+                     * on — and after a short beat the screen takes the room.
+                     * The handoff keeps the SAME Z80 running, so the music
+                     * never restarts across the cut. */
+                    if (raycast_pvm_use() == 2 && !g_smsboot_frames
+                        && !raycast_glass_active()) {
+                        sms_glass_toggle();
+                        g_smsboot_frames = GLASS_BEAT_FRAMES;
+                    }
                 }
             }
             }

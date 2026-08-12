@@ -201,7 +201,19 @@ display state and the 68K already copies it out every dirty frame
   is the aesthetic, not a bug.
 - Glass render v1: 32x24 tile grid -> lit/unlit phosphor cells on the
   PVM texture (nonzero tile = lit). v2: real glyphs via the SH-2 font.
-- Static until the Z80's first DIRTY — signal acquisition, diegetic.
+- Dead cells MUST use a real dark palette index, never 0: the 32X
+  framebuffer drops byte writes of zero, so a 0 cell shows the WALL
+  behind the monitor. Bit us once here; see the FB-zero-write note.
+- The SH-2 GATHERS the broadcast (spin until all 48 words seen, bounded)
+  rather than sampling blindly — blind sampling drew the picture in over
+  seconds because each read had to land on a slot still needed.
+- Console flow: A boots the glass session, a short beat plays on the
+  monitor, then command 18 hands off to fullscreen with the SAME Z80
+  running (no reboot = no second chime). The handoff must paint the
+  cached frame once: the Z80 sets DIRTY only when its picture changes,
+  so an idle attract card would leave the fullscreen black.
+- The eventual continuous zoom into the glass is a roadmap item
+  ("Zoom-into-the-glass transition"), gated on glyph fidelity.
 Pairs with the diegetic PVM+console trigger that eventually replaces
 the TESTING menu rows.
 

@@ -1541,6 +1541,86 @@ static void init_lights(void) {
 static uint8_t tg_buf[PVM_FRONT_TEX_W * PVM_FRONT_TEX_H];
 static int tg_valid = 0;
 static int tg_bx0, tg_by0, tg_bw, tg_bh;   /* glass bbox in pvm_front_tex */
+
+/* ── GAME-ON-GLASS (DESIGN.md 4c) ───────────────────────────────────────
+ * The live SMS mini-game picture on every powered PVM. The 68K runs the
+ * Z80 headless and free-runs a broadcast of its TILEBUF as (index, word)
+ * pairs on COMM10/COMM6; the primary samples a few dozen pairs per frame
+ * (double-reading the index for coherence — a torn pair is one wrong
+ * cell for one pass, i.e. noise), then bakes the 32x24 tile grid into a
+ * tg_buf-format phosphor-cell frame. While a session is live it
+ * overrides static AND telegraph on every powered screen: a wall of
+ * monitors all showing the same exercise. The picture assembles cell by
+ * cell out of the dark as pairs arrive — the CRT locking onto a signal,
+ * deliberately left unsmoothed. */
+#define GLASS_WORDS 48            /* 24x32 cells, one bit each */
+/* DEAD glass must be a REAL palette index, never 0: the 32X framebuffer
+ * DROPS byte writes of zero (the sprite-transparency quirk), so a 0 cell
+ * never lands and whatever the wall pass left there shows through — the
+ * wallpaper-inside-the-monitor bug, exactly as documented. base+0 is the
+ * PVM ramp's own dark-glass core, the same value the powered-off screen
+ * uses. LIT is the bright text white. */
+#define GLASS_DEAD  185           /* == PVM_RAMP_BASE, asserted at its define */
+#define GLASS_LIT   49
+static uint16_t glass_bits[GLASS_WORDS];
+static uint8_t glass_buf[PVM_FRONT_TEX_W * PVM_FRONT_TEX_H];
+static uint8_t glass_active = 0;
+static void tg_scan_glass(void);
+
+void raycast_glass_set_active(int on) {
+    if (on) {
+        for (unsigned i = 0; i < GLASS_WORDS; i++) glass_bits[i] = 0;
+        for (unsigned i = 0; i < sizeof glass_buf; i++) glass_buf[i] = GLASS_DEAD;
+    }
+    glass_active = (uint8_t)on;
+}
+
+int raycast_glass_active(void) {
+    return glass_active;
+}
+
+/* Primary, once per frame, before the render kicks off. */
+void raycast_glass_sample(void) {
+    if (!glass_active) return;
+    tg_scan_glass();                       /* idempotent bbox */
+    /* GATHER, don't gamble. Blind sampling drew the picture in cell
+     * by cell over seconds: each read had to LAND on a slot we still
+     * needed, and the 68K's rotation outruns the reader. Instead spin
+     * until every slot has been seen once — the rotation passes all 48
+     * in well under a millisecond of 68K time, so the whole frame
+     * arrives inside ONE render frame. BOUNDED (the SMS-exit-hang law):
+     * if the broadcast ever stops, we leave with a partial frame rather
+     * than wedging the render loop. */
+    {
+        uint8_t seen[GLASS_WORDS];
+        for (int i = 0; i < GLASS_WORDS; i++) seen[i] = 0;
+        int need = GLASS_WORDS;
+        uint32_t guard = 6000;
+        while (need && --guard) {
+            uint16_t i1 = MARS_SYS_COMM10;
+            uint16_t w  = MARS_SYS_COMM6;
+            if (MARS_SYS_COMM10 != i1) continue;   /* torn pair: skip */
+            if (i1 >= GLASS_WORDS) continue;       /* stale pad word: skip */
+            if (seen[i1]) continue;
+            seen[i1] = 1;
+            glass_bits[i1] = w;
+            need--;
+        }
+    }
+    /* Bake phosphor cells at glass resolution. scr bytes are FINAL palette
+     * indices (emissive, no lut fold). Glyph fidelity is a later pass;
+     * occupancy already reads as the banner wipe, the maze, the moving P. */
+    for (int y = 0; y < tg_bh; y++) {
+        int ty = (y * 24) / tg_bh;
+        uint8_t *dst = &glass_buf[(unsigned)y * (unsigned)tg_bw];
+        const uint16_t *wrow = &glass_bits[(unsigned)ty * 2u];   /* 32 cells = 2 words */
+        for (int x = 0; x < tg_bw; x++) {
+            int tx = (x * 32) / tg_bw;
+            dst[x] = (wrow[tx >> 4] & (uint16_t)(1u << (tx & 15)))
+                   ? GLASS_LIT : GLASS_DEAD;
+        }
+    }
+}
 void raycast_purge_cell_light(void) {
     static uint8_t seen_gen = 0xFF;
     uint8_t g = SHARED_UC->cell_light_gen;
@@ -4149,6 +4229,8 @@ _Static_assert(CHAIR_NBOXES <= BX_MAXBOXES && DESK_NBOXES <= BX_MAXBOXES &&
  * 185..188, dark charcoal to light case gray). Kept in lockstep with
  * registry.json assets.sprites[pvm] by the comm_pal.h codegen. */
 #define PVM_RAMP_BASE 185
+_Static_assert(GLASS_DEAD == PVM_RAMP_BASE,
+               "game-on-glass dead-cell index must be the PVM ramp's dark glass");
 static const boxmodel_t desk_pvm_model;
 /* The free-standing PVM's STAND (boxes 1..5: base plate and four legs) had
  * the same shade collapse the desk and the console did — stand_bias 2 held it
@@ -4675,6 +4757,7 @@ static void draw_chair_3d(int i, int col_start, int col_end,
                 draw_panel_face(fb, col_start, col_end, &faces[q], bm,
                             center_depth, chair_dark, cell_is_dark(cx, cy), zt,
                             standup_power[i],
+                            glass_active ? glass_buf :
                             (standup_scr_mode[i] && tg_valid) ? tg_buf : 0, be);
             }
             continue;
@@ -6529,6 +6612,13 @@ void raycast_purge_sprite_cache(void) {
      * every frame would tax every map for the benefit of the densest one. */
     purge_cache_range(lights,        (unsigned)num_lights * sizeof lights[0]);
     purge_cache_range(&num_lights,   sizeof num_lights);
+    /* Game-on-glass: the primary rebakes glass_buf EVERY frame, so the
+     * secondary's copy goes stale every frame — unlike tg_buf, which only
+     * changes at map load and rides the gen purge. Flag first, buffer
+     * only while a session is live. */
+    purge_cache_range(&glass_active, sizeof glass_active);
+    if (glass_active)
+        purge_cache_range(glass_buf, sizeof glass_buf);
     purge_cache_range(standups,      sizeof standups);
     purge_cache_range(&num_standups, sizeof num_standups);
     purge_cache_range(standup_down,  sizeof standup_down);

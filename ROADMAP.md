@@ -60,6 +60,23 @@ Z80's first DIRTY; the convergence tearing is the signal-lock look and
 stays. ~1 day; the only tuning risk is the sampling rate. Pairs with
 the diegetic PVM+console trigger that replaces the TESTING menu rows.
 
+### Zoom-into-the-glass transition  (Mike, 2026-08-12 — the long thread)
+**Status:** designed intent only, no code. Today the console cut is a
+hard swap: the monitor shows the Master System for a short beat, then
+the fullscreen replaces it. The ambition is a continuous move — the
+camera pushes INTO the PVM's glass while the picture resamples upward
+from phosphor-cell occupancy to full resolution, so the room becomes the
+screen without a cut. Pieces this needs that do not exist yet: (1) a
+scripted camera dolly along the view vector to the glass plane, reusing
+the pane-transform library's easing rather than a new one; (2) a
+resampling ladder for the SMS picture — occupancy cells, then real
+glyphs rendered by the SH-2 font, then the true 32x24 tile frame at
+1:1 — chosen by how much glass the camera fills, so cost tracks
+apparent size; (3) a handover at the end that swaps the world render
+for the mini-game's own frame WITHOUT the black flash the current cut
+hides behind. Depends on the glyph-fidelity pass (DESIGN.md 4c v2)
+landing first: a zoom that ends on blocky cells has nowhere to arrive.
+
 ### Ceiling lights as actual grid-tile illumination
 **Status:** ✅ done — scanline trapezoid fill from 4 projected corners
 of each axis-aligned ceiling tile. Per-edge slope precomputed once,

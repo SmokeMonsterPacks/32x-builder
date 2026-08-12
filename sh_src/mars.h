@@ -173,9 +173,12 @@ extern void HwMdYmWrite(unsigned char reg, unsigned char val);   /* YM2612 part 
 extern void HwMdYmCmd(unsigned char op);   /* hum: 0 off, 1 on, 2 sting, 3 release */
 extern void HwMdSmsBoot(void);
 extern void HwMdSmsStop(void);
-extern void HwMdSmsGameMap(const unsigned char *packed);   /* 132B level patch */
+extern void HwMdSmsGameMap(const unsigned char *packed);   /* 148B level patch */
 extern void HwMdSmsGameBoot(void);
 extern void HwMdSmsGameStop(void);
+extern void HwMdSmsGlassBoot(void);   /* headless boot: picture to the PVM glass */
+extern void HwMdSmsGlassStop(void);
+extern void HwMdSmsGlassHandoff(void);/* glass -> fullscreen, same Z80 running */
 extern void HwMdSetOffset(unsigned short offset);
 extern void HwMdSetNTable(unsigned short word);
 extern void HwMdSetVram(unsigned short word);

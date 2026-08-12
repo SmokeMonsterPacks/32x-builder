@@ -226,6 +226,12 @@ int  raycast_exit_path_cell(int x, int y);     /* protected spawn->exit corridor
 int  raycast_exit_cell(int *cx, int *cy);      /* the win cell for the SMS mini-
                                                 * game (door wall cell / hole
                                                 * approach); 0 = no exit here */
+/* Game-on-glass (DESIGN.md 4c): live SMS TILEBUF on every powered PVM.
+ * set_active(1) after the headless 68K boot; sample() on the primary once
+ * per frame reads the COMM broadcast and bakes the phosphor-cell frame. */
+void raycast_glass_set_active(int on);
+int  raycast_glass_active(void);
+void raycast_glass_sample(void);
 void raycast_add_dark_room(int x0, int y0, int x1, int y1);
 
 #endif

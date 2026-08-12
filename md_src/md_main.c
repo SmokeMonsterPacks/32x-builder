@@ -5,6 +5,7 @@
 // 32X COMM
 static volatile uint16_t* const mars_comm0  = (uint16_t*) MARS_COMM0;
 static volatile uint16_t* const mars_comm2  = (uint16_t*) MARS_COMM2;
+static volatile uint16_t* const mars_comm6  = (uint16_t*) MARS_COMM6;
 static volatile uint16_t* const mars_comm8  = (uint16_t*) MARS_COMM8;
 static volatile uint16_t* const mars_comm10 = (uint16_t*) MARS_COMM10;
 static volatile uint32_t* const mars_comm12 = (uint32_t*) MARS_COMM12;
@@ -33,6 +34,22 @@ static uint8_t sms_active = 0;
 static uint8_t sms_game_on = 0;
 static uint8_t sms_game_map[Z80_GAME_MAP_LEN];
 static uint8_t sms_game_tiles[Z80_GAME_TILEBUF_LEN];
+// GAME-ON-GLASS: the Z80 runs the mini-game HEADLESS (pad held at 0, no
+// name-table blit — the MD text layer belongs to the 3D HUD) and this
+// side free-runs a broadcast of TILEBUF over spare COMM registers:
+// COMM6 = tile pair, COMM10 = pair index (pad-2 publishing pauses; no
+// gameplay reads it). One pair per do_commands call — thousands per
+// frame — and the SH-2 samples a few dozen, double-reading the index
+// for coherence. No handshake anywhere: the joypad-bridge starvation
+// history says COMM request/response under render load loses.
+// Broadcast payload is an OCCUPANCY BITMAP, not the tiles: the glass render
+// only asks "is this cell lit", so one bit per cell turns 384 index+word
+// slots into 48 — the whole picture crosses in a couple of frames instead
+// of tens, on a channel where every sample is a race we might lose.
+#define SMS_GLASS_WORDS (Z80_GAME_TILEBUF_LEN / 16)   /* 768 cells -> 48 words */
+static uint8_t  sms_glass_on = 0;
+static uint16_t sms_glass_rot = 0;
+static uint16_t sms_glass_bits[SMS_GLASS_WORDS];
 
 // It is recommended to put functions that run 1+ times every frame into RAM
 // by specifying this attribute before the signature. This keeps the M68K off
@@ -49,6 +66,12 @@ void vdp_color(uint16_t index, uint16_t color) {
 
 __attribute__((section(".data")))
 void do_commands(void) {
+	if (sms_glass_on) {                 // the glass broadcast rides every call
+		uint16_t i = sms_glass_rot;
+		*mars_comm6  = sms_glass_bits[i];
+		*mars_comm10 = i;
+		sms_glass_rot = (uint16_t)((i + 1 >= SMS_GLASS_WORDS) ? 0 : i + 1);
+	}
 	uint16_t cmd = *mars_comm0;
 	switch(cmd >> 8) {
 	default: break; // Unknown command
@@ -322,6 +345,88 @@ void do_commands(void) {
 		*busreq = 0x000;                   // hand the bus back...
 		*reset = 0x100;                    // ...and let the Z80 run from $0000
 		sms_game_on = 1;
+		sms_glass_on = 0;                  // modal takes the one Z80 over
+		break;
+	}
+	case 16: { // SMS GLASS BOOT: same upload + map patch + run, but
+		// HEADLESS — no name-table sweep or blit (the MD text layer
+		// belongs to the 3D HUD), pad held at 0 so the game sits on its
+		// TEST PATTERN attract card, and the COMM6/COMM10 broadcast
+		// starts so the SH-2 can paint TILEBUF onto the PVM glass.
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
+		volatile uint8_t  *zram   = (uint8_t *)0xA00000;
+		*reset = 0x100;                    // ORDER IS LAW (see SMS BOOT)
+		*busreq = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		for (uint16_t i = 0; i < Z80_GAME_LEN; i++)
+			zram[i] = z80_sms_game[i];
+		for (uint16_t i = 0; i < Z80_GAME_MAP_LEN; i++)
+			zram[Z80_GAME_MAP_BITS + i] = sms_game_map[i];
+		zram[Z80_GAME_PAD_MBX]   = 0;
+		zram[Z80_GAME_DIRTY_MBX] = 0;
+		zram[Z80_GAME_STATE_MBX] = 0;
+		zram[Z80_GAME_FRAME_MBX] = 0;
+		zram[Z80_GAME_HEART]     = 0;
+		{	// PSG silent before the Z80 takes it — its chime + music then
+			// play IN-WORLD under the PWM mix (the monitor sings, 4c)
+			volatile uint8_t *psg = (uint8_t *)0xC00011;
+			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
+		}
+		for (uint16_t i = 0; i < Z80_GAME_TILEBUF_LEN; i++)
+			sms_game_tiles[i] = 0;         // broadcast starts dark, not stale
+		for (uint16_t i = 0; i < SMS_GLASS_WORDS; i++)
+			sms_glass_bits[i] = 0;
+		*reset = 0x000;
+		for (volatile uint16_t d = 0; d < 64; d++) ;
+		*busreq = 0x000;
+		*reset = 0x100;
+		sms_glass_on = 1;
+		sms_glass_rot = 0;
+		sms_game_on = 0;
+		break;
+	}
+	case 18: { // GLASS -> FULLSCREEN handoff. The SAME Z80 keeps running:
+		// no reboot, no second chime, the music carries across the cut.
+		// Sweep the plane the modal blit owns, paint the cached frame
+		// once (the Z80 only sets DIRTY when its picture CHANGES, and
+		// sitting on the attract card it changes nothing — without this
+		// the fullscreen would open black), then flip the flags so the
+		// next frame feeds the real pad.
+		for (uint16_t row = 0; row < 28; row++) {
+			uint32_t ofs = (row * 64u * 2u) + 0xE000;
+			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+			               | ((ofs >> 14) | 0x03);
+			for (uint16_t i = 0; i < 40; i++)
+				*vdp_data_port = 0;
+		}
+		{
+			const uint8_t *t = sms_game_tiles;
+			for (uint16_t row = 0; row < Z80_GAME_TILEBUF_ROWS; row++) {
+				uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
+				*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+				               | ((ofs >> 14) | 0x03);
+				for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++)
+					*vdp_data_port = *t++;
+			}
+		}
+		sms_glass_on = 0;
+		sms_game_on  = 1;
+		break;
+	}
+	case 17: { // SMS GLASS STOP: park the Z80, silence the PSG. No
+		// name-table sweep — the glass session never touched it.
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
+		sms_glass_on = 0;
+		*busreq = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		*reset = 0x000;
+		*busreq = 0x000;
+		{
+			volatile uint8_t *psg = (uint8_t *)0xC00011;
+			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
+		}
 		break;
 	}
 	case 13: { // SMS GAME STOP: park the Z80, sweep the playfield rows.
@@ -355,11 +460,14 @@ void do_commands(void) {
 // 32-wide field centered in the 40-column plane). The Z80 never touches the
 // VDP; the 68K never touches game state. The bus pause is a few dozen
 // microseconds — the same trick every sound driver on the platform uses.
+// modal: real pad in, TILEBUF blitted to the text layer. glass (headless):
+// pad held 0 so the Z80 sits on its attract card, no blit — the picture
+// leaves through the COMM broadcast instead.
 __attribute__((section(".data")))
-static void sms_game_frame(void) {
+static void sms_game_frame(uint8_t modal) {
 	volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
 	volatile uint8_t  *zram   = (uint8_t *)0xA00000;
-	uint8_t pad = (uint8_t)*mars_comm8;    // U1 D2 L4 R8 B10 C20 A40 ST80
+	uint8_t pad = modal ? (uint8_t)*mars_comm8 : 0;  // U1 D2 L4 R8 B10 C20 A40 ST80
 	uint8_t dirty;
 	*busreq = 0x100;
 	{ uint32_t g = 100000; while ((*busreq & 0x100) && --g) ; }
@@ -372,7 +480,16 @@ static void sms_game_frame(void) {
 		zram[Z80_GAME_DIRTY_MBX] = 0;
 	}
 	*busreq = 0x000;
-	if (dirty) {
+	if (dirty && !modal) {           // rebake the glass occupancy bitmap
+		const uint8_t *t = sms_game_tiles;
+		for (uint16_t w = 0; w < SMS_GLASS_WORDS; w++) {
+			uint16_t bits = 0;
+			for (uint16_t b = 0; b < 16; b++)
+				if (*t++) bits |= (uint16_t)(1u << b);
+			sms_glass_bits[w] = bits;
+		}
+	}
+	if (dirty && modal) {
 		const uint8_t *t = sms_game_tiles;
 		for (uint16_t row = 0; row < Z80_GAME_TILEBUF_ROWS; row++) {
 			uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
@@ -428,8 +545,10 @@ void main(void) {
 		// the bridge under render contention. P2 is published for free; no
 		// gameplay reads COMM10 yet.
 		*mars_comm8  = pad_sticky(0, read_joypad(0));
-		*mars_comm10 = pad_sticky(1, read_joypad(1));
+		if (!sms_glass_on)                 // glass borrows COMM10 (pair index)
+			*mars_comm10 = pad_sticky(1, read_joypad(1));
 		*mars_comm12 = ++timer;
-		if (sms_game_on) sms_game_frame();
+		if (sms_game_on)       sms_game_frame(1);
+		else if (sms_glass_on) sms_game_frame(0);
 	}
 }

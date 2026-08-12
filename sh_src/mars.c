@@ -286,6 +286,35 @@ void HwMdYmWrite(unsigned char reg, unsigned char val) {
 	MARS_SYS_COMM0 = (unsigned short)(0x0E00 | reg);
 }
 
+void HwMdSmsGlassBoot(void) {
+	/* Headless mini-game boot for the PVM glass: same upload + level
+	 * patch as the modal boot, but no text-layer blit and pad held 0 —
+	 * the picture leaves over the COMM6/COMM10 broadcast instead. */
+	while (MARS_SYS_COMM0) ;
+	MARS_SYS_COMM0 = 0x1000;
+	while (MARS_SYS_COMM0) ;
+}
+
+void HwMdSmsGlassHandoff(void) {
+	/* Glass -> fullscreen with the SAME Z80 still running: the 68K just
+	 * starts blitting and feeding the pad. No reboot means the chime and
+	 * the music never restart across the cut. */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM0 = 0x1200;
+	guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+}
+
+void HwMdSmsGlassStop(void) {
+	/* BOUNDED like every SMS teardown. */
+	uint32_t guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+	MARS_SYS_COMM0 = 0x1100;
+	guard = 2000000;
+	while (MARS_SYS_COMM0 && --guard) ;
+}
+
 void HwMdSetColor(unsigned short index, unsigned short color) {
 	while(MARS_SYS_COMM0) ; // wait until 68000 has responded to any earlier requests
 	MARS_SYS_COMM2 = color;
