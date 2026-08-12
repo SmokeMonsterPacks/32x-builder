@@ -1201,15 +1201,21 @@ static void asset_viewer_screen(void) {
                                               * warm ink on the wallpaper backdrop */
     int sel = 3;                             /* start on CHAIR — the one with a 3D mesh */
     int variant = 0;                         /* box models: 0 BOXES (live 3D), 1 SPRITE */
-    uint8_t rotY = 32, rotX = 12;            /* engine angle units, 0..255 */
-    int zscale = 126;                        /* mesh views: CONTINUOUS screen scale
-                                              * (was a 4-notch zoom; B+UP/DOWN glides it) */
-    int c_used = 0;                          /* C chord consumed a d-pad edge:
-                                              * suppress the tap-release reset */
+    uint8_t rotY, rotX;                      /* engine angle units, 0..255 */
+    int zscale;                              /* mesh views: CONTINUOUS screen scale
+                                              * (was a 4-notch zoom; UP/DOWN glides it) */
     /* Sprite views: a live world quad (tex_tri, the neanderthal's path).
      * UP/DOWN glides the distance CONTINUOUSLY — smooth scaling through the
      * real rasterizer — LEFT/RIGHT yaws it (edge-on, cardboard back, LOD). */
-    fx_t adist = FX(2.5);
+    fx_t adist;
+    /* ONE definition of the default pose. The opening view, the C-tap reset
+     * and the per-asset reset all go through it, so they cannot drift — the
+     * old C-tap reset restored the angles and the sprite distance but NOT
+     * zscale, so resetting a mesh view left it at whatever zoom you had. */
+    #define VIEW_RESET() (rotY = 32, rotX = 12, zscale = 126, adist = FX(2.5))
+    VIEW_RESET();
+    int c_used = 0;                          /* C chord consumed a d-pad edge:
+                                              * suppress the tap-release reset */
     int wire = 0;                            /* C+UP/DOWN (or Z) toggles; box fills
                                               * are cheap, so FILL is the default now
                                               * that the hero tri-mesh is gone */
@@ -1228,29 +1234,43 @@ static void asset_viewer_screen(void) {
         /* CHORDED controls (Mike's scheme): B and C are HELD modifiers, so
          * every viewer function reaches a 3-button pad — X/Z still work as
          * one-tap shortcuts on pads that really have them.
-         *   B+UP/DOWN     smooth zoom (mesh scale / sprite distance)
+         *   UP/DOWN       smooth SCALE (mesh scale / sprite distance)
+         *   LEFT/RIGHT    turntable yaw
+         *   B+UP/DOWN     pitch
          *   B+LEFT/RIGHT  swap model type (what X does)
          *   C+UP/DOWN     fill <-> wireframe (what Z does)
          *   C tap         reset pose — fires on RELEASE, and only if the
          *                 hold consumed no chord, so C+UP doesn't also snap
-         *                 the view home. */
+         *                 the view home.
+         * Scale sits on the BARE d-pad and pitch behind B, not the other way
+         * round: sizing an asset is the thing you reach for on every single
+         * one, and pitch is a look you set once. */
         int chord = pad & (SEGA_CTRL_B | SEGA_CTRL_C);
-        /* Held D-pad = continuous rotation — only while no chord is down. */
-        if (!chord) {
-            if (pad & SEGA_CTRL_LEFT)  rotY = (uint8_t)(rotY - 2);
-            if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
-            if (pad & SEGA_CTRL_UP)    rotX = (uint8_t)(rotX + 2);
-            if (pad & SEGA_CTRL_DOWN)  rotX = (uint8_t)(rotX - 2);
-        }
         /* Table-driven: any kind with a boxmodels[] row has a mesh view,
          * and every composite (.alt) is its OWN entry in the A-cycle —
-         * first-class, no hidden chords. New models never touch this. */
+         * first-class, no hidden chords. New models never touch this.
+         * Resolved BEFORE the d-pad now: bare UP/DOWN scales, and which of
+         * zscale/adist that means depends on mesh_shown. */
         int mk = sel, malt = 0;
         int nvariants = raycast_asset_model(sel, &mk, &malt);
         int model_id = nvariants ? mk : -1;
         int nvar = malt ? 1 : 2;               /* composites: mesh only */
         if (variant >= nvar) variant = 0;
         int mesh_shown = (model_id >= 0 && variant == 0);
+        /* Held D-pad, no chord: LEFT/RIGHT spins the turntable, UP/DOWN
+         * scales. Mesh views glide the screen scale, sprite views glide the
+         * world distance through the real rasterizer. */
+        if (!chord) {
+            if (pad & SEGA_CTRL_LEFT)  rotY = (uint8_t)(rotY - 2);
+            if (pad & SEGA_CTRL_RIGHT) rotY = (uint8_t)(rotY + 2);
+            if (mesh_shown) {
+                if (pad & SEGA_CTRL_UP)   { zscale += 3; if (zscale > 220) zscale = 220; }
+                if (pad & SEGA_CTRL_DOWN) { zscale -= 3; if (zscale < 50)  zscale = 50; }
+            } else {
+                if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
+                if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
+            }
+        }
         if (pressed & SEGA_CTRL_A) {
             /* sprite_defs[] is kind-indexed and sparse — step over the null
              * padding rows or the viewer lands on an empty asset. */
@@ -1259,17 +1279,16 @@ static void asset_viewer_screen(void) {
                 sel = (sel + 1) % n;
                 if (raycast_asset_valid(sel)) break;
             }
+            /* Every asset opens in the SAME pose. Carrying the previous
+             * asset's angle and zoom across a swap meant a big model could
+             * arrive off-screen or edge-on, and judging a new asset against
+             * a view tuned for the last one is not a comparison. */
+            VIEW_RESET();
         }
         if (pad & SEGA_CTRL_B) {
-            /* Smooth zoom, held: mesh views glide the screen scale, sprite
-             * views glide the world distance through the real rasterizer. */
-            if (mesh_shown) {
-                if (pad & SEGA_CTRL_UP)   { zscale += 3; if (zscale > 220) zscale = 220; }
-                if (pad & SEGA_CTRL_DOWN) { zscale -= 3; if (zscale < 50)  zscale = 50; }
-            } else {
-                if (pad & SEGA_CTRL_UP)   { adist -= FX(0.07); if (adist < FX(0.5)) adist = FX(0.5); }
-                if (pad & SEGA_CTRL_DOWN) { adist += FX(0.07); if (adist > FX(8))   adist = FX(8); }
-            }
+            /* Pitch, held — moved off the bare d-pad to make room for scale. */
+            if (pad & SEGA_CTRL_UP)   rotX = (uint8_t)(rotX + 2);
+            if (pad & SEGA_CTRL_DOWN) rotX = (uint8_t)(rotX - 2);
             if (pressed & SEGA_CTRL_RIGHT) variant = (variant + 1) % nvar;
             if (pressed & SEGA_CTRL_LEFT)  variant = (variant + 1) % nvar;
         }
@@ -1277,7 +1296,7 @@ static void asset_viewer_screen(void) {
         if (pad & SEGA_CTRL_C) {
             if (pressed & (SEGA_CTRL_UP | SEGA_CTRL_DOWN)) { wire ^= 1; c_used = 1; }
         }
-        if ((released & SEGA_CTRL_C) && !c_used) { rotY = 32; rotX = 12; adist = FX(2.5); }
+        if ((released & SEGA_CTRL_C) && !c_used) VIEW_RESET();
         if (pressed & SEGA_CTRL_X) variant = (variant + 1) % nvar;
         if (pressed & SEGA_CTRL_Z) wire ^= 1;
         SHARED_UC->frame_count++;
@@ -1358,8 +1377,8 @@ static void asset_viewer_screen(void) {
                 font_draw_string(fb, 8, 50, t, ink);
             }
         }
-        font_draw_string(fb, 8, SCREEN_H - 24, "DPAD ROTATE  A ASSET  START BACK", ink);
-        font_draw_string(fb, 8, SCREEN_H - 12, "B+UD ZOOM B+LR TYPE C+UD WIRE C RESET", ink);
+        font_draw_string(fb, 8, SCREEN_H - 24, "LR TURN UD SIZE  A ASSET  START BACK", ink);
+        font_draw_string(fb, 8, SCREEN_H - 12, "B+UD TILT B+LR TYPE C+UD WIRE C RESET", ink);
         swapBuffers();
     }
     /* Drain the exiting START press: the caller reads its own pad edges,
