@@ -133,9 +133,14 @@ def load_face_tex(header):
     src = open(os.path.join(REPO, header)).read()
     W = int(re.search(r"_TEX_W (\d+)", src).group(1))
     H = int(re.search(r"_TEX_H (\d+)", src).group(1))
-    rows = [[int(v) for v in m.group(1).split(",")]
-            for m in re.finditer(r"\{([\d,]+)\},", src)]
-    assert len(rows) == H and all(len(r) == W for r in rows), header
+    # Tolerate whitespace inside the braces: bake_face_tex.py writes {3,3,3}
+    # but pvm_bezel_edit.py writes { 3,3,3 }, so a tight regex silently parsed
+    # ZERO rows from any hand-edited bezel and died on the assert below.
+    rows = [[int(v) for v in m.group(1).replace(" ", "").split(",")]
+            for m in re.finditer(r"\{\s*([\d,\s]+?)\s*\}", src)]
+    rows = [r for r in rows if len(r) == W]
+    assert len(rows) == H, "%s: parsed %d rows of width %d, expected %d" % (
+        header, len(rows), W, H)
     return rows, W, H
 
 
@@ -175,10 +180,25 @@ def paint_face_tex(img, quad_pts, tex):
 FRONT_QUAD = 5
 
 
+# Texel value layout, matching build_standup_vmap in raycast.c:
+#   0        transparent
+#   1..4     the set's OWN ramp (dirset base), shade 0..3   <- the shipped one
+#   5..9     the screen/ftex range, when a set has one
+#   10..     EXTRA ramp slots, four values each, for COMPOSITE models
+# Slot 0 is the model's own ramp so every set baked before this keeps its
+# values byte-for-byte; extra slots are appended past the screen range so
+# nothing already decoded has to move.
+SLOT_EXTRA0 = 10
+
+
 def render_idx(verts, tris, rotY, rotX, big=448, zoom=None, front_tex=None,
-               stand_bias=0):
-    """Ramp-index image: 0 transparent, 1..5 = door ramp index+1. Same
-    yaw/pitch/ortho/painter math as raycast_model_view."""
+               stand_bias=0, box_ramp=None):
+    """Ramp-index image: 0 transparent, values per the layout above. Same
+    yaw/pitch/ortho/painter math as raycast_model_view.
+
+    box_ramp is one slot per BOX, so a composite bakes each part into its own
+    ramp — the desk set is gray monitor, brown desk and charcoal console, and
+    a single-ramp bake has to paint two of those three wrong."""
     from PIL import Image, ImageDraw
     img = Image.new('L', (big, big), 0); d = ImageDraw.Draw(img)
     ZOOM = zoom if zoom else big*0.62
@@ -193,10 +213,16 @@ def render_idx(verts, tris, rotY, rotX, big=448, zoom=None, front_tex=None,
             # reorder to paint_face_tex's bl, tl, tr, br.
             paint_face_tex(img, [P[a], P[e], P[c], P[b]], front_tex)
             continue
-        r = max(0, min(4, (s-1)*5//7))
-        if t // 6 > 0:                 # 6 quads per box; box 0 keeps its tone
-            r = max(0, r - stand_bias)
-        d.polygon([P[a], P[b], P[c], P[e]], fill=r+1)
+        bi = t // 6                    # 6 quads per box
+        r = max(0, min(3, (s-1)*5//7))
+        slot = box_ramp[bi] if box_ramp else 0
+        if slot:
+            v = SLOT_EXTRA0 + (slot - 1) * 4 + r
+        else:
+            if bi > 0:                 # box 0 keeps its tone
+                r = max(0, r - stand_bias)
+            v = r + 1
+        d.polygon([P[a], P[b], P[c], P[e]], fill=v)
     return img
 
 
@@ -228,6 +254,14 @@ def main():
                          "step with the engine's textured near face. NOTE: the "
                          "engine x-mirrors half the circle, so an asymmetric "
                          "panel bakes mirrored on mirrored sectors.")
+    ap.add_argument("--box-ramp", default="",
+                    help="comma list, one RAMP SLOT per box, for COMPOSITE "
+                         "models that mix materials: 0 = the set's own ramp "
+                         "(values 1..4), 1.. = an extra slot (values 10+, four "
+                         "each) that dirset_t.vbase maps to a CRAM base in "
+                         "raycast.c. Must match the model's boxmodels[] "
+                         "box_base grouping. Desk set: 0,1,1,1,1,1,2,2 — gray "
+                         "monitor, brown desk, charcoal console.")
     ap.add_argument("--stand-bias", type=int, default=0,
                     help="shade steps subtracted from every box except box 0 "
                          "— must match the model's boxmodels[] stand_bias in "
@@ -241,6 +275,12 @@ def main():
                          "standee decode base+v lands on the same CRAM rows "
                          "as the dir decode ramp+(v-1). Needs --sprite.")
     args = ap.parse_args()
+    box_ramp = [int(v) for v in args.box_ramp.split(",")] if args.box_ramp else None
+    if box_ramp is not None:
+        nb = len(load_boxes(args.header, args.symbol))
+        if len(box_ramp) != nb:
+            sys.exit("--box-ramp has %d entries, %s has %d boxes"
+                     % (len(box_ramp), args.symbol, nb))
     # Pose provenance: pitch is DERIVED, not eyeballed, so every import bakes
     # the same way. The player's eye (STAND_EYE 128 = 0.5 cell) looks down at
     # the model's top by atan((eye - world_h) / 4) at the 4-cell LOD swap
@@ -294,7 +334,7 @@ def main():
     y0g, y1g = BIG, 0
     for yw, rw in zip(yaws, rend):
         im = render_idx(verts, tris, rw, pitch, BIG, zoom, front_tex=ftex,
-                        stand_bias=args.stand_bias)
+                        stand_bias=args.stand_bias, box_ramp=box_ramp)
         bb = im.getbbox()
         if bb is None:
             sys.exit("pose %d rendered empty" % yw)

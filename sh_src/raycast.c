@@ -264,6 +264,7 @@ uint8_t world_map[MAP_H][MAP_W];
 #include "chair_dir_tex.h"     /* directional billboard views baked from the box model */
 #include "desk_dir_tex.h"      /* same, for the imported desk (tools/bake_dir_sprites.py) */
 #include "pvm_dir_tex.h"       /* same, for the PVM monitor + stand */
+#include "deskset_dir_tex.h"   /* same, for the desk-with-PVM composite — MULTI-RAMP */
 #include "chair_shadow_tex.h"  /* plan-silhouette floor-shadow stencils, feet-anchored */
 
 
@@ -4008,6 +4009,17 @@ typedef struct {
     const uint8_t   *sect_v, *sect_view, *sect_mirror;
     uint16_t         nsect, h, wmax;
     uint16_t         vspan;   /* 8.8: image band height / model front height */
+    /* Optional EXTRA ramp bases for a COMPOSITE bake, NULL-terminated. A set
+     * baked from one material puts every texel on its own base (values 1..4)
+     * and needs none of this. A composite cannot: the desk set is a gray
+     * monitor on a brown desk carrying a charcoal console, and one ramp has
+     * to paint two of those three wrong. tools/bake_dir_sprites.py --box-ramp
+     * assigns each BOX a slot; slot 0 stays values 1..4 on .views' own base,
+     * and slot n>0 takes four values at 10+(n-1)*4, appended past the screen
+     * range so nothing already baked has to move. vbase[n-1] is that slot's
+     * CRAM base — the same numbers boxmodels[].box_base uses, kept here
+     * rather than in the bake because CRAM layout is the engine's business. */
+    const uint8_t   *vbase;
 } dirset_t;
 
 /* Sets baked before the shared-band bake crop each view to its own content,
@@ -4017,6 +4029,8 @@ typedef struct {
 #define CHAIR_DIR_VSPAN 256
 #endif
 
+/* Extra ramp bases for the desk set's slots 1 and 2, NULL-terminated. */
+static const uint8_t deskset_vbase[] = { CHAIR_BASE, SMS_RAMP_BASE, 0 };
 static const dirset_t dirsets[] = {
     { (const dirview_t *)chair_dir_views, chair_dir_sect_v, chair_dir_sect_view,
       chair_dir_sect_mirror, CHAIR_DIR_SECTORS, CHAIR_DIR_H, CHAIR_DIR_WMAX,
@@ -4026,10 +4040,22 @@ static const dirset_t dirsets[] = {
       DESK_DIR_VSPAN },
     { (const dirview_t *)pvm_dir_views,   pvm_dir_sect_v,   pvm_dir_sect_view,
       pvm_dir_sect_mirror,   PVM_DIR_SECTORS,   PVM_DIR_H,   PVM_DIR_WMAX,
-      PVM_DIR_VSPAN },
+      PVM_DIR_VSPAN, 0 },
+    /* The desk set. Slot 0 (values 1..4) is the monitor on PVM_RAMP_BASE, the
+     * set's own .base; slot 1 is the desk and slot 2 the console, matching
+     * desk_pvm_box_base exactly — the far LOD wears the same three materials
+     * the near geometry does, which is the whole point of baking it. */
+    { (const dirview_t *)deskset_dir_views, deskset_dir_sect_v,
+      deskset_dir_sect_view, deskset_dir_sect_mirror, DESKSET_DIR_SECTORS,
+      DESKSET_DIR_H, DESKSET_DIR_WMAX, DESKSET_DIR_VSPAN, deskset_vbase },
 };
+/* The composite is NOT reachable by kind — it shares PVM_ASSET_KIND with the
+ * floor-standing monitor, which is exactly why the desk set was drawing the
+ * stand's billboard at range. It is selected per standup instead, the same
+ * way boxmodel_for_standup picks its geometry. */
+#define DIRSET_DESKSET (DIRSET_COUNT - 1)
 static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND,
-                                       PVM_ASSET_KIND };
+                                       PVM_ASSET_KIND, 0xFF };
 #define DIRSET_COUNT (int)(sizeof dirsets / sizeof dirsets[0])
 
 /* Decode scratch is shared, so it must fit the WIDEST view of ANY set — the
@@ -4038,8 +4064,10 @@ static const uint8_t dirset_kind[] = { CHAIR_ASSET_KIND, DESK_ASSET_KIND,
 #define DIRSET_PV_A (CHAIR_DIR_WMAX * CHAIR_DIR_H)
 #define DIRSET_PV_B (DESK_DIR_WMAX  * DESK_DIR_H)
 #define DIRSET_PV_C (PVM_DIR_WMAX   * PVM_DIR_H)
+#define DIRSET_PV_D (DESKSET_DIR_WMAX * DESKSET_DIR_H)
 #define DIRSET_PV_AB (DIRSET_PV_A > DIRSET_PV_B ? DIRSET_PV_A : DIRSET_PV_B)
-#define DIRSET_PV_MAX (DIRSET_PV_AB > DIRSET_PV_C ? DIRSET_PV_AB : DIRSET_PV_C)
+#define DIRSET_PV_CD (DIRSET_PV_C > DIRSET_PV_D ? DIRSET_PV_C : DIRSET_PV_D)
+#define DIRSET_PV_MAX (DIRSET_PV_AB > DIRSET_PV_CD ? DIRSET_PV_AB : DIRSET_PV_CD)
 /* This scratch is .bss and RAM here is nearly full — the desk's first bake at
  * --height 56 made it 6,384 B and overflowed the ram region by 2,336. Re-baking
  * the set shorter is the fix (a wide, short object needs rows, not height), so
@@ -4052,6 +4080,14 @@ static const dirset_t *dirset_for_kind(int kind) {
     for (int i = 0; i < DIRSET_COUNT; i++)
         if (dirset_kind[i] == kind) return &dirsets[i];
     return 0;
+}
+/* Billboard set for a placed standup. Kind alone cannot answer this: the desk
+ * composite shares PVM_ASSET_KIND with the floor-standing monitor, so a
+ * kind lookup handed the desk set the STAND's billboard and it swapped to a
+ * monitor on legs at four cells. Mirrors boxmodel_for_standup. */
+static const dirset_t *dirset_for_standup(int i) {
+    if (standup_on_desk[i]) return &dirsets[DIRSET_DESKSET];
+    return dirset_for_kind(standups[i].kind);
 }
 
 /* ---- Box models -----------------------------------------------------
@@ -5252,6 +5288,19 @@ static void build_standup_vmap(int i, fx_t transformY, const dirset_t *fds,
      * of sets never blinks in unison. OFF: core goes dark glass, the rim
      * keeps its fogged albedo — the corner shading that reads as curved
      * glass. The caller's vmap must span 10 entries. */
+    /* MULTI-RAMP composite: each extra slot owns four texel values at
+     * 10+(s*4), fogged on its OWN base exactly like slot 0 above. Without
+     * this the desk and the console decode through the monitor's gray and
+     * the far LOD is a gray desk — the bake carries the materials, but only
+     * this turns them back into colours. */
+    if (fds && fds->vbase) {
+        for (int s = 0; fds->vbase[s]; s++)
+            for (int k = 0; k < 4; k++) {
+                int sh = k - fog;
+                if (sh < 0) sh = 0; else if (sh > 3) sh = 3;
+                vmap[10 + s * 4 + k] = (uint8_t)(fds->vbase[s] + sh);
+            }
+    }
     if (bmr && bmr->ftex) {
         if (standup_power[i]) {
             int sh = 1 + (((SHARED_UC->frame_count >> 1) + (unsigned)i) & 2);
@@ -5472,7 +5521,7 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * row, top spriteHeight above. */
         int spriteHeight, spriteWidth;
         int chair_view = -1, mirror = 0;
-        const dirset_t *fds = dirset_for_kind(standups[i].kind);
+        const dirset_t *fds = dirset_for_standup(i);
         if (fds) {
             /* DIRECTIONAL billboard: pick the baked view whose relative bearing
              * (chair->player direction vs the chair's facing) is nearest, so a
@@ -5636,7 +5685,8 @@ RAMTEXT static void draw_standups(int col_start, int col_end) {
          * CHAIR_SPRITE_KIND: the desk's bake encodes the same face-shade
          * values, and routing it through the standee path drew it bright tan
          * while its 3D pop-in wore fogged wood. */
-        uint8_t vmap[10];   /* texels 0..9: a screen-bearing bake emits 5..9 */
+        uint8_t vmap[18];   /* texels 0..9 as before; a MULTI-RAMP composite
+                             * bake adds slot values at 10..17 */
         build_standup_vmap(i, transformY, fds, sd, is_silhouette,
                            silhouette_color, is_front, back_color, vmap);
 
