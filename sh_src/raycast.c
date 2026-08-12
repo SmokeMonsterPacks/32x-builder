@@ -4057,8 +4057,8 @@ static const boxmodel_t *boxmodel_for_kind(int kind) {
 static const uint8_t desk_pvm_box_base[DESK_PVM_NBOXES] = {
     PVM_RAMP_BASE, CHAIR_BASE, CHAIR_BASE,
     CHAIR_BASE, CHAIR_BASE, CHAIR_BASE,
-    PVM_RAMP_BASE };                   /* the Master System: ONE wedge,   */
-                                       /* charcoal (was a 3-step ziggurat) */
+    PVM_RAMP_BASE, PVM_RAMP_BASE };    /* the Master System: body + sloped */
+                                       /* upper, charcoal. Both wedges.    */
 static const boxmodel_t desk_pvm_model = {
     desk_pvm_boxes, DESK_PVM_NBOXES, PVM_ASSET_KIND, PVM_RAMP_BASE,
     (const uint8_t *)pvm_front_tex, PVM_FRONT_TEX_W, PVM_FRONT_TEX_H, 2,
@@ -4087,9 +4087,10 @@ static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
     if (!bm) return;
     int x0 = 32767, x1 = -32768, z0 = 32767, z1 = -32768;
     for (int b = 0; b < bm->nboxes; b++) {
-        const cbox_t *q = &bm->boxes[b];
-        if (q->x0 < x0) x0 = q->x0;   if (q->x1 > x1) x1 = q->x1;
-        if (q->z0 < z0) z0 = q->z0;   if (q->z1 > z1) z1 = q->z1;
+        int16_t qlo[3], qhi[3];
+        cbox_bounds(&bm->boxes[b], qlo, qhi);   /* wedge top can overhang */
+        if (qlo[0] < x0) x0 = qlo[0];   if (qhi[0] > x1) x1 = qhi[0];
+        if (qlo[2] < z0) z0 = qlo[2];   if (qhi[2] > z1) z1 = qhi[2];
     }
     *hx = (fx_t)((((int32_t)(x1 - x0) / 2) * wh) >> 8);
     *hz = (fx_t)((((int32_t)(z1 - z0) / 2) * wh) >> 8);
@@ -4120,9 +4121,9 @@ static void boxmodel_footprint_bm(const boxmodel_t *bm, fx_t wh,
  *
  * e[] is the eye in model units (x, y=height above floor, z). */
 static int box_nearer(const cbox_t *mb, int ia, int ib, const int32_t *e) {
-    const cbox_t *A = &mb[ia], *B = &mb[ib];
-    const int16_t alo[3] = { A->x0, A->y0, A->z0 }, ahi[3] = { A->x1, A->y1, A->z1 };
-    const int16_t blo[3] = { B->x0, B->y0, B->z0 }, bhi[3] = { B->x1, B->y1, B->z1 };
+    int16_t alo[3], ahi[3], blo[3], bhi[3];
+    cbox_bounds(&mb[ia], alo, ahi);      /* union of base + wedge top rect */
+    cbox_bounds(&mb[ib], blo, bhi);
     for (int k = 0; k < 3; k++) {
         if (ahi[k] <= blo[k]) return (e[k] < (int32_t)ahi[k]) ?  1 : -1;
         if (bhi[k] <= alo[k]) return (e[k] < (int32_t)bhi[k]) ? -1 :  1;

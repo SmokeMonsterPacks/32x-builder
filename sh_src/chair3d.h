@@ -59,6 +59,24 @@ static inline void cbox_corner(const cbox_t *b, int v,
         *z = (v & 4) ? b->z1 : b->z0;
     }
 }
+
+/* True AABB of a box or wedge, as lo[3]/hi[3] in x,y,z.
+ *
+ * NOT just the six base fields. A wedge's top rectangle may be WIDER than its
+ * base — the Master System's lower body flares out slightly as it rises, which
+ * is what the model actually does — and then the base fields do not contain
+ * the solid. box_nearer's separating-axis test reads these as the bounds, so
+ * feeding it the base alone would let it report a gap that isn't there and
+ * return a CONFIDENTLY WRONG paint order, not a conservative one. The union of
+ * the two rectangles is the real bound in every case, flare or inset. */
+static inline void cbox_bounds(const cbox_t *b, int16_t *lo, int16_t *hi) {
+    lo[0] = b->x0; hi[0] = b->x1;
+    lo[1] = b->y0; hi[1] = b->y1;
+    lo[2] = b->z0; hi[2] = b->z1;
+    if (!b->taper) return;
+    if (b->tx0 < lo[0]) lo[0] = b->tx0;   if (b->tx1 > hi[0]) hi[0] = b->tx1;
+    if (b->tz0 < lo[2]) lo[2] = b->tz0;   if (b->tz1 > hi[2]) hi[2] = b->tz1;
+}
 /* NO box interpenetrates or spans past another's occlusion plane: the painter
  * sort keys on per-triangle centroid depth, and any triangle whose depth span
  * straddles a neighbour's can win the sort while losing the geometry (post

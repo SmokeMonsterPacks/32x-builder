@@ -15,9 +15,15 @@ item (one variant mechanism, designed once).
 The Master System console beside it is a single WEDGE (cbox_t.taper), not
 the 3-step ziggurat it shipped as — see the comment at console_boxes.
 """
+import os
 import pathlib
+import sys
 
-T = 0.775                       # desk-unit -> final-unit (0.31 / 0.4)
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from fit_wedges import fit_wedges
+
+T = 0.775                      # desk-unit -> final-unit (0.31 / 0.4)
 DESK = [(-252, 0, -112, -98, 243, 119),
         (120, 0, -124, 260, 243, 119),
         (-277, 243, -124, 273, 256, 119)]
@@ -46,24 +52,39 @@ slab_parts = [(sx0, sy0, sz0, m_x0, sy1, sz1),
               (m_x0, sy0, sz0, m_x1, sy1, sz1),
               (m_x1, sy0, sz0, sx1, sy1, sz1)]
 desk_f = desk_f[:2] + slab_parts
-# THE CONSOLE: the Master System is a flat-bottomed TRAPEZOID (Mike's
-# render) — a sloped shell that greedy AABB baking turns into a lumpy
-# staircase. It was authored as a 3-step ziggurat until the format grew a
-# WEDGE (cbox_t.taper — a second, inset TOP rectangle), so it is now ONE
-# box at the bake's true scaled dims (120 x 38 x 33 desk units): flat
-# base, flat top, four trapezoid sides, no steps.
+# THE CONSOLE: the Master System is a flat-bottomed TRAPEZOID — a sloped
+# shell that greedy AABB baking turns into a lumpy staircase. It shipped as
+# a hand-typed 3-step ziggurat, then as a hand-typed single wedge, and both
+# were guesses: 120 x 38 x 33 is 3.6 : 1 : 1.2, where the real console is
+# 5.2 : 1 : 2.5. Now it comes from the MODEL, via tools/fit_wedges.py.
 #
-# Cycle safety is unchanged by construction: the wedge's base AABB is
-# exactly the old base step's, so every relationship it has with the desk
-# and the monitor is the one the shipping 3-step version already had. The
-# three step-to-step Y-verdicts simply disappear.
-CON_CX = 90
-CON_HW, CON_HD, CON_H = 60, 19, 33         # base half-width, half-depth, height
-CON_TW, CON_TD = 44, 10                    # top half-width, half-depth
-console_boxes = [
-    (CON_CX - CON_HW, desk_top, -CON_HD, CON_CX + CON_HW, desk_top + CON_H, CON_HD,
-     CON_CX - CON_TW, -CON_TD, CON_CX + CON_TW, CON_TD, 1),
-]
+# Two bands is the fit. Band 0 returns near-vertical (the console body),
+# band 1 carries the taper up to the flat top — which is asymmetric in z,
+# so the top rectangle is NOT centred over the base. That asymmetry is the
+# whole reason the wedge carries four independent top coordinates.
+#
+# SCALE is true-size off the desk, not eyeballed. The desktop is 198 final
+# units above the floor and an office desk is 730 mm, so one final unit is
+# 730/198 = 3.69 mm. The Master System mk1 is 365 mm wide -> 99 units.
+FIT = fit_wedges(os.path.join(REPO, "models", "sega_master_system.glb"),
+                 bands=2, material="SEGA_MS_Black")
+fit_boxes, fit_w, _fit_d = FIT
+MM_PER_UNIT = 730.0 / 198.0
+CON_W = 365.0 / MM_PER_UNIT            # console width in final units (~99)
+CON_S = CON_W / fit_w                  # normalized-model -> final units
+CON_CX = 90                            # placement on the desktop, off-centre
+
+def _place(b):
+    """Normalized wedge (height 1.0, centred on its own footprint) -> final
+    units on the desktop. y0 = 0 lands on desk_top, so the console sits ON
+    the desk rather than intersecting it."""
+    def px(v): return round(CON_CX + v * CON_S)
+    def py(v): return round(desk_top + v * CON_S)
+    def pz(v): return round(v * CON_S)
+    return (px(b[0]), py(b[1]), pz(b[2]), px(b[3]), py(b[4]), pz(b[5]),
+            px(b[6]), pz(b[7]), px(b[8]), pz(b[9]), b[10])
+
+console_boxes = [_place(b) for b in fit_boxes]
 boxes = [mon_f] + desk_f + console_boxes   # MONITOR FIRST: ftex binds to box 0
 # Six-value tuples are plain boxes; the initialiser zero-fills the wedge
 # fields, which is exactly taper = 0.
