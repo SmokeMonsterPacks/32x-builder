@@ -92,6 +92,15 @@ const uint8_t ym_hum_patch[][2] = {
 static const uint8_t ym_bed_tl_reg[4]  = { 0x41, 0x45, 0x49, 0x4D };
 static const uint8_t ym_bed_tl_base[4] = { 0x20, 0x2C, 0x18, 0x32 };  /* +6dB 2026-08-10 */
 volatile int g_ym_tl_dirty = 0;   /* menu sets on AMBIENCE change */
+/* ULTRA diagnosis (HUD "U:XXXX/NN" next to A:). XXXX = which arm gate said
+ * no THIS frame (0000 = armed), NN = parks entered since boot. A frozen
+ * 0000 with NN stuck at 00 means the gates pass but the park never runs;
+ * any set bit names the refusing gate directly. */
+volatile uint16_t g_ultra_gate  = 0xFFFF;
+volatile uint16_t g_ultra_parks = 0;
+/* Words the merge actually rewrote (capped 9999). Zero after a park means
+ * pass B rendered identical to pass A — the jitter did nothing. */
+volatile uint16_t g_ultra_diff  = 0;
 /* 0 = idle; 1..N = next patch index+1. STARTS AT 1: the YM hum is the
  * shipping ambience (the 437KB PWM buzz bake is deleted) — the game
  * loop drips the patch in over its first ~70 frames, the fluorescent
@@ -762,6 +771,20 @@ static void pos_draw(uint8_t *fb) {
 
     HwMdPuts(line1, HUD_TILE_COLOR, 0, 0);   /* X/Y, top-left, GENESIS layer */
     HwMdPuts(line2, HUD_TILE_COLOR, 0, 2);   /* A, GENESIS layer */
+    /* "U:XXXX P:NN D:NNNN" — ULTRA arm gate / parks entered / words the
+     * merge rewrote. Same row, right of A:. */
+    {
+        char u[20];
+        u[0]='U'; u[1]=':'; pad_hex4(u+2, g_ultra_gate);
+        u[6]=' '; u[7]='P'; u[8]=':';
+        uint16_t p = g_ultra_parks;
+        u[10]=(char)('0'+p%10); p/=10; u[9]=(char)('0'+p%10);
+        u[11]=' '; u[12]='D'; u[13]=':';
+        uint16_t dv = g_ultra_diff;
+        for (int i = 17; i >= 14; i--) { u[i]=(char)('0'+dv%10); dv/=10; }
+        u[18]=0;
+        HwMdPuts(u, HUD_TILE_COLOR, 7, 2);
+    }
 }
 
 void swapBuffers(void) {
@@ -2293,16 +2316,27 @@ int m_main(void) {
         #define ULTRA_DWELL_FRAMES 2
         {
             static uint16_t ultra_dwell = 0;
-            int ultra_ok = SHARED_UC->ultra_enable
-                && (pad & ~SEGA_CTRL_TYPE) == 0
-                && !SHARED_UC->is_walking && !SHARED_UC->is_turning
-                && !menu_is_active()
-                && g_pullup == 0 && g_crawl == 0
-                && !g_smsboot_frames && g_warp_request < 0
-                && g_ym_upload == 0 && !g_ym_tl_dirty
-                && !SHARED_UC->hero_dying          /* death anim owns the frame pacing */
-                && SHARED_UC->wall_halfres == 0
-                && SHARED_UC->wall_dissolve == 0;  /* focus-pull frame settled */
+            /* One bit per gate, published to the HUD — a silent decline is
+             * indistinguishable from a merge that changed nothing. */
+            uint16_t gate = 0;
+            if (!SHARED_UC->ultra_enable)        gate |= 0x0001;
+            if ((pad & ~SEGA_CTRL_TYPE) != 0)    gate |= 0x0002;
+            if (SHARED_UC->is_walking)           gate |= 0x0004;
+            if (SHARED_UC->is_turning)           gate |= 0x0008;
+            if (menu_is_active())                gate |= 0x0010;
+            if (g_pullup || g_crawl)             gate |= 0x0020;
+            if (g_smsboot_frames || g_warp_request >= 0) gate |= 0x0040;
+            if (g_ym_upload != 0 || g_ym_tl_dirty)       gate |= 0x0080;
+            /* hero_dying is LATCHED, not transient: it pins at 255 for as long
+             * as a felled neanderthal lies in the level, so gating on nonzero
+             * disabled ULTRA for the whole map after one topple. Only the RAMP
+             * needs the frame pacing (it advances per rendered frame and the
+             * mixer warps the hello off it); once it tops out, parking is fine. */
+            if (SHARED_UC->hero_dying && SHARED_UC->hero_dying < 255) gate |= 0x0100;
+            if (SHARED_UC->wall_halfres != 0)    gate |= 0x0200;
+            if (SHARED_UC->wall_dissolve != 0)   gate |= 0x0400;
+            g_ultra_gate = gate;
+            int ultra_ok = (gate == 0);
             if (!ultra_ok) ultra_dwell = 0;
             else if (ultra_dwell <= ULTRA_DWELL_FRAMES) {
                 if (ultra_dwell++ == ULTRA_DWELL_FRAMES) {
@@ -2317,6 +2351,7 @@ int m_main(void) {
                      * on the spatial checkerboard, which the CRT fuses the
                      * same way the flip was supposed to — statically. The
                      * park holds one motionless frame; nothing can shimmer. */
+                    g_ultra_parks++;
                     SHARED_UC->ultra_twin = 1;   /* pass A: frozen state, no jitter */
                     raycast_render();
                     uint8_t *fbu = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
@@ -2343,16 +2378,18 @@ int m_main(void) {
                     {
                         const uint16_t *upa = (const uint16_t *)ua_dst;
                         uint16_t *upb = (uint16_t *)fbu;
-                        int i = 0;
+                        int i = 0, nd = 0;
                         for (int y = 0; y < SCREEN_H; y++) {
                             int a_hi = y & 1;
                             for (int x = 0; x < SCREEN_W / 2; x++, i++) {
                                 uint16_t a = upa[i], b = upb[i];
                                 if (a == b) continue;
+                                nd++;
                                 upb[i] = a_hi ? (uint16_t)((a & 0xFF00) | (b & 0x00FF))
                                               : (uint16_t)((b & 0xFF00) | (a & 0x00FF));
                             }
                         }
+                        g_ultra_diff = (uint16_t)(nd > 9999 ? 9999 : nd);
                     }
                     /* Overlays once, on the merged frame — crisp, no drift. */
                     if (g_automap_on) automap_draw(fbu);
