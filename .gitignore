@@ -66,3 +66,6 @@ sound/Voyager_*.wav
 sound/Voyager_*.aiff
 # host-side bake tool binary (build from tools/speex_bake.c)
 tools/speex_bake
+# Claude Code: skills are shared, per-machine permissions are not. Only Mike's
+# global gitignore was covering this, which does nothing for a fresh clone.
+.claude/settings.local.json
