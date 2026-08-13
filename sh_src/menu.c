@@ -60,7 +60,7 @@ void    m_main_automap_zoom(int dir);
 #define AUDIO_CONTENT_ROWS    5   /* AMBIENCE, FOOTSTEPS, BUFFER, VOICE, HELLO */
 #define LIGHTING_CONTENT_ROWS 3   /* FLICKER, STROBES, SHIMMER */
 #define VISUALS_CONTENT_ROWS  6   /* WALLS, ADAPTIVE, METRICS, SHADOWS, SEAMS, DITHER */
-#define TESTING_CONTENT_ROWS 10   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, ULTRA, SMSBOOT, SMSGAME */
+#define TESTING_CONTENT_ROWS 14   /* SERIAL, VERT, BULKHEAD, CARPETLOD, HOLEJAMB, AUTOQTR, UNLITF, ULTRA, SPIN, IDLE, 68K, SMS32X, SMSBOOT, SMSGAME */
 #define COLOR_CONTENT_ROWS    6   /* SURFACE, R, G, B, WARMTH, SAT */
 #define CREDITS_CONTENT_ROWS  0   /* read-only display, no selection cursor */
 #define CREDITS_DRAWN_ROWS    4   /* MAP / BY / BUILD / DATE lines it paints */
@@ -88,12 +88,13 @@ static int res_cat_of(int m) {
  * screen, wide enough for the "LIGHTING |CREDITS|" tab row and tall
  * enough for the LIGHTING tab's three toggle rows. */
 #define MENU_W_PX      176
-#define MENU_H_PX      144   /* 9 content rows (TESTING grew again: SMSGAME) +
+#define MENU_H_PX      160   /* 13 content rows (TESTING grew again: the BUS trio) +
                               * footer. MUST be a multiple of 16 so MENU_Y stays
                               * 8-aligned — else the tile-layer text and the
                               * pixel-drawn highlight bar diverge 4px. Was 112/6
                               * rows; SMSBOOT overflowed into the footer's row
-                              * (Mike's screenshot, 2026-08-09), then 128/8. */
+                              * (Mike's screenshot, 2026-08-09), then 128/8,
+                              * then 144/10. The hint row moves with it. */
 #define MENU_X        ((SCREEN_W - MENU_W_PX) / 2)
 #define MENU_Y        ((SCREEN_H - MENU_H_PX) / 2)
 
@@ -212,12 +213,12 @@ void menu_update(uint16_t pad) {
     }
 
     /* COLOR tab: A resets the whole palette to the shipped defaults. */
-    if (menu_tab == TAB_TESTING && menu_row >= 9 && (pressed & SEGA_CTRL_A)) {
+    if (menu_tab == TAB_TESTING && menu_row >= 13 && (pressed & SEGA_CTRL_A)) {
         /* SMSBOOT/SMSGAME are ACTIONS, not toggles — they must fire on A
          * like the GAME/MAPS rows do. (They also fire on LEFT/RIGHT via the
          * dispatch below, but nobody's thumb believes that for a GO row.) */
-        if (menu_row == 9) g_sms_request = 1;
-        else               g_smsgame_request = 1;
+        if (menu_row == 13) g_sms_request = 1;
+        else                g_smsgame_request = 1;
         menu_active = 0;
         menu_genesis_blank();
         return;
@@ -326,12 +327,22 @@ void menu_update(uint16_t pad) {
         else if (menu_row == 6) SHARED_UC->auto_qtr ^= 1;    /* AUTO motion-gated quarter rung A/B */
         else if (menu_row == 7) SHARED_UC->unlit_kill ^= 1;  /* unlit-floor zone fills A/B (R:) */
         else if (menu_row == 8) SHARED_UC->ultra_enable ^= 1; /* rest-pair 60Hz flip A/B */
-        else if (menu_row == 9) {                            /* the spike */
+        else if (menu_row == 9)  SHARED_UC->bus_spin ^= 1;   /* -> SW */
+        else if (menu_row == 10) SHARED_UC->bus_idle ^= 1;   /* -> H/S */
+        else if (menu_row == 11) {                           /* -> HU */
+            SHARED_UC->bus_68k ^= 1;
+            /* The 68K arm has to be TOLD — it polls COMM0 out of its own RAM
+             * and never sees shared memory. Sent on the toggle, not per frame:
+             * it is a mode, and every send blocks on the COMM0 handshake. */
+            HwMdSetBusThrottle((int)SHARED_UC->bus_68k);
+        }
+        else if (menu_row == 12) SHARED_UC->sms_on_32x ^= 1; /* SH-2 draws the SMS */
+        else if (menu_row == 13) {                           /* the spike */
             g_sms_request = 1;
             menu_active = 0;
             menu_genesis_blank();
         }
-        else if (menu_row == 10) {                           /* the mini-game */
+        else if (menu_row == 14) {                           /* the mini-game */
             g_smsgame_request = 1;
             menu_active = 0;
             menu_genesis_blank();
@@ -525,8 +536,12 @@ void menu_render(uint8_t *fb) {
         draw_row(fb, 72, menu_row == 6, "AUTOQTR", SHARED_UC->auto_qtr ? " ON" : "OFF");
         draw_row(fb, 80, menu_row == 7, "UNLITF", SHARED_UC->unlit_kill ? "OFF" : " ON");
         draw_row(fb, 88, menu_row == 8, "ULTRA", SHARED_UC->ultra_enable ? " ON" : "OFF");
-        draw_row(fb, 96, menu_row == 9, "SMSBOOT", "GO");
-        draw_row(fb, 104, menu_row == 10, "SMSGAME", "GO");
+        draw_row(fb, 96,  menu_row == 9,  "SPIN", SHARED_UC->bus_spin ? " ON" : "OFF");
+        draw_row(fb, 104, menu_row == 10, "IDLE", SHARED_UC->bus_idle ? " ON" : "OFF");
+        draw_row(fb, 112, menu_row == 11, "68K",  SHARED_UC->bus_68k  ? " ON" : "OFF");
+        draw_row(fb, 120, menu_row == 12, "SMS32X", SHARED_UC->sms_on_32x ? " ON" : "OFF");
+        draw_row(fb, 128, menu_row == 13, "SMSBOOT", "GO");
+        draw_row(fb, 136, menu_row == 14, "SMSGAME", "GO");
     } else if (menu_tab == TAB_COLOR) {
         char v[6];
         draw_row(fb, 32, menu_row == 1, "SURFACE", pal_surf_names[pal_sel]);
@@ -593,11 +608,11 @@ void menu_render(uint8_t *fb) {
     for (int r = used + 1; r <= TESTING_CONTENT_ROWS; r++)
         menu_puts_pad(TX(X + 8), 32 + (r - 1) * 8, "", 20);
 
-    /* Hint row below all content (box is 144px, 9 rows). */
+    /* Hint row below all content (box is 160px, 13 rows). */
     const char *hint = "START TO CLOSE";
     if      (menu_tab == TAB_GAME)  hint = "A=SELECT START=CLOSE";
     else if (menu_tab == TAB_MAPS)  hint = "A=GO  START=CLOSE";
     else if (menu_tab == TAB_COLOR) hint = "A=RESET  START=CLOSE";
     else if (menu_tab == TAB_TESTING) hint = "A=RUN  START=CLOSE";
-    menu_puts_pad(TX(X + 8), 112, hint, 20);
+    menu_puts_pad(TX(X + 8), 144, hint, 20);
 }

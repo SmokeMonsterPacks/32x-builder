@@ -47,6 +47,31 @@ static uint8_t sms_game_tiles[Z80_GAME_TILEBUF_LEN];
 // slots into 48 — the whole picture crosses in a couple of frames instead
 // of tens, on a channel where every sample is a race we might lose.
 #define SMS_GLASS_WORDS (Z80_GAME_TILEBUF_LEN / 16)   /* 768 cells -> 48 words */
+// FULLSCREEN-ON-32X (command 21). The modal mini-game's picture has always
+// reached the screen as MD plane-B tiles composited over a black 32X frame.
+// This mode sends the RAW TILE IDS to the SH-2 instead, which renders them with
+// its own 8x8 font -- the same font those ids index, per sms/DESIGN.md -- so the
+// picture becomes 32X framebuffer pixels. That matters beyond fullscreen: the
+// zoom-into-the-glass transition needs its source and its destination to be the
+// SAME renderer, or the arrival is a cut.
+//
+// Payload is 2 ids per word (768 cells -> 384 slots), not the glass path's
+// 1-bit occupancy: at 8x8 per cell there is room for a glyph, and at the tube's
+// measured 1.06 texels per cell there is not. Same free-running index+word
+// rotation, same no-handshake rule.
+#define SMS_TILE_WORDS (Z80_GAME_TILEBUF_LEN / 2)   /* 768 ids -> 384 words */
+/* 1: every do_commands call sends a slot. History: /8 starved the reader
+ * (partial pictures, title bleeding through) and didn't fix the PSG clipping
+ * it was aimed at; /2 was the compromise while partial paints were still
+ * possible. The reader now promotes whole pictures only, so the divider buys
+ * no correctness -- it only stretches the rotation, and the rotation period
+ * IS the input-to-photon delay the fullscreen game plays under (Mike felt
+ * it). Full rate halves that. If the PSG loses note-offs again, THIS is the
+ * knob that moved (sysreg pressure on the vblank poll). */
+#define SMS_TILE_DIV   1      /* broadcast one slot per N do_commands (pow2) */
+static uint16_t sms_tile_div = 0;
+static uint8_t  sms_tile_bcast = 0;
+static uint16_t sms_tile_rot = 0;
 static uint8_t  sms_glass_on = 0;
 static uint16_t sms_glass_rot = 0;
 static uint16_t sms_glass_bits[SMS_GLASS_WORDS];
@@ -64,22 +89,115 @@ void vdp_color(uint16_t index, uint16_t color) {
 	*vdp_data_port = color;
 }
 
+// BUS A/B (TESTING>BUS on the 32X side; command 19 sets the flag). The main
+// loop calls do_commands() as fast as a 7.67MHz 68K can spin, so *mars_comm0 --
+// a 32X sysreg reached across the cart side -- is read every few microseconds,
+// forever, against two SH-2s using the same bus. This is the only actor in the
+// system whose poll rate nobody had throttled; both SH-2 sides got explicit
+// throttles years apart (s_main.c's idle loop, raycast.c's barrier waits) and
+// each time the symptom was the OTHER cpu starving.
+//
+// It CANNOT be a blind divider. Every sender in mars.c blocks on
+// `while(MARS_SYS_COMM0)`, and HUD text is one command per tile, so a 1-in-N
+// poll would just move the cost onto the primary and read as a loss.
+// Adaptive backoff instead: the skip count grows by one per consecutive EMPTY
+// poll up to BUS_POLL_GAP_MAX and collapses to zero the instant a command
+// lands. An idle 68K settles at 1-in-16; a burst pays at most 15 loop
+// iterations of latency ONCE, then runs at full rate for its whole length.
+//
+// The glass broadcast below stays outside this backoff on purpose: rationing it
+// against COMM0 traffic would only desync the picture, and a glass session lives
+// all of 8 frames with the tube filling your view, so there is nothing to save.
+// Plain statics, NOT section(".data") like the functions above: that attribute
+// exists to drag CODE off the cart and into 68K RAM, and marking data with it
+// makes gcc reject the section as both executable and not ("section type
+// conflict with sms_game_frame"). Ordinary globals already live in RAM here.
+#define BUS_POLL_GAP_MAX 15
+static uint16_t bus_throttle = 0;   // set by command 19
+static uint16_t poll_gap = 0;       // current backoff, 0..BUS_POLL_GAP_MAX
+static uint16_t poll_skip = 0;      // iterations still to skip
+
 __attribute__((section(".data")))
 void do_commands(void) {
 	if (sms_glass_on) {                 // the glass broadcast rides every call
+		// SEQLOCK, same as the tile branch below: invalidate the index
+		// BEFORE moving the data, or the reader's check-read-recheck sees
+		// a stale-valid index paired with the next slot's bits — on the
+		// tube that race ate cells and read as extra "convergence tearing".
 		uint16_t i = sms_glass_rot;
+		*mars_comm10 = 0xFFFF;          // reader rejects: >= GLASS_WORDS
 		*mars_comm6  = sms_glass_bits[i];
-		*mars_comm10 = i;
+		*mars_comm10 = i;               // now publish
 		sms_glass_rot = (uint16_t)((i + 1 >= SMS_GLASS_WORDS) ? 0 : i + 1);
+	} else if (sms_tile_bcast && ((++sms_tile_div & (SMS_TILE_DIV - 1)) == 0)) {
+		// RATE-LIMITED. do_commands runs thousands of times a frame, so one
+		// slot per call crossed the 384-slot picture many times over -- and
+		// each crossing costs three 68K writes to 32X sysregs, which are slow
+		// cart-side accesses. That matters because this function IS the vblank
+		// poll: coarsen it enough and the 68K starts missing the flag
+		// transitions, sms_game_frame fires at an erratic rate, FRAME_MBX
+		// ticks wrong, and the Z80's PSG engine -- a phrase+echo with a
+		// 21-frame delay, sms/DESIGN.md 4a -- loses its note-offs. A held note
+		// is what a stuck PSG sounds like.
+		//
+		// One slot every SMS_TILE_DIV calls still crosses the whole picture
+		// several times per frame, which is all the reader needs: the picture
+		// only changes when the Z80 sets DIRTY, at most once a frame.
+		//
+		// SEQLOCK, not just a paired write. The reader checks the index,
+		// reads the data, then re-checks the index -- which is only sound if
+		// the index goes INVALID before the data moves. Publishing data-then-
+		// index leaves a window where the index still reads valid and comm6
+		// has already advanced, so slot i silently takes slot i+1's cells: a
+		// 2-cell left shift through the whole picture. Invalidate first.
+		uint16_t i = sms_tile_rot;
+		const uint8_t *t = &sms_game_tiles[i * 2u];
+		*mars_comm10 = 0xFFFF;          // reader rejects: >= SMS_TILE_WORDS
+		*mars_comm6  = (uint16_t)((uint16_t)t[0] | ((uint16_t)t[1] << 8));
+		*mars_comm10 = i;               // now publish
+		sms_tile_rot = (uint16_t)((i + 1 >= SMS_TILE_WORDS) ? 0 : i + 1);
 	}
+	if (bus_throttle && poll_skip) { poll_skip--; return; }
 	uint16_t cmd = *mars_comm0;
+	if (bus_throttle) {
+		if (cmd) {
+			poll_gap = 0;               // burst: full rate until it goes quiet
+		} else {
+			if (poll_gap < BUS_POLL_GAP_MAX) poll_gap++;
+			poll_skip = poll_gap;
+		}
+	}
 	switch(cmd >> 8) {
 	default: break; // Unknown command
 	case 0: return; // No command
 	case 3:
 		*mars_comm8 = read_joypad(cmd);
 		break;
-	case 4:
+	case 4: { // CLEAR SCREEN: sweep all of Name Table B. This case was EMPTY
+		// from the day it was stubbed — HwMdClearScreen round-tripped to a
+		// no-op, which never mattered until SMS32X needed plane B actually
+		// empty (the glass handoff paints the attract card there, and with
+		// the blit disarmed nothing ever overwrote it: the frozen white
+		// title over the framebuffer picture). Name-table writes only —
+		// the font in VRAM is never touched (grey-menus law).
+		for (uint16_t row = 0; row < 28; row++) {
+			uint32_t ofs = (row * 64u * 2u) + 0xE000;
+			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
+			               | ((ofs >> 14) | 0x03);
+			for (uint16_t i = 0; i < 40; i++)
+				*vdp_data_port = 0;
+		}
+		break;
+	}
+	case 21: // FULLSCREEN-ON-32X: 1 = broadcast tile ids, 0 = blit to plane B.
+		sms_tile_bcast = (cmd & 0xFF) ? 1 : 0;
+		sms_tile_rot = 0;
+		sms_tile_div = 0;
+		break;
+	case 19: // BUS A/B: arm/disarm the idle COMM0 poll backoff (cmd low byte).
+		bus_throttle = (uint16_t)(cmd & 0xFF);
+		poll_gap = 0;                // both directions start at full rate
+		poll_skip = 0;
 		break;
 	case 5: // Set VRAM or Plane offset
 		vramOffset = *mars_comm2;
@@ -393,6 +511,16 @@ void do_commands(void) {
 		// sitting on the attract card it changes nothing — without this
 		// the fullscreen would open black), then flip the flags so the
 		// next frame feeds the real pad.
+		//
+		// SMS32X armed: skip the sweep AND the bridge paint. The SH-2 is
+		// keeping its last world frame up as the bridge and will clear
+		// plane B itself — painting the attract card here would flash
+		// white MD text over that frame for the frames until the clear.
+		if (sms_tile_bcast) {
+			sms_glass_on = 0;
+			sms_game_on  = 1;
+			break;
+		}
 		for (uint16_t row = 0; row < 28; row++) {
 			uint32_t ofs = (row * 64u * 2u) + 0xE000;
 			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
@@ -489,7 +617,7 @@ static void sms_game_frame(uint8_t modal) {
 			sms_glass_bits[w] = bits;
 		}
 	}
-	if (dirty && modal) {
+	if (dirty && modal && !sms_tile_bcast) {
 		const uint8_t *t = sms_game_tiles;
 		for (uint16_t row = 0; row < Z80_GAME_TILEBUF_ROWS; row++) {
 			uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
@@ -523,6 +651,18 @@ uint16_t pad_sticky(uint8_t n, uint16_t p) {
 
 __attribute__((section(".data")))
 void main(void) {
+	// PARK THE PSG. The SN76489 comes up with its four channels in an
+	// undefined state, and until the Z80 work landed nothing in this program
+	// ever touched the chip -- the only writes in the file are inside the SMS
+	// boot/stop commands, which a player may never reach. So it sang from
+	// power-on and nothing ever silenced it. Attenuation 15 on all four
+	// channels, once, before anything else runs. This is also the teardown
+	// rule from sms/DESIGN.md 4a applied where it was missing: at startup,
+	// not just at teardown.
+	{
+		volatile uint8_t *psg = (uint8_t *)0xC00011;
+		*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
+	}
 	// Backdrop/border stays BLACK. The marsdev demo's grey color-cycle
 	// lived here for the project's whole life: Ares crops the overscan so
 	// nobody saw it, but a CRT shows the border pulsing grey at full
@@ -545,7 +685,7 @@ void main(void) {
 		// the bridge under render contention. P2 is published for free; no
 		// gameplay reads COMM10 yet.
 		*mars_comm8  = pad_sticky(0, read_joypad(0));
-		if (!sms_glass_on)                 // glass borrows COMM10 (pair index)
+		if (!sms_glass_on && !sms_tile_bcast)   // both broadcasts borrow COMM10
 			*mars_comm10 = pad_sticky(1, read_joypad(1));
 		*mars_comm12 = ++timer;
 		if (sms_game_on)       sms_game_frame(1);

@@ -171,6 +171,8 @@ extern void HwMdClearScreen(void);
 extern void HwMdSetColor(unsigned short index, unsigned short color);
 extern void HwMdYmWrite(unsigned char reg, unsigned char val);   /* YM2612 part I */
 extern void HwMdYmCmd(unsigned char op);   /* hum: 0 off, 1 on, 2 sting, 3 release */
+extern void HwMdSetBusThrottle(int on);   /* BUS A/B: 68K COMM0 poll backoff */
+extern void HwMdSetSmsTileBcast(int on);  /* fullscreen SMS on the 32X FB */
 extern void HwMdSmsBoot(void);
 extern void HwMdSmsStop(void);
 extern void HwMdSmsGameMap(const unsigned char *packed);   /* 148B level patch */

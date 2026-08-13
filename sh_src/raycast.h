@@ -112,6 +112,7 @@ void raycast_init(void);
 #define RAYCAST_PEEK_CLAIM 6144
 void raycast_set_brightness(int lvl);
 void raycast_backdrop_wall(int on);   /* CRAM 0: tuned wall yellow / back to black */
+void raycast_paint_wallpaper_index(int idx, int scale256);  /* wall yellow, any entry, dimmable */
 void raycast_paint_chair_ramp(void);   /* chair CRAM entries, full bright */
 
 /* Live-tunable palette (COLOR menu tab). flush() repaints in vblank when dirty;

@@ -3,6 +3,7 @@
 #include "raycast.h"
 #include "sin_table.h"   /* COS_FX/SIN_FX for the automap player arrow */
 #include "font.h"
+#include "sms_font.h"    /* generated from md_src/font.s — index IS the tile id */
 #include "version.h"
 #include "shared.h"
 #include "procgen.h"
@@ -787,6 +788,27 @@ static void pos_draw(uint8_t *fb) {
     }
 }
 
+/* BUS A/B (TESTING>BUS, shared.h). raycast.c's CMD_HALF/CMD_TAIL barrier waits
+ * have carried a 16-nop throttle since the 68K-bridge starvation fix — bare
+ * polling at ~5M reads/sec was landing on the 68K's joypad window often enough
+ * to drop COMM8 updates. The waits below never got the same treatment, and they
+ * are the LONGEST in the frame: swapBuffers parks on MARS_VDP_FBCTL for up to a
+ * full vblank at low fps, hammering a 32X VDP register the whole time, while
+ * the secondary is next door doing its audio work out of the same silicon.
+ *
+ * The flag is hoisted to a register BEFORE the loop on purpose: reading
+ * SHARED_UC (uncached) inside the spin would be the very traffic being removed. */
+#define BUS_PAUSE16()                                        \
+    __asm__ __volatile__("nop\n\tnop\n\tnop\n\tnop\n\t"      \
+                         "nop\n\tnop\n\tnop\n\tnop\n\t"      \
+                         "nop\n\tnop\n\tnop\n\tnop\n\t"      \
+                         "nop\n\tnop\n\tnop\n\tnop")
+#define BUS_WAIT(cond)                                       \
+    do {                                                     \
+        int _thr = (int)SHARED_UC->bus_spin;                 \
+        while (cond) { if (_thr) BUS_PAUSE16(); }            \
+    } while (0)
+
 void swapBuffers(void) {
     /* Advertise both bus-free waits to the secondary's Speex decoder
      * (amb_audio_idle): each poll below reads only a sysreg, so the
@@ -797,14 +819,14 @@ void swapBuffers(void) {
      * the tick long ago). Flag dropped around shimmer/pal work in
      * between: those touch the framebuffer and CRAM. */
     SHARED_UC->primary_vwait = 1;
-    while (lastTick == MARS_SYS_COMM12);
+    BUS_WAIT(lastTick == MARS_SYS_COMM12);
     SHARED_UC->primary_vwait = 0;
     /* In vblank now — safe palette-write window. */
     raycast_shimmer();
     raycast_pal_flush();     /* live COLOR-tab palette edits, repaint when dirty */
     MARS_VDP_FBCTL = currentFB ^ 1;
     SHARED_UC->primary_vwait = 1;
-    while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+    BUS_WAIT((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
     SHARED_UC->primary_vwait = 0;
     currentFB ^= 1;
     lastTick = MARS_SYS_COMM12;
@@ -816,7 +838,7 @@ void swapBuffers(void) {
 static void fade_step(int lvl) {
     SHARED_UC->frame_count++;
     raycast_render();
-    while (lastTick == MARS_SYS_COMM12);
+    BUS_WAIT(lastTick == MARS_SYS_COMM12);
     raycast_set_brightness(lvl);
     /* The MD layer fades WITH the 32X. raycast_set_brightness only reaches
      * 32X CRAM; the HUD red, the boot green and the text grey live in MD
@@ -832,7 +854,7 @@ static void fade_step(int lvl) {
         HwMdSetColor(1,  (unsigned short)((c << 8) | (c << 4) | c));
     }
     MARS_VDP_FBCTL = currentFB ^ 1;
-    while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+    BUS_WAIT((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
     currentFB ^= 1;
     lastTick = MARS_SYS_COMM12;
 }
@@ -1095,7 +1117,7 @@ static void sms_boot_screen(void) {
         }
         fb[12 * SCREEN_W + 8 + (beats & 127)] = 49;   /* walking heartbeat */
         MARS_VDP_FBCTL = currentFB ^ 1;
-        while ((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
+        BUS_WAIT((MARS_VDP_FBCTL & MARS_VDP_FS) == currentFB);
         currentFB ^= 1;
         uint16_t pressed = (uint16_t)(pad & ~prev);
         prev = pad;
@@ -1220,6 +1242,235 @@ static void sms_glass_toggle(void) {
 /* from_glass: the console path — a glass session is already running the
  * Z80, so hand it over instead of rebooting (the chime and the music play
  * straight through the cut). Otherwise (TESTING>SMSGAME) boot it cold. */
+/* ---- FULLSCREEN SMS ON THE 32X FRAMEBUFFER ---------------------------
+ * The mini-game's picture has always arrived as MD plane-B tiles composited
+ * over a black 32X frame. Here the SH-2 draws it instead, from raw TILEBUF ids
+ * broadcast by the 68K (md_main.c cmd 21), through the SAME 8x8 font those ids
+ * index (sms/DESIGN.md). 32 cols x 8px = 256, 24 rows x 8px = 192, centered in
+ * 320x224.
+ *
+ * The point is not parity with the tile layer. It is that the zoom-into-the-
+ * glass transition needs its start (a quad on the PVM face) and its end
+ * (this) to be the SAME renderer, or the arrival is a cut. Measured: the glass
+ * area is 34x28 texels for a 32x24 grid -- 1.06 texels per cell, so a glyph
+ * does not fit there and does fit here. That gap IS the resampling ladder. */
+#define SMS_FS_COLS  32
+#define SMS_FS_ROWS  24
+#define SMS_FS_CELLS (SMS_FS_COLS * SMS_FS_ROWS)
+#define SMS_FS_X0    ((SCREEN_W - SMS_FS_COLS * 8) / 2)   /* 32 */
+#define SMS_FS_Y0    ((SCREEN_H - SMS_FS_ROWS * 8) / 2)   /* 16 */
+#define SMS_FS_WORDS (SMS_FS_CELLS / 2)                   /* 384 slots */
+#define SMS_FS_INK   49    /* LIGHT_BASE[0], the bright menu white */
+/* The session's FRAME: everything outside the 256x192 picture is the tuned
+ * wallpaper chevron yellow, not black — the room's colour holds the screen
+ * (Mike, 2026-08-13). Dedicated CRAM entry, painted at session start from
+ * the live COLOR-lab wall value; the picture's interior stays index 0 so
+ * the CRT face keeps its black. */
+#define SMS_FS_FRAME    254
+#define SMS_FS_FRAME_W  ((uint16_t)0xFEFE)     /* index pair, word fills */
+#define SMS_FS_FRAME_32 ((uint32_t)0xFEFEFEFE)
+#define SMS_FS_FRAME_DIM 96    /* /256: the settled session frame — bright
+                                * yellow SELLS the zoom, then the room recedes
+                                * the moment the screen owns the frame */
+
+static uint8_t sms_fs_tiles[SMS_FS_CELLS];   /* the picture being displayed */
+static uint8_t sms_fs_stage[SMS_FS_CELLS];   /* the one being assembled */
+static uint8_t sms_fs_seen[SMS_FS_WORDS];
+static int     sms_fs_need;
+static uint16_t sms_fs_churn;      /* cells changed on the last new picture */
+static uint8_t  sms_fs_first;      /* force the first paint (churn may be 0) */
+
+/* Drink one whole picture off the COMM rotation. Same gather-don't-gamble
+ * shape as the glass sampler, sized for 384 slots instead of 48: spin until
+ * every slot has been seen once, BOUNDED so a stopped broadcast leaves with a
+ * partial frame rather than wedging. Affordable here precisely because the
+ * raycaster is not running -- the cost budget and the data appetite move in
+ * opposite directions along the zoom, which is the whole reason this works. */
+/* Returns 1 when a WHOLE picture has landed and been promoted.
+ *
+ * The set accumulates ACROSS frames. One gather cannot collect all 384 slots:
+ * the spin runs ~8.7ms and the 68K only broadcasts a few dozen slots in that
+ * time, so a per-frame "collect everything or give up" gather always gave up
+ * ~80% short -- and painting what it had left the missing cells showing their
+ * previous contents. That is the title text bleeding through the maze.
+ *
+ * So: stage the slots, keep `seen` and `need` between calls, and promote to the
+ * live buffer only when need hits 0. Slower to update, never wrong. A partial
+ * picture is now unrepresentable rather than merely unlikely. */
+static int sms_fs_gather(void) {
+    int *needp = &sms_fs_need;
+    /* The spin reads three sysregs an iteration at full rate. It is the same
+     * shape as the glass gather but 8x the slots, and the 68K is next door
+     * holding Z80 BUSREQ to copy TILEBUF -- hammering it while it does that is
+     * a real suspect for the PSG distortion (AU: stays 0, so the 32X PWM is
+     * not underrunning; this is the Z80's own audio). Bounded per call. */
+    uint32_t guard = 20000;
+    while (*needp && --guard) {
+        uint16_t i1 = MARS_SYS_COMM10;
+        uint16_t w  = MARS_SYS_COMM6;
+        if (MARS_SYS_COMM10 != i1) continue;    /* torn pair: skip */
+        if (i1 >= SMS_FS_WORDS) continue;       /* stale pad word: skip */
+        if (sms_fs_seen[i1]) continue;
+        sms_fs_seen[i1] = 1;
+        uint16_t c = (uint16_t)(i1 * 2u);
+        sms_fs_stage[c]     = (uint8_t)(w & 0xFF);
+        sms_fs_stage[c + 1] = (uint8_t)(w >> 8);
+        (*needp)--;
+    }
+    if (*needp) return 0;                  /* still assembling — show nothing new */
+    for (int i = 0; i < SMS_FS_CELLS; i++)
+        if (sms_fs_tiles[i] != sms_fs_stage[i]) {
+            sms_fs_tiles[i] = sms_fs_stage[i];
+            sms_fs_churn++;
+        }
+    for (int i = 0; i < SMS_FS_WORDS; i++) sms_fs_seen[i] = 0;
+    *needp = SMS_FS_WORDS;                 /* start the next picture */
+    return 1;
+}
+
+/* Paint the whole 32x24 grid into the back buffer. Full redraw, not a dirty-
+ * cell patch: the framebuffer is double-buffered, so a per-cell update would
+ * need its own shadow per page. 768 glyphs is cheap next to a raycast frame,
+ * and nothing else is competing for this CPU here. */
+static void sms_fs_draw(void) {
+    /* Reset the line table. raycast_render rewrites it EVERY frame (head bob,
+     * and WALLS=VERT folds odd rows onto even), and it is not running here --
+     * so this screen would inherit whatever offset gameplay stopped on, and
+     * under VERT would show each glyph's even rows doubled. The old path never
+     * noticed because it never put pixels in the 32X framebuffer at all. */
+    volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
+    for (int i = 0; i < SCREEN_H; i++)
+        line_table[i] = (uint16_t)(i * 160 + 0x100);
+    uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+    uint32_t *fb32 = (uint32_t *)fb;
+    for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = SMS_FS_FRAME_32;
+    /* CRT face: the picture rect is black; the frame around it is the room. */
+    for (int yy = 0; yy < SMS_FS_ROWS * 8; yy++) {
+        uint32_t *pw = (uint32_t *)(fb + (SMS_FS_Y0 + yy) * SCREEN_W + SMS_FS_X0);
+        for (int i = 0; i < (SMS_FS_COLS * 8) / 4; i++) pw[i] = 0;
+    }
+    const uint8_t *t = sms_fs_tiles;
+    for (int r = 0; r < SMS_FS_ROWS; r++)
+        for (int c = 0; c < SMS_FS_COLS; c++) {
+            uint8_t id = *t++;
+            if (id >= SMS_FONT_TILES) id = 0;   /* torn/garbage slot: blank */
+            font_draw_rows(fb, SMS_FS_X0 + c * 8, SMS_FS_Y0 + r * 8,
+                           sms_font[id], SMS_FS_INK);
+        }
+}
+
+/* THE ZOOM, screen-space half. The world renderer can only carry the push
+ * until the glass is a big quad of blurry texels — from there the PICTURE
+ * ITSELF takes over: drawn as a growing rect from tile ids, re-rendered
+ * crisp at every size (k px per cell, 2..8), while the last world frame
+ * melts away underneath it (the fly-through's checker dissolve). k=8
+ * centered is sms_fs_draw's exact output, so the session loop takes over
+ * with zero seam. Run backwards this is Mike's pull-out: fullscreen
+ * shrinks onto the tube while the room melts back in. */
+#define SMS_ZOOM_WORLD  5      /* frames of the WORLD riding the zoom, checker-
+                                * dithering away around the bezel as it goes —
+                                * the dither is the mask for the magnifier's
+                                * cost (the chop reads as the effect). Tuned
+                                * down twice: any slower reads as a CPU hang. */
+#define SMS_ZOOM_LADDER 9      /* total — leaves 4 black-surround frames for
+                                * the final rush: fast and subtle. */
+/* Magnify the back buffer IN PLACE by one incremental window step (prev ->
+ * cur). The 32X maps only the undisplayed buffer, so the world frame we zoom
+ * IS the buffer we compose into: rows are processed centre-out (top half
+ * top-down, bottom half bottom-up — the source row always lies centre-ward,
+ * still unwritten) with a row scratch for the horizontal resample. Word
+ * stores throughout: the FB drops zero BYTE writes, and a zoomed room is
+ * full of index-0 black. */
+static uint8_t sms_zoom_rowbuf[SCREEN_W];
+static void sms_zoom_world_step(uint8_t *fb,
+                                int ww0, int wh0, int cxw0, int cyw0,
+                                int ww1, int wh1, int cxw1, int cyw1) {
+    int wx_d = (cxw1 - ww1 / 2) - (cxw0 - ww0 / 2);
+    int wy_d = (cyw1 - wh1 / 2) - (cyw0 - wh0 / 2);
+    int dux = (ww1 << 8) / ww0;                  /* src step per dest px, 24.8 */
+    int duy = (wh1 << 8) / wh0;
+    int sx0 = ((wx_d * SCREEN_W) << 8) / ww0;
+    int sy0 = ((wy_d * SCREEN_H) << 8) / wh0;
+    for (int half = 0; half < 2; half++) {
+        int y    = half ? SCREEN_H - 1 : 0;
+        int yend = half ? SCREEN_H / 2 - 1 : SCREEN_H / 2;
+        int ys   = half ? -1 : 1;
+        for (; y != yend; y += ys) {
+            int sy = (sy0 + y * duy) >> 8;
+            if (sy < 0) sy = 0;
+            if (sy >= SCREEN_H) sy = SCREEN_H - 1;
+            for (int i = 0; i < SCREEN_W; i++)
+                sms_zoom_rowbuf[i] = fb[sy * SCREEN_W + i];
+            uint16_t *dst = (uint16_t *)(fb + y * SCREEN_W);
+            int ux = sx0;
+            for (int xw = 0; xw < SCREEN_W / 2; xw++) {
+                int sa = ux >> 8; ux += dux;
+                int sb = ux >> 8; ux += dux;
+                if (sa < 0) sa = 0; if (sa >= SCREEN_W) sa = SCREEN_W - 1;
+                if (sb < 0) sb = 0; if (sb >= SCREEN_W) sb = SCREEN_W - 1;
+                dst[xw] = (uint16_t)((sms_zoom_rowbuf[sa] << 8)
+                                     | sms_zoom_rowbuf[sb]);
+            }
+        }
+    }
+}
+/* Draw the picture into an ARBITRARY rect, re-rendered from tile ids at that
+ * size (nearest sampling of the 1bpp glyphs — crisp at every step, never
+ * scaled pixels). At w=256,h=192 centred the mapping is the identity, i.e.
+ * sms_fs_draw's exact output — the ladder's last frame IS the session frame. */
+static void sms_fs_draw_scaled(int w, int h, int cx, int cy) {
+    uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+    if (w < 16) w = 16;
+    if (h < 12) h = 12;
+    w &= ~1;
+    int x0 = (cx - w / 2) & ~1;            /* even: the black fill is words */
+    int y0 = cy - h / 2;
+    if (x0 < 0) x0 = 0;
+    if (x0 + w > SCREEN_W) x0 = (SCREEN_W - w) & ~1;
+    if (y0 < 0) y0 = 0;
+    if (y0 + h > SCREEN_H) y0 = SCREEN_H - h;
+    /* Opaque black backing first (WORD stores — the FB drops zero bytes),
+     * then ink on top: the growing rect is the CRT face, not a stencil. */
+    for (int yy = 0; yy < h; yy++) {
+        uint16_t *pw = (uint16_t *)(fb + (y0 + yy) * SCREEN_W + x0);
+        for (int i = 0; i < w / 2; i++) pw[i] = 0;
+    }
+    int du = (256 << 8) / w, dv = (192 << 8) / h;   /* src step, 8.8 */
+    int v8 = 0;
+    for (int yy = 0; yy < h; yy++, v8 += dv) {
+        int srcY = v8 >> 8;
+        const uint8_t *rowt = &sms_fs_tiles[(srcY >> 3) * SMS_FS_COLS];
+        int gy = srcY & 7;
+        uint8_t *p = fb + (y0 + yy) * SCREEN_W + x0;
+        int u8 = 0;
+        for (int xx = 0; xx < w; xx++, u8 += du) {
+            int srcX = u8 >> 8;
+            uint8_t id = rowt[srcX >> 3];
+            if (id == 0 || id >= SMS_FONT_TILES) continue;
+            if (sms_font[id][gy] & (uint8_t)(0x80u >> (srcX & 7)))
+                p[xx] = SMS_FS_INK;
+        }
+    }
+}
+/* Checker dissolve toward black, sparing the [px0,px1)x[py0,py1) rect — the
+ * bezel-and-glass safe zone. Runs over the zooming world frames: by the last
+ * one the surround is fully dissolved, so the hand-off to the black-surround
+ * phase is invisible. Word stores — the FB drops zero BYTE writes. */
+static void sms_zoom_melt(uint8_t *fb, int diss,
+                          int px0, int px1, int py0, int py1) {
+    for (int y = 0; y < SCREEN_H; y++) {
+        uint16_t *row = (uint16_t *)(fb + y * SCREEN_W);
+        int inY = (y >= py0 && y < py1);
+        int hash = (y * 13) & 15;
+        for (int xw = 0; xw < SCREEN_W / 2; xw++) {
+            hash = (hash + 7) & 15;
+            if (hash >= diss) continue;
+            if (inY) { int x = xw * 2; if (x >= px0 && x < px1) continue; }
+            row[xw] = SMS_FS_FRAME_W;   /* dissolves to the room's yellow */
+        }
+    }
+}
+
 static void sms_game_screen(int from_glass) {
     uint16_t saved_mode = MARS_VDP_DISPMODE;
     sms_audio_duck();
@@ -1228,13 +1479,44 @@ static void sms_game_screen(int from_glass) {
         raycast_glass_set_active(0);   /* fullscreen takes the one Z80 */
         sms_pack_level(pack);
     }
+    /* TESTING>SMS32X: draw the picture ourselves out of broadcast tile ids
+     * instead of letting the 68K blit it to plane B. The MD path stays intact
+     * as the other arm — it is the one that works today, and the zoom is not
+     * worth breaking a shipping screen for. */
+    int on_32x = (int)SHARED_UC->sms_on_32x;
+    if (on_32x) {
+        for (int i = 0; i < SMS_FS_CELLS; i++) sms_fs_tiles[i] = 0;
+        for (int i = 0; i < SMS_FS_CELLS; i++) sms_fs_stage[i] = 0;
+        for (int i = 0; i < SMS_FS_WORDS; i++) sms_fs_seen[i] = 0;
+        sms_fs_need  = SMS_FS_WORDS;
+        sms_fs_churn = 0;
+        sms_fs_first = 1;
+        /* The frame colour follows the COLOR lab's live wall tuning. Full
+         * brightness through the zoom — it is the room still holding the
+         * screen; a direct (menu) entry has no zoom and starts settled. */
+        raycast_paint_wallpaper_index(SMS_FS_FRAME,
+                                      from_glass ? 256 : SMS_FS_FRAME_DIM);
+        /* ARM FIRST, before any command can touch plane B. The title's
+         * blinking prompt sets DIRTY continuously, so any gap where the
+         * blit still runs repaints plane B with tiles nobody will clear —
+         * the frozen white ghost over the framebuffer picture. Armed here,
+         * the blit is dead before the boot/handoff below, cmd 18 skips its
+         * bridge paint, and the clear at the bottom is the last writer. */
+        HwMdSetSmsTileBcast(1);
+    }
     /* Black BOTH 32X buffers (word stores — the FB drops zero BYTE writes)
      * so the Master System's tiles overlay a black room, the compositing
-     * the diag spike proved. */
-    for (int b = 0; b < 2; b++) {
-        uint32_t *fb32 = (uint32_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
-        for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = 0;
-        swapBuffers();
+     * the diag spike proved. EXCEPT on the zoom path: the dolly just ended
+     * with the tube filling the frame, and that world frame IS the bridge —
+     * it stays up while the first whole picture gathers, so the arrival is
+     * a lock-on instead of a black flash. */
+    if (!(from_glass && on_32x)) {
+        uint32_t fill = on_32x ? SMS_FS_FRAME_32 : 0;   /* MD path stays black */
+        for (int b = 0; b < 2; b++) {
+            uint32_t *fb32 = (uint32_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++) fb32[i] = fill;
+            swapBuffers();
+        }
     }
     if (from_glass) {
         HwMdSmsGlassHandoff();         /* same Z80, no second chime */
@@ -1242,6 +1524,91 @@ static void sms_game_screen(int from_glass) {
     } else {
         HwMdSmsGameMap(pack);
         HwMdSmsGameBoot();
+    }
+    if (on_32x) {
+        /* WIPE THE MD TILE LAYER. In the shipping path the game IS those tiles,
+         * so whatever the HUD left there was overwritten by the picture. Here
+         * the 68K stops blitting entirely, so the gameplay HUD -- and the whole
+         * metrics overlay, if it is on -- would sit on top of our framebuffer
+         * picture. That is the garbage. */
+        hud_genesis_blank();      /* metrics rows + their internal state */
+        HwMdClearScreen();        /* and the whole of Name Table B under it */
+    }
+    if (from_glass && on_32x) {
+        /* THE ZOOM: picture grows out of the tube while the room melts.
+         * Both buffers still hold late dolly frames (the skip-black above);
+         * each pass dissolves that backdrop a step further and draws the
+         * picture bigger and closer to centre. Accelerating curve (q²): the
+         * approach feel of constant speed toward a plane. The gather runs
+         * every pass, so the picture resolves IN during the early rungs —
+         * a blank rect first is the signal still locking on, which is the
+         * aesthetic. Final pass forces k=8 dead centre = the session
+         * renderer's exact output: the swap to the wait loop is invisible. */
+        /* CAMERA-ZOOM-TO-RECT. The picture is PLANTED on the glass rect the
+         * rasterizer published — it never travels. What moves is the virtual
+         * camera: a window over the frame that starts as the whole screen
+         * and eases down onto the tube (final window = glass rect padded by
+         * the session's black border, so the arrival is the session frame).
+         * Every on-screen position/size below falls out of pushing the
+         * fixed glass rect through that shrinking window — pure zoom, no
+         * object motion, the player never senses the machinery. */
+        int gw  = SHARED_UC->glass_sr_x1 - SHARED_UC->glass_sr_x0;
+        int gh  = SHARED_UC->glass_sr_y1 - SHARED_UC->glass_sr_y0;
+        int gcx = (SHARED_UC->glass_sr_x0 + SHARED_UC->glass_sr_x1) / 2;
+        int gcy = (SHARED_UC->glass_sr_y0 + SHARED_UC->glass_sr_y1) / 2;
+        if (gw < 16 || gh < 12) { gw = 64; gh = 48; gcx = 160; gcy = 112; }
+        int wwF = gw * 320 / 256;      /* window that shows 1:1 + border */
+        int whF = gh * 224 / 192;
+        /* Per-BUFFER previous window: the two framebuffers alternate, so the
+         * world content a compose starts from is two ladder steps old, not
+         * one — stepping it by a single-frame delta leaves the zoom lagging
+         * on every other buffer. Indexed by frame parity. */
+        int wwp[2] = {320, 320}, whp[2] = {224, 224};
+        int cxp[2] = {160, 160}, cyp[2] = {112, 112};
+        for (int f = 1; f <= SMS_ZOOM_LADDER; f++) {
+            sms_fs_gather();
+            volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
+            for (int i = 0; i < SCREEN_H; i++)
+                line_table[i] = (uint16_t)(i * 160 + 0x100);
+            uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+            int q  = (f << 8) / SMS_ZOOM_LADDER;
+            int q2 = (q * q) >> 8;
+            int ww  = 320 + (((wwF - 320) * q2) >> 8);   /* the window */
+            int wh  = 224 + (((whF - 224) * q2) >> 8);
+            int cxw = 160 + (((gcx - 160) * q2) >> 8);
+            int cyw = 112 + (((gcy - 112) * q2) >> 8);
+            int w  = gw * 320 / ww;    /* the fixed glass, seen through it */
+            int h  = gh * 224 / wh;
+            int cx = 160 + (gcx - cxw) * 320 / ww;
+            int cy = 112 + (gcy - cyw) * 224 / wh;
+            if (f == SMS_ZOOM_LADDER) { w = 256; h = 192; cx = 160; cy = 112; }
+            int bp = f & 1;
+            if (f <= SMS_ZOOM_WORLD) {
+                /* The camera visibly leaves the room: the world frame in
+                 * this buffer rides the same window motion the picture does,
+                 * dissolving as it goes — everything but a bezel-sized zone
+                 * around the glass. Fully dissolved by the segment's end. */
+                sms_zoom_world_step(fb, wwp[bp], whp[bp], cxp[bp], cyp[bp],
+                                        ww,      wh,      cxw,     cyw);
+                int diss = (f * 17) / SMS_ZOOM_WORLD;
+                sms_zoom_melt(fb, diss,
+                              cx - (w * 5) / 8, cx + (w * 5) / 8,
+                              cy - (h * 5) / 8, cy + (h * 5) / 8);
+            } else {
+                /* Then the room's geometry is gone but its COLOUR holds:
+                 * the surround is the wallpaper yellow to the session frame. */
+                uint32_t *fb32 = (uint32_t *)fb;
+                for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++)
+                    fb32[i] = SMS_FS_FRAME_32;
+            }
+            wwp[bp] = ww; whp[bp] = wh; cxp[bp] = cxw; cyp[bp] = cyw;
+            sms_fs_draw_scaled(w, h, cx, cy);
+            swapBuffers();
+        }
+        /* Fullscreen reached: the frame drops to dim — one palette write
+         * recolours the surround already on screen, no redraw. */
+        raycast_paint_wallpaper_index(SMS_FS_FRAME, SMS_FS_FRAME_DIM);
+        sms_fs_first = 1;         /* repaint immediately in the loop below */
     }
     /* Wait for START. No timeout: this is a game, not a diagnostic — and
      * the exit runs entirely on this CPU, so no Z80 wedge can eat it. */
@@ -1251,8 +1618,35 @@ static void sms_game_screen(int from_glass) {
         uint16_t pressed = (uint16_t)(pad & ~prev);
         prev = pad;
         if (pressed & SEGA_CTRL_START) break;
-        Hw32xDelay(1);
+        if (on_32x) {
+            sms_fs_churn = 0;
+            int whole = sms_fs_gather();
+            /* Only repaint when the picture actually moved. The Z80 sets DIRTY
+             * only on change and most frames are not dirty, so redrawing 768
+             * glyphs every frame was work nobody asked for -- and the swap that
+             * followed it forced a vblank wait each time regardless. */
+            if (whole && (sms_fs_churn || sms_fs_first)) {
+                sms_fs_first = 0;
+                sms_fs_draw();
+                if (g_metrics_on) {      /* CH: cells changed this picture */
+                    char m[10];
+                    uint16_t v = sms_fs_churn;
+                    m[0]='C'; m[1]='H'; m[2]=':';
+                    for (int i = 7; i >= 3; i--) { m[i] = '0'+(v%10); v/=10; }
+                    m[8] = 0;
+                    font_draw_string(
+                        (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200),
+                        0, 0, m, SMS_FS_INK);
+                }
+                swapBuffers();
+            } else {
+                Hw32xDelay(1);
+            }
+        } else {
+            Hw32xDelay(1);
+        }
     }
+    if (on_32x) HwMdSetSmsTileBcast(0);
     HwMdSmsGameStop();
     g_ym_upload = 1;       /* same: the minigame teardown reset the YM */
     {   /* bounded START drain — a stuck bit must not hold the exit */
@@ -1624,6 +2018,11 @@ int m_main(void) {
 
     Hw32xInit(MARS_VDP_MODE_256, 0);
     Hw32xDelay(1);    /* wait for first vblank — palette is writable now */
+
+    /* The zoom-into-the-glass is the console's intended behavior, not a
+     * diagnostic — SMS32X defaults ON. The TESTING row still toggles it
+     * for A/B against the MD plane-B path. */
+    SHARED_UC->sms_on_32x = 1;
 
     /* High-res "attic box" splash: the SEGA CORE label on the closed
      * carton, held until START. Then we hand off to the live low-res 3D
@@ -2216,7 +2615,11 @@ int m_main(void) {
             sms_boot_screen();
         }
         if (g_smsboot_frames && --g_smsboot_frames == 0)
-            g_smsgame_request = 2;    /* 2 = from the glass beat (handoff) */
+            g_smsgame_request = 2;    /* beat over: the zoom takes it from here.
+                                       * The PLAYER never moves — position,
+                                       * angle, eye are untouched, so the
+                                       * return from the session is exactly
+                                       * the view that pressed A. */
         if (g_smsgame_request) {
             int from_glass = (g_smsgame_request == 2);
             g_smsgame_request = 0;
@@ -2461,7 +2864,12 @@ int m_main(void) {
                         HwMdReadPad(0);
                         if (MARS_SYS_COMM8 & ~SEGA_CTRL_TYPE) break;
                         SHARED_UC->primary_vwait = 1;
-                        while (lastTick == MARS_SYS_COMM12);
+                        /* The ULTRA park is the worst-case case for a bare
+                         * poll: it holds here for as long as the player stands
+                         * still — unbounded — spinning on a 32X sysreg the
+                         * whole time, with the secondary next door pumping
+                         * audio. See BUS_WAIT above. */
+                        BUS_WAIT(lastTick == MARS_SYS_COMM12);
                         SHARED_UC->primary_vwait = 0;
                         raycast_shimmer();
                         raycast_pal_flush();

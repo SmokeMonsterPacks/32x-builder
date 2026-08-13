@@ -1094,7 +1094,12 @@ static int  g_exit_hole_dir;          /* +1/-1: approach -> wall along the axis 
  * absence of one. Monotonic across the join (DOOR_DARK+3 at luma 84 is
  * skipped, being LIGHTER than the wall floor), so one fade runs from lit
  * wallpaper to the far dark with no palette seam. */
-static const uint8_t hole_ramp[17] = {
+/* 18, not 17. There are 18 initializers below and HOLE_DARKEST is 17, so the
+ * clamp in hole_shade() indexed one past the end while the compiler silently
+ * discarded the very entry it wanted ("excess elements in array initializer").
+ * The hole's deepest band was taking its colour from whatever .rodata followed.
+ * Found by the same warning that caught the font's '%' glyph. */
+static const uint8_t hole_ramp[18] = {
     WALL_BASE + 0,  WALL_BASE + 1,  WALL_BASE + 2,  WALL_BASE + 3,
     WALL_BASE + 4,  WALL_BASE + 5,  WALL_BASE + 6,  WALL_BASE + 7,
     WALL_BASE + 8,  WALL_BASE + 9,  WALL_BASE + 10, WALL_BASE + 11,
@@ -2890,6 +2895,19 @@ void raycast_backdrop_wall(int on) {
     } else {
         Hw32xSetBGColor(0, 0, 0, 0);
     }
+}
+
+/* Paint the tuned wallpaper yellow into an arbitrary CRAM entry — the SMS
+ * session frames its picture with the room's colour (m_main SMS_FS_FRAME).
+ * Same source as the viewer backdrop, so it follows the COLOR lab live.
+ * scale256: 256 = full wallpaper brightness (the zoom), less = dimmed (the
+ * session's settled frame) — one palette write recolours every frame pixel
+ * already on screen, no redraw. */
+void raycast_paint_wallpaper_index(int idx, int scale256) {
+    int wr, wg, wb;
+    pal_effective(PSURF_WALL, &wr, &wg, &wb);
+    Hw32xSetBGColor(idx, (wr * scale256) >> 8, (wg * scale256) >> 8,
+                         (wb * scale256) >> 8);
 }
 
 
@@ -4824,6 +4842,31 @@ static void draw_chair_3d(int i, int col_start, int col_end,
                     uint16_t win = standup_power[i]
                                  ? (BLOOM_FRAMES + ON_SETTLE) : OFF_FRAMES;
                     if (el < win) be = (int)el;
+                }
+                /* Publish the GLASS's projected rect for the zoom: quad bbox
+                 * insetted by the glass's texel fractions (front U samples
+                 * MIRRORED — see the UV comment in draw_panel_face — so the
+                 * x fractions swap sides). Face-on this is exact; during the
+                 * approach it is within a pixel or two, which is all the
+                 * hand-over needs. Uncached: either CPU may own this face. */
+                if (glass_active && standup_on_desk[i] && faces[q].ftex == 1) {
+                    int qx0 = faces[q].sx[0], qx1 = qx0;
+                    int qy0 = faces[q].sy[0], qy1 = qy0;
+                    for (int v2 = 1; v2 < 4; v2++) {
+                        int sx = faces[q].sx[v2], sy = faces[q].sy[v2];
+                        if (sx < qx0) qx0 = sx; if (sx > qx1) qx1 = sx;
+                        if (sy < qy0) qy0 = sy; if (sy > qy1) qy1 = sy;
+                    }
+                    int qw = qx1 - qx0, qh = qy1 - qy0;
+                    int fw = bm->ftw, fh = bm->fth;
+                    SHARED_UC->glass_sr_x0 =
+                        (int16_t)(qx0 + qw * (fw - tg_bx0 - tg_bw) / fw);
+                    SHARED_UC->glass_sr_x1 =
+                        (int16_t)(qx0 + qw * (fw - tg_bx0) / fw);
+                    SHARED_UC->glass_sr_y0 =
+                        (int16_t)(qy0 + qh * tg_by0 / fh);
+                    SHARED_UC->glass_sr_y1 =
+                        (int16_t)(qy0 + qh * (tg_by0 + tg_bh) / fh);
                 }
                 draw_panel_face(fb, col_start, col_end, &faces[q], bm,
                             center_depth, chair_dark, cell_is_dark(cx, cy), zt,

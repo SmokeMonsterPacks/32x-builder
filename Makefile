@@ -319,6 +319,15 @@ sh_src/sprite_defs.h: registry.json tools/gen_assets.py $(wildcard sh_src/*_tex.
 	@python3 tools/gen_assets.py --profile $(PROFILE)
 sh_src/raycast.o: sh_src/sprite_defs.h
 
+# sh_src/sms_font.h — the MD boot font as 1bpp rows, codegen'd from md_src/font.s
+# (tools/gen_sms_font.py). The SH-2's SMS32X picture and the Genesis VDP must
+# draw TILEBUF through the SAME glyphs or the zoom handoff pops; one source,
+# not two that agree today. Generated + gitignored, explicit m_main.o dep so a
+# clean build emits it first (same pattern as sprite_defs.h).
+sh_src/sms_font.h: md_src/font.s tools/gen_sms_font.py
+	@python3 tools/gen_sms_font.py
+sh_src/m_main.o: sh_src/sms_font.h
+
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
 lint:
 	@python3 tools/lint_maps.py

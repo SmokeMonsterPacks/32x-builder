@@ -213,6 +213,28 @@ void HwMdSetVram(unsigned short word) {
 	while(MARS_SYS_COMM0) ;
 }
 
+/* BUS A/B (TESTING>BUS): tell the 68K whether to back its COMM0 poll off when
+ * idle. The 68K's main loop calls do_commands() as fast as it can spin, so it
+ * reads a 32X sysreg every few microseconds forever — the one actor in the
+ * system whose bus appetite nobody had throttled. It cannot be a blind divider:
+ * every sender above blocks on `while(MARS_SYS_COMM0)`, and HUD text is one
+ * command per tile, so slowing the service rate outright would just move the
+ * cost onto the primary. The 68K side backs off only after consecutive EMPTY
+ * polls and snaps back to every-iteration on the first live command. */
+void HwMdSetBusThrottle(int on) {
+	while(MARS_SYS_COMM0) ;
+	MARS_SYS_COMM0 = (unsigned short)(0x1300 | (on ? 1 : 0));
+	while(MARS_SYS_COMM0) ;
+}
+
+/* FULLSCREEN-ON-32X: switch the modal mini-game's picture from MD plane-B tiles
+ * to a raw tile-id broadcast this side renders itself. See md_main.c cmd 21. */
+void HwMdSetSmsTileBcast(int on) {
+	while(MARS_SYS_COMM0) ;
+	MARS_SYS_COMM0 = (unsigned short)(0x1500 | (on ? 1 : 0));
+	while(MARS_SYS_COMM0) ;
+}
+
 void HwMdSmsBoot(void) {
 	while(MARS_SYS_COMM0) ;
 	MARS_SYS_COMM0 = 0x0900; // upload Z80 hello, drop VDP to mode 4, run

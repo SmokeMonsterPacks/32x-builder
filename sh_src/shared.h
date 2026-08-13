@@ -295,6 +295,58 @@ typedef struct {
      * the fill method, not geometry, so the primary-half prof_pass_chair
      * delta between arms is the true per-pixel texturing cost. */
     volatile uint8_t chair_tex;
+    /* TESTING>SMS32X: 1 = the modal mini-game's picture is rendered by the SH-2
+     * into the 32X framebuffer from broadcast tile ids, 0 = the shipping path
+     * (68K blits TILEBUF to MD plane B over a black 32X frame). Step 1 of the
+     * zoom-into-the-glass arc: the transition needs its start and end on ONE
+     * renderer, and this is the end. */
+    volatile uint8_t sms_on_32x;
+    /* The desk console's GLASS as projected in the most recent world frame
+     * (screen px, x1/y1 exclusive; x1<=x0 = not drawn). Written by whichever
+     * CPU rasterizes the front face, read by the primary to birth the zoom's
+     * picture rect exactly on the tube — uncached so the halves never skew. */
+    volatile int16_t glass_sr_x0, glass_sr_y0, glass_sr_x1, glass_sr_y1;
+    /* BUS A/B, SPLIT INTO THREE (TESTING>SPIN / IDLE / 68K). They shipped as
+     * one flag and the first A/B came back NET WORSE (T 22018 -> 23654) with a
+     * clear win buried inside it -- exactly what a bundled toggle cannot tell
+     * apart. Per-pass costs were IDENTICAL across both arms (W/R/G/I/P to the
+     * tick), so none of this touches render work: every delta lives in the
+     * overhead paths, and each flag now has a metric that measures it alone.
+     *
+     * bus_spin -> NOT CONFIRMED, and SW does not confirm it. SW is the primary
+     *   WAITING for the flip -- it is slack, not cost. When work grows there is
+     *   less slack left to wait in, so SW shrinks: its 751 -> 359 was a symptom
+     *   of the regression alongside it (T/H/S/HU all rose), not a win. The
+     *   change is still sound in principle -- the COMM12 tick, FBCTL flip and
+     *   ULTRA park are bare polls of 32X sysregs at ~3M reads/sec, and
+     *   raycast.c's barrier waits have carried this 16-nop throttle for years
+     *   -- but throttling a wait cannot make the wait shorter. Only the
+     *   contention it relieves can pay, and see VENUE. Default OFF.
+     * bus_idle -> H/S. The secondary's idle throttle. The old volatile-counter
+     *   loop was ACCIDENTALLY SELF-TUNING -- its write-through stores stall on
+     *   the write buffer, so it stretched exactly when the bus was busy. A
+     *   constant nop count deletes that backpressure and the COMM4 poll rate
+     *   climbs under load: the failure the original 64->256 bump existed to
+     *   stop. Now an FRT delay -- on-chip timer, zero bus, true wall clock.
+     * bus_68k -> HU (post-render HUD). Backing the 68K's COMM0 poll off when
+     *   idle cost 11% there. The HUD is not one burst -- it is many short
+     *   HwMdPuts runs with SH-2 work between them, so the 68K goes idle and
+     *   re-backs-off before every one, paying the latency again each time.
+     *
+     * VENUE -- READ THIS BEFORE MEASURING. All three of these trade CPU cycles
+     * for reduced bus contention. Ares models the cycles faithfully and the
+     * cart-bus arbitration between the 68K and two SH-2s much less so, which
+     * means it shows the full COST of each and little or none of the benefit.
+     * That is not a flaw in the experiment, it is the wrong instrument: the
+     * Ares run above measured all three costs correctly (the 68K backoff really
+     * does cost ~369 ticks of HU, a fixed nop count really does lose the old
+     * loop's backpressure) and could not price a single benefit. Every flag
+     * therefore defaults OFF and stays unproven until a MiSTer sitting.
+     *
+     * DO NOT re-run this A/B in Ares and conclude anything from it. */
+    volatile uint8_t bus_spin;
+    volatile uint8_t bus_idle;
+    volatile uint8_t bus_68k;
 
     /* Sprite-pass column split, decoupled from the wall split_col. A large
      * screen-filling standup (the world-quad neanderthal up close) can land

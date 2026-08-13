@@ -61,21 +61,54 @@ stays. ~1 day; the only tuning risk is the sampling rate. Pairs with
 the diegetic PVM+console trigger that replaces the TESTING menu rows.
 
 ### Zoom-into-the-glass transition  (Mike, 2026-08-12 — the long thread)
-**Status:** designed intent only, no code. Today the console cut is a
-hard swap: the monitor shows the Master System for a short beat, then
-the fullscreen replaces it. The ambition is a continuous move — the
-camera pushes INTO the PVM's glass while the picture resamples upward
-from phosphor-cell occupancy to full resolution, so the room becomes the
-screen without a cut. Pieces this needs that do not exist yet: (1) a
-scripted camera dolly along the view vector to the glass plane, reusing
-the pane-transform library's easing rather than a new one; (2) a
-resampling ladder for the SMS picture — occupancy cells, then real
-glyphs rendered by the SH-2 font, then the true 32x24 tile frame at
-1:1 — chosen by how much glass the camera fills, so cost tracks
-apparent size; (3) a handover at the end that swaps the world render
-for the mini-game's own frame WITHOUT the black flash the current cut
-hides behind. Depends on the glyph-fidelity pass (DESIGN.md 4c v2)
-landing first: a zoom that ends on blocky cells has nowhere to arrive.
+**Status:** ✅ BUILT 2026-08-13 (local, tuning). Shipped shape differs
+from the original sketch in one important way: there is NO world-space
+camera dolly — the player never moves (position, angle, eye untouched;
+the return from the session is the exact view that pressed A). The move
+is a screen-space camera-zoom-to-rect: the rasterizer publishes the
+glass's projected rect each frame (face quad corners inset by the glass
+texel fractions, mirrored-U accounted, uncached for the CPU split); at
+session entry a virtual window eases from full-screen down onto that
+rect while the picture — re-rendered from tile ids at every size, never
+scaled pixels — rides it. 5 frames of the world magnifying in place
+(in-place buffer zoom, centre-out row order, per-parity window tracking
+because the buffers alternate) with a checker dissolve sparing a
+bezel-sized zone, then 4 black-surround frames of the final rush. The
+last frame is pixel-identical to the session renderer's native draw, so
+the handover is invisible. The reverse (session → world) is still a
+cut; run the same ladder backwards when it matters.
+
+### SMS fidelity tuning  (Mike, 2026-08-13 — standing ambition)
+**North star: we have the REAL Z80. Nothing in the 32X layer is allowed
+to be the reason the Master System feels less than authentic** — the
+game logic, music, and timing are genuine SMS-class hardware; the 32X
+side is only a display and must behave like a transparent CRT.
+
+Current state of the display chain (fullscreen SMS32X, default ON):
+Z80 frame → 68K TILEBUF copy → full-rate COMM rotation (SMS_TILE_DIV=1;
+the /2 divider was stretching the rotation, and the rotation period IS
+the input-to-photon delay — halving it cost nothing, Z80 music verified
+fine) → whole-picture promote → native 8x8 paint. Roughly one frame
+behind the old MD-blit path, worst case.
+
+Banked next step — **dirty-epoch deltas**: the Z80 already flags DIRTY
+and the 68K knows exactly which words changed at copy time, so
+broadcast only the changed words tagged with a frame epoch; the SH-2
+applies epoch N atomically. Collapses small-change latency to transport
+time. Why it is NOT built yet: it trades the rotation's self-healing
+property (a lost slot just comes around again) for bookkeeping — a
+missed delta is a permanently stale cell, and the no-handshake rule
+(joypad-bridge starvation) bans naive ACKs. If built, build it WITH the
+slow background repair rotation from day one, and only after hardware
+confirms the residual frame is actually felt. Accuracy is NOT the axis:
+promoted pictures are already bit-exact; epochs buy latency only.
+
+Beyond latency, the accuracy backlog for a "most accurate SMS engine"
+pass: per-cell colour (the broadcast carries ids only — ink is one
+palette entry; real SMS tiles carry palette bits), sprite layer (the
+harness is tile-only today), and the mode-4 duet (~64a0a21) for real
+.sms compatibility. Each widens the channel or the Z80 contract; sized
+separately when the arc is scheduled.
 
 ### Ceiling lights as actual grid-tile illumination
 **Status:** ✅ done — scanline trapezoid fill from 4 projected corners
@@ -438,6 +471,66 @@ so pin `WALLS` before any capture. The profiler itself costs 2,255 ticks and is
 present in every historical number in this file. Uncommitted iterations share
 one build stamp, so commit between A/B arms or you cannot tell which binary you
 measured.
+
+### Bus-contention hunt — PARKED until hardware  (2026-08-12)
+**Status: three toggles built, all defaulting OFF, none proven. Do not measure
+them in Ares. Retest on MiSTer, September 2026.**
+
+Premise: removing a constantly-streamed audio sample from the mixer bought real
+frames, so the same shape — something running continuously that nobody counts —
+was worth hunting elsewhere. Three sites found, all confirmed by reading:
+
+| site | what it does | toggle |
+|---|---|---|
+| `s_main.c` idle loop | `for (volatile int i…)` — 256 write-through SDRAM stores per COMM4 poll, continuously, aimed at the SDRAM the primary renders from | `TESTING>IDLE` |
+| `m_main.c` ×6 | bare polls of 32X sysregs at ~3M/sec, including the FBCTL flip wait (up to a full vblank) and the unbounded ULTRA park | `TESTING>SPIN` |
+| `md_main.c` `do_commands` | 68K reads COMM0 every loop iteration, forever — the only actor never throttled | `TESTING>68K` |
+
+**Why it is parked, and this is the whole point:** all three trade CPU cycles for
+reduced bus contention. Ares models the cycles faithfully and cart-bus
+arbitration between the 68K and two SH-2s much less so, so it shows the full
+*cost* of each change and little or none of the *benefit*. The instrument cannot
+see the thing being measured. The one Ares A/B run (B00299, same pose both arms)
+came back net worse — T 22018 → 23654, H +647, S +509, HU +369 — and its only
+honest content is that the costs are real:
+
+- The 68K backoff genuinely costs ~369 ticks of `HU`. The HUD is not one burst;
+  it is many short `HwMdPuts` runs with SH-2 work between them, so the 68K goes
+  idle and re-backs-off before every one, paying the latency each time.
+- A fixed nop count is the wrong replacement for the volatile loop. Those
+  stalling stores made the old loop **accidentally self-tuning** — it stretched
+  precisely when the bus was busy, which is backpressure, not waste. `IDLE` now
+  delays on the FRT (on-chip, zero bus, true wall clock) so the poll rate is
+  pinned by construction rather than by a guessed iteration count.
+
+**Two measurement traps this arc walked into, both worth the file space:**
+
+`SW` **is slack, not cost.** It is the primary waiting for the flip. When work
+grows there is less slack left to wait in, so `SW` shrinks. Its 751 → 359 in that
+A/B was read as a win; it was a symptom of the regression sitting next to it.
+A throttle on a wait cannot make the wait shorter — only the contention it
+relieves can pay.
+
+**A bundled toggle cannot attribute.** All three shipped behind one flag, so the
+net-worse result could not be split into the change that hurt and the change that
+did not. They are three flags now, each with the metric that measures it alone:
+`SPIN`→`SW`, `IDLE`→`H`/`S`, `68K`→`HU`.
+
+Per-pass costs were **identical** across both arms (`W`/`R`/`G`/`I`/`P` to the
+tick), which is the useful invariant: none of this touches render work, so any
+real delta lives entirely in the overhead paths.
+
+**Still untouched from the original candidate list:** the box renderers are
+deliberately kept out of `.ramtext` (`raycast.c` — LTO folding them into the
+`draw_standups` blob overflowed the ram region), so they stream instructions off
+the cart every frame a chair/desk/PVM is visible — the same bus the 68K is
+flooding. Never measured.
+
+**Ruled out, do not re-derive:** game-on-glass is not a bus problem. A glass
+session lives exactly `GLASS_BEAT_FRAMES` (8) frames and the only way in is
+`raycast_pvm_use() == 2`, i.e. standing at the desk with the tube filling the
+view. A visibility cull for it was built and reverted — it guarded a state that
+cannot occur and added an uncached write per face on both CPUs to save nothing.
 
 ### Partition parity — deferred items + the cost wall  (2026-07-24)
 **Status:** parity batch banked (commit "Partition parity: near-slab LOD…").

@@ -27,6 +27,7 @@ sh_src/custom_maps.c
 
 # Codegen'd from registry.json "assets" by tools/gen_assets.py every build
 sh_src/sprite_defs.h
+sh_src/sms_font.h
 
 # Debug capture artifacts (snapshotted to share with reviewers, not history)
 screenshots/
