@@ -40,3 +40,11 @@
 - Activating the desk console boots the Master System on the PVM itself. The title card and its chime play in the room, on the monitor, and after a short beat the screen takes over full-screen.
 - The handoff keeps the same program running, so the chime and music do not restart across the cut.
 - The 32X mix fades out while the Master System has the stage and returns on exit.
+
+## Zoom into the glass
+
+- Pressing A at the desk console now zooms into the monitor instead of cutting to full screen. The room magnifies around the glass and dissolves away; the picture grows out of the tube, re-rendered sharp at every size, and lands exactly on the full-screen frame. The player never moves, and leaving the session returns to the exact standing view.
+- The full-screen picture is drawn by the 32X from the live Z80 tile stream, using the same font the Genesis path uses, so the two renderers agree pixel for pixel.
+- The session plays inside a wallpaper-yellow frame: full brightness through the zoom, dimmed once the screen takes over.
+- Input latency during the mini-game roughly halved.
+- Fixed: a stale title screen could freeze over the mini-game picture; the exit hole's deepest shade and the SMS banner's % glyph were reading past their arrays; the PSG is silenced at power-on instead of singing from boot.
