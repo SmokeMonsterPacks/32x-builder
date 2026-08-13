@@ -11,13 +11,11 @@
 #   default (dedup) -> VISUAL debugging. Hunting a seam, a wrong tile, a ghost
 #                      row. Duplicate frames are noise; killing them makes the
 #                      interesting frames easy to page through.
-#   raw             -> TIMING / tools/frame_profiler.py. Dedup BIASES that
-#                      measurement: the profiler counts red-bordered (overrun)
-#                      frames, and the border flipping black<->red is itself a
-#                      visual difference, so overrun frames always survive dedup
-#                      while static ok-frames get deleted. The surviving set is
-#                      enriched for exactly the thing being counted, and the
-#                      resulting percentage is not a per-frame overrun rate.
+#   raw             -> TIMING / tools/frame_profiler.py. That tool reads how
+#                      many consecutive capture frames are identical: each 32X
+#                      frame is held across N display refreshes, so run length
+#                      IS the frame time. Dedup deletes the repeats, which is
+#                      the entire signal -- deduped input measures nothing.
 #                      raw keeps every recorded frame, so the number means what
 #                      it says.
 
@@ -58,14 +56,21 @@ if [[ "$dedup_only" == false ]]; then
     fi
     mv "$newest" "$SSDIR/capture.mov"
     # Dedup prefilter. The RMSE loop below is one `magick compare` process per
-    # frame pair, each re-decoding both PNGs — 1300 frames took minutes on one
-    # core. mpdecimate does the same "compare against the last KEPT frame" test
-    # inside ffmpeg's decode pass, so the expensive loop only ever sees the
-    # frames that survive it. Tuned CONSERVATIVE on purpose: it should kill only
-    # the byte-near-identical frames and leave every judgement call to RMSE.
+    # frame pair, each re-decoding both PNGs, and it is the whole runtime of
+    # this script. mpdecimate drops near-duplicates inside ffmpeg's decode pass,
+    # so the loop only ever sees survivors and the duplicates never hit disk.
     # A frame is dropped when no 8x8 block exceeds hi AND fewer than frac of the
-    # blocks exceed lo, so LOWER hi/lo/frac == fewer drops == safer.
-    # CAPTURE_PREFILTER=0 disables it if a slow fade ever goes missing.
+    # blocks exceed lo, so LOWER hi/lo/frac == fewer drops.
+    #
+    # THIS CHANGES THE OUTPUT, it is not just a speedup. Measured on a 382-frame
+    # recording: prefilter off -> 84 unique, prefilter on -> 193 unique. The
+    # RMSE loop chains against the last KEPT frame, so a slow drift stays
+    # anchored to one `prev` and the entire run gets deleted; thinning the run
+    # first means each survivor clears 0.005 against the previous survivor and
+    # is kept. Keeping MORE frames is the point -- the anchored chain silently
+    # eats fades (CRT bloom, degauss, lighting ramps), which is exactly the
+    # material this script exists to page through.
+    # CAPTURE_PREFILTER=0 restores the old anchored-chain behaviour.
     # Array, not a string: the `64*4` in the filter is a glob to any shell that
     # gets a chance to look at it unquoted.
     prefilter=()
