@@ -228,10 +228,11 @@ void HwMdSetBusThrottle(int on) {
 }
 
 /* FULLSCREEN-ON-32X: switch the modal mini-game's picture from MD plane-B tiles
- * to a raw tile-id broadcast this side renders itself. See md_main.c cmd 21. */
-void HwMdSetSmsTileBcast(int on) {
+ * to a raw tile-id broadcast this side renders itself. See md_main.c cmd 21.
+ * mode: bit0 = broadcast on, bit1 = dirty-epoch protocol (TESTING>EPOCH). */
+void HwMdSetSmsTileBcast(int mode) {
 	while(MARS_SYS_COMM0) ;
-	MARS_SYS_COMM0 = (unsigned short)(0x1500 | (on ? 1 : 0));
+	MARS_SYS_COMM0 = (unsigned short)(0x1500 | (mode & 3));
 	while(MARS_SYS_COMM0) ;
 }
 

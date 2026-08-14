@@ -301,6 +301,12 @@ typedef struct {
      * zoom-into-the-glass arc: the transition needs its start and end on ONE
      * renderer, and this is the end. */
     volatile uint8_t sms_on_32x;
+    /* TESTING>EPOCH (default OFF): the SMS picture channel runs the
+     * dirty-epoch delta protocol instead of the full-picture rotation —
+     * only changed cells cross, stamped with a frame epoch and applied
+     * atomically; a slow absolute repair rotation bounds how long any
+     * lost delta can survive. The legacy rotation is the fallback arm. */
+    volatile uint8_t sms_epoch_on;
     /* The desk console's GLASS as projected in the most recent world frame
      * (screen px, x1/y1 exclusive; x1<=x0 = not drawn). Written by whichever
      * CPU rasterizes the front face, read by the primary to birth the zoom's

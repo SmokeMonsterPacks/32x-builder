@@ -274,7 +274,15 @@ read_joypad:
 		lsr.w	#6,d1			/* 0 0 0 0 0 0 0 0 s a 0 0 0 0 0 0 */
 		or.w	d1,d0			/* 0 0 0 0 m x y z s a c b r l d u */
 		eori.w	#0x1FFF,d0		/* 0 0 0 1 M X Y Z S A C B R L D U */
+		/* PARK-AWARE resume: when z80_parked is set, the held bus grant IS
+		 * the Z80 park (reset stays high for the YM's sake) — releasing it
+		 * here let the chip sprint through uninitialised RAM into the PSG
+		 * between every pad poll. The tick-tick-tick from boot. Only a
+		 * live SMS session (which clears the flag) gets the bus back. */
+		tst.b	z80_parked
+		bne.s	9f
 		RESUME_Z80
+	9:
 		move.w	(sp)+,d2
 		rts
 

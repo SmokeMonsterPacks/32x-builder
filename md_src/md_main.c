@@ -32,6 +32,8 @@ static uint8_t sms_active = 0;
 // into the Z80 blob's MAP region after the code copy — the Master System
 // program wakes up already holding whatever map the player was standing in.
 static uint8_t sms_game_on = 0;
+static uint8_t sms_debrief = 0;    // Z80 STATE_MBX==1: the Z80 owns START
+                                   // (debrief OR diagnostics page; COMM8 b14)
 static uint8_t sms_game_map[Z80_GAME_MAP_LEN];
 static uint8_t sms_game_tiles[Z80_GAME_TILEBUF_LEN];
 // GAME-ON-GLASS: the Z80 runs the mini-game HEADLESS (pad held at 0, no
@@ -71,6 +73,44 @@ static uint8_t sms_game_tiles[Z80_GAME_TILEBUF_LEN];
 #define SMS_TILE_DIV   1      /* broadcast one slot per N do_commands (pow2) */
 static uint16_t sms_tile_div = 0;
 static uint8_t  sms_tile_bcast = 0;
+// DIRTY-EPOCH (cmd 21 bit 1; TESTING>EPOCH, default OFF). Instead of
+// rotating all 384 slots forever, broadcast only the slots the last dirty
+// frame CHANGED, each tagged with a 6-bit epoch, and a MARKER word after
+// every pass of the set carrying the set's size — the reader presents an
+// epoch atomically once it holds all of it. Payloads stay ABSOLUTE content
+// (index + data), never diffs, so a lost or skipped epoch merely leaves
+// those cells stale, and the REPAIR interleave (one absolute slot from the
+// full picture, epoch tag 63, every 32nd call while deltas flow — every
+// call when idle) puts a hard ceiling on staleness. Word formats on COMM10:
+//   0xFFFF                          seqlock invalidate
+//   bit15=0: [14:9]=epoch [8:0]=slot     delta/repair slot (data in COMM6)
+//   bit15=1: [14:9]=epoch [8:0]=count    end-of-pass marker (no data)
+// Epochs count 0..62; 63 is the repair tag. On arm, the whole picture is
+// queued as epoch 0's set, so the first paint is atomic like everything
+// after it.
+#define SMS_EPOCH_REPAIR 63
+static uint8_t  sms_tile_epoch_on = 0;
+static uint8_t  sms_epoch = 0;
+static uint16_t sms_delta_q[SMS_TILE_WORDS];
+static uint16_t sms_delta_n = 0;      // current epoch's set size
+static uint16_t sms_delta_rot = 0;    // cursor over the set
+static uint16_t sms_repair_rot = 0;   // cursor over the full picture
+static uint16_t sms_post_pass_repair = 0;  // repair burst after each pass
+// Z80 BUSREQ-PARK. The Z80 must never free-run (it hammers the PSG with
+// whatever it executes — the build-302 clip), but it also must never be
+// parked IN RESET outside a session boot pulse: the Z80 reset line resets
+// the YM2612 with it, which is why the reset-hold parks kept killing the
+// hum. Steady state everywhere outside a live SMS session is therefore
+// reset HIGH + bus GRANTED AND HELD: the CPU is frozen, the Yamaha lives.
+// The YM write paths run under the held grant and must NOT release it
+// while this flag is set; the session boots clear it when they hand the
+// bus back to the Z80. (Case 10's old "leaving it requested left the
+// machine odd" was a request pending against a reset-held Z80 — a grant
+// that never comes. A GRANTED hold is the normal 68K-owns-the-bus state.)
+// NON-static: read_joypad (md_start.s) tests this to keep its RESUME_Z80
+// from dissolving the park — the pad path toggles busreq every frame, and
+// an unconditional release let the Z80 sprint between polls (the tick).
+uint8_t z80_parked = 0;
 static uint16_t sms_tile_rot = 0;
 static uint8_t  sms_glass_on = 0;
 static uint16_t sms_glass_rot = 0;
@@ -129,6 +169,40 @@ void do_commands(void) {
 		*mars_comm6  = sms_glass_bits[i];
 		*mars_comm10 = i;               // now publish
 		sms_glass_rot = (uint16_t)((i + 1 >= SMS_GLASS_WORDS) ? 0 : i + 1);
+	} else if (sms_tile_bcast && sms_tile_epoch_on) {
+		// DIRTY-EPOCH stream, bandwidth inverted (the ghost-cell lesson):
+		// ONE full pass of the delta set + marker, THEN a burst of repair
+		// slots, repeat. The old 31-in-32 delta share re-sent a 3-cell set
+		// hundreds of times a frame while repair crawled — but a dropped
+		// cell's ONLY road home is repair (the cache-diff never re-sends
+		// what it already holds), and the reader is away painting for a
+		// chunk of every epoch's one-frame life. Redundant delta passes
+		// are nearly worthless; repair bandwidth is priceless. Small sets
+		// now give repair most of the wire (full-picture heal in under a
+		// frame); big sets carry their own content. Idle: all repair.
+		uint16_t slot; uint16_t tag;
+		if (sms_delta_n && sms_post_pass_repair == 0) {
+			slot = sms_delta_q[sms_delta_rot];
+			tag  = (uint16_t)(((uint16_t)sms_epoch << 9) | slot);
+		} else {
+			slot = sms_repair_rot;
+			tag  = (uint16_t)(((uint16_t)SMS_EPOCH_REPAIR << 9) | slot);
+			sms_repair_rot = (uint16_t)
+				((sms_repair_rot + 1 >= SMS_TILE_WORDS) ? 0 : sms_repair_rot + 1);
+			if (sms_post_pass_repair) sms_post_pass_repair--;
+		}
+		const uint8_t *t = &sms_game_tiles[slot * 2u];
+		*mars_comm10 = 0xFFFF;              // seqlock: invalidate first
+		*mars_comm6  = (uint16_t)((uint16_t)t[0] | ((uint16_t)t[1] << 8));
+		*mars_comm10 = tag;
+		if (sms_delta_n && (tag >> 9) != SMS_EPOCH_REPAIR
+		    && ++sms_delta_rot >= sms_delta_n) {
+			sms_delta_rot = 0;
+			// End-of-pass MARKER, then hand the wire to repair.
+			*mars_comm10 = (uint16_t)(0x8000
+				| ((uint16_t)sms_epoch << 9) | sms_delta_n);
+			sms_post_pass_repair = 8;
+		}
 	} else if (sms_tile_bcast && ((++sms_tile_div & (SMS_TILE_DIV - 1)) == 0)) {
 		// RATE-LIMITED. do_commands runs thousands of times a frame, so one
 		// slot per call crossed the 384-slot picture many times over -- and
@@ -189,10 +263,23 @@ void do_commands(void) {
 		}
 		break;
 	}
-	case 21: // FULLSCREEN-ON-32X: 1 = broadcast tile ids, 0 = blit to plane B.
-		sms_tile_bcast = (cmd & 0xFF) ? 1 : 0;
+	case 21: // FULLSCREEN-ON-32X: bit0 = broadcast tile ids (0 = blit to
+		// plane B), bit1 = dirty-epoch protocol for the broadcast.
+		sms_tile_bcast    = (uint8_t)(cmd & 1);
+		sms_tile_epoch_on = (uint8_t)((cmd >> 1) & 1);
 		sms_tile_rot = 0;
 		sms_tile_div = 0;
+		if (sms_tile_bcast && sms_tile_epoch_on) {
+			// The whole picture IS epoch 0's set: the first paint arrives
+			// through the same atomic path as every delta after it.
+			for (uint16_t w = 0; w < SMS_TILE_WORDS; w++)
+				sms_delta_q[w] = w;
+			sms_delta_n   = SMS_TILE_WORDS;
+			sms_delta_rot = 0;
+			sms_epoch     = 0;
+			sms_repair_rot = 0;
+			sms_post_pass_repair = 0;
+		}
 		break;
 	case 19: // BUS A/B: arm/disarm the idle COMM0 poll backoff (cmd low byte).
 		bus_throttle = (uint16_t)(cmd & 0xFF);
@@ -238,8 +325,14 @@ void do_commands(void) {
 		zram[Z80_SMS_MAILBOX_DONE] = 0;    // and uninit Z80 RAM boots 0xFF —
 		                                   // a phantom command fired a blind
 		                                   // VDP burst that erased the font
-		*reset = 0x000;                    // assert reset while we still own the bus
+		*reset = 0x000;                    // reset PULSE while we own the bus
 		for (volatile uint16_t d = 0; d < 64; d++) ;   // let it latch
+		*reset = 0x100;                    // release: PC parked at $0000, the
+		                                   // HELD bus keeps the Z80 frozen —
+		                                   // busreq-park, reset high, YM kept
+		                                   // (the pulse wiped it; re-upload
+		                                   // re-arms as everywhere else)
+		z80_parked = 1;
 		// v5: LOAD IN MODE 5, DISPLAY IN MODE 4. Slot-2 forensics closed
 		// the book: in this emulator's mode 4, NO data-port write connects
 		// — not the 68K's (magenta canary CRAM), not the Z80's (all 16
@@ -303,12 +396,11 @@ void do_commands(void) {
 		ym[1] = (uint8_t)val;                // data port
 		for (volatile uint16_t d = 0; d < 32; d++) ;
 		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; }
-		*busreq = 0x000;
-		// NO re-park: the Z80 reset line ALSO RESETS THE YM2612 — parking
-		// the Z80 wipes every FM register (why the chip has been amnesiac
-		// all along). The Z80 stays released and running, like every MD
-		// game ever; an SMS stop re-parks it and therefore kills the hum
-		// until the next toggle.
+		// Release ONLY if a session owns the Z80: the busreq-park IS the
+		// held grant, and dropping it here is what un-parked the chip and
+		// let it free-run into the PSG (the build-302 clip). Reset stays
+		// high throughout, so the YM keeps its registers either way.
+		if (!z80_parked) *busreq = 0x000;
 		break;
 	}
 	case 15: { // YM hum control, ONE command per action (the per-register
@@ -317,7 +409,14 @@ void do_commands(void) {
 		// 1 = upload both hum patches + key bed on, 2 = sting key-on,
 		// 3 = sting release. Patch mirror of sh_src/menu.c ym_hum_set.
 		static const uint8_t hum_patch[][2] = {
-			{0x22, 0x08}, {0x27, 0x00}, {0x2B, 0x00},
+			// LFO OFF (was 0x08, enabled at ~4Hz). With the sample buzz
+			// retired, the LFO's amplitude wobble on the bed played naked
+			// and read as tick-tick-tick — THE build-302 "clipping" (the
+			// Z80 was innocent; it is parked and frozen now regardless).
+			// The bed runs flat until the FM lab retunes a subtle wobble
+			// via FMS instead of AM. (The menu.c ym_hum_set mirror this
+			// table's comment referenced no longer exists.)
+			{0x22, 0x00}, {0x27, 0x00}, {0x2B, 0x00},
 			// ch1: neon sting
 			{0x30, 0x01}, {0x34, 0x03}, {0x38, 0x02}, {0x3C, 0x14},
 			{0x40, 0x28}, {0x44, 0x34}, {0x48, 0x20}, {0x4C, 0x3A},
@@ -370,12 +469,9 @@ void do_commands(void) {
 		}
 		#undef YMW
 		{ uint32_t g = 200; while ((ym[0] & 0x80) && --g) ; }
-		*busreq = 0x000;
-		// NO re-park: the Z80 reset line ALSO RESETS THE YM2612 — parking
-		// the Z80 wipes every FM register (why the chip has been amnesiac
-		// all along). The Z80 stays released and running, like every MD
-		// game ever; an SMS stop re-parks it and therefore kills the hum
-		// until the next toggle.
+		// Same rule as case 14: the held grant IS the park; only a live
+		// session releases the bus. Reset high, YM registers survive.
+		if (!z80_parked) *busreq = 0x000;
 		break;
 	}
 	case 10: { // SMS STOP: sweep the splash rows, park the Z80. NOTHING MORE.
@@ -402,15 +498,14 @@ void do_commands(void) {
 			}
 		}
 		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
-		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
-		// BOUNDED grant wait — the last unbounded spin in the whole SMS
-		// chain. If the grant never comes, proceed: we only want the Z80
-		// parked, and asserting reset needs no bus.
+		// BUSREQ-park, not reset-park (see z80_parked): reset stays HIGH so
+		// the YM keeps its registers, the held grant freezes the CPU. The
+		// old "leaving it requested left the machine odd" was a pending
+		// request against a reset-held Z80; this grant is taken while the
+		// chip runs, which is the ordinary 68K-owns-the-bus state.
 		*busreq = 0x100;
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
-		*reset = 0x000;                    // park the Z80 in reset again
-		*busreq = 0x000;                   // and RELEASE the bus — leaving it
-		                                   // requested left the machine odd
+		z80_parked = 1;
 		break;
 	}
 	case 11: { // SMS GAME MAP: stage one word of the level patch (index in
@@ -464,6 +559,7 @@ void do_commands(void) {
 		*reset = 0x100;                    // ...and let the Z80 run from $0000
 		sms_game_on = 1;
 		sms_glass_on = 0;                  // modal takes the one Z80 over
+		z80_parked = 0;                    // the session owns the bus now
 		break;
 	}
 	case 16: { // SMS GLASS BOOT: same upload + map patch + run, but
@@ -502,6 +598,7 @@ void do_commands(void) {
 		sms_glass_on = 1;
 		sms_glass_rot = 0;
 		sms_game_on = 0;
+		z80_parked = 0;                    // the glass session owns the bus now
 		break;
 	}
 	case 18: { // GLASS -> FULLSCREEN handoff. The SAME Z80 keeps running:
@@ -545,12 +642,11 @@ void do_commands(void) {
 	case 17: { // SMS GLASS STOP: park the Z80, silence the PSG. No
 		// name-table sweep — the glass session never touched it.
 		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
-		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
 		sms_glass_on = 0;
+		// BUSREQ-park (see z80_parked): reset high, YM survives, CPU held.
 		*busreq = 0x100;
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
-		*reset = 0x000;
-		*busreq = 0x000;
+		z80_parked = 1;
 		{
 			volatile uint8_t *psg = (uint8_t *)0xC00011;
 			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
@@ -559,12 +655,13 @@ void do_commands(void) {
 	}
 	case 13: { // SMS GAME STOP: park the Z80, sweep the playfield rows.
 		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
-		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
 		sms_game_on = 0;
+		// BUSREQ-park (see z80_parked): frozen mid-program, reset HIGH so
+		// the hum's YM registers survive the session. The next boot's
+		// reset pulse gives the game a clean start.
 		*busreq = 0x100;                   // bounded — see SMS STOP
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
-		*reset = 0x000;
-		*busreq = 0x000;
+		z80_parked = 1;
 		{	// the Z80 died mid-note: silence the PSG (teardown rule, 4a)
 			volatile uint8_t *psg = (uint8_t *)0xC00011;
 			*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
@@ -601,10 +698,35 @@ static void sms_game_frame(uint8_t modal) {
 	{ uint32_t g = 100000; while ((*busreq & 0x100) && --g) ; }
 	zram[Z80_GAME_PAD_MBX] = pad;
 	zram[Z80_GAME_FRAME_MBX] = (uint8_t)(zram[Z80_GAME_FRAME_MBX] + 1);
+	// START-ownership flag, stateless: while STATE_MBX==1 (debrief OR the
+	// diagnostics page) the SH-2 lets START through to the Z80 (which
+	// returns to its terminal) instead of exiting the session. COMM8 b14.
+	sms_debrief = (uint8_t)(modal && zram[Z80_GAME_STATE_MBX] == 1);
 	dirty = zram[Z80_GAME_DIRTY_MBX];
 	if (dirty) {
-		for (uint16_t i = 0; i < Z80_GAME_TILEBUF_LEN; i++)
-			sms_game_tiles[i] = zram[Z80_GAME_TILEBUF + i];
+		if (sms_tile_bcast && sms_tile_epoch_on) {
+			// DIRTY-EPOCH: diff against the cache while copying and queue
+			// only the changed words as the next epoch's set. Payload
+			// stays absolute, so this is a filter, never a dependency.
+			uint16_t n = 0;
+			for (uint16_t w = 0; w < Z80_GAME_TILEBUF_LEN / 2; w++) {
+				uint8_t a = zram[Z80_GAME_TILEBUF + w * 2u];
+				uint8_t b = zram[Z80_GAME_TILEBUF + w * 2u + 1];
+				if (a != sms_game_tiles[w * 2u] || b != sms_game_tiles[w * 2u + 1]) {
+					sms_game_tiles[w * 2u]     = a;
+					sms_game_tiles[w * 2u + 1] = b;
+					sms_delta_q[n++] = w;
+				}
+			}
+			if (n) {
+				sms_delta_rot = 0;
+				sms_delta_n   = n;
+				sms_epoch = (uint8_t)((sms_epoch + 1) % SMS_EPOCH_REPAIR);
+			}
+		} else {
+			for (uint16_t i = 0; i < Z80_GAME_TILEBUF_LEN; i++)
+				sms_game_tiles[i] = zram[Z80_GAME_TILEBUF + i];
+		}
 		zram[Z80_GAME_DIRTY_MBX] = 0;
 	}
 	*busreq = 0x000;
@@ -651,14 +773,25 @@ uint16_t pad_sticky(uint8_t n, uint16_t p) {
 
 __attribute__((section(".data")))
 void main(void) {
-	// PARK THE PSG. The SN76489 comes up with its four channels in an
-	// undefined state, and until the Z80 work landed nothing in this program
-	// ever touched the chip -- the only writes in the file are inside the SMS
-	// boot/stop commands, which a player may never reach. So it sang from
-	// power-on and nothing ever silenced it. Attenuation 15 on all four
-	// channels, once, before anything else runs. This is also the teardown
-	// rule from sms/DESIGN.md 4a applied where it was missing: at startup,
-	// not just at teardown.
+	// PARK THE Z80 AND THE PSG, in that order — and park with BUSREQ, not
+	// reset. Attenuating the PSG once is not enough: a free-running Z80
+	// keeps hitting the sound chip (the build-302 clip). But a reset-hold
+	// park resets the YM2612 with it AND the YM command paths release
+	// reset anyway, dissolving the park seconds after boot. So: request
+	// the bus first (pending — no grant comes while reset is low), then
+	// release reset; the Z80 executes at most an instruction or two of
+	// zeroed RAM before the grant freezes it, reset stays high, the
+	// Yamaha lives, and the held grant IS the park.
+	{
+		volatile uint16_t *busreq = (uint16_t *)Z80_BUS_REQ;
+		volatile uint16_t *reset  = (uint16_t *)Z80_RESET;
+		*busreq = 0x100;                   // pending until reset releases
+		*reset  = 0x100;
+		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
+		z80_parked = 1;                    // bus stays held: frozen, not reset
+	}
+	// The teardown rule from sms/DESIGN.md 4a applied at startup too:
+	// attenuation 15 on all four channels, before anything else runs.
 	{
 		volatile uint8_t *psg = (uint8_t *)0xC00011;
 		*psg = 0x9F; *psg = 0xBF; *psg = 0xDF; *psg = 0xFF;
@@ -684,7 +817,15 @@ void main(void) {
 		// command 3, still serviced above for compatibility) is what starved
 		// the bridge under render contention. P2 is published for free; no
 		// gameplay reads COMM10 yet.
-		*mars_comm8  = pad_sticky(0, read_joypad(0));
+		{
+			// COMM8 bit 15 is provably free (read_joypad masks to 13
+			// bits): it carries the Z80 terminal's DIAGNOSTIC request
+			// (STATE_MBX=2, latched by sms_game_frame) up to the SH-2,
+			// which tears the game session down and boots the diag.
+			uint16_t p = pad_sticky(0, read_joypad(0));
+			if (sms_debrief) p |= 0x4000;
+			*mars_comm8 = p;
+		}
 		if (!sms_glass_on && !sms_tile_bcast)   // both broadcasts borrow COMM10
 			*mars_comm10 = pad_sticky(1, read_joypad(1));
 		*mars_comm12 = ++timer;

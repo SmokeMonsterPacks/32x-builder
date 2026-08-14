@@ -343,6 +343,14 @@ procgen-test:
 	@cc -Ish_src -o /tmp/pgtest tools/test_procgen.c sh_src/procgen.c
 	@/tmp/pgtest 5000
 
+# Shadow-VDP harness: the REAL mode-4 renderer (sh_src/smsvdp.c) driven on
+# the host exactly the way SMS code drives the silicon — port writes only —
+# with pixel assertions and a PPM test card for eyes. Run after touching
+# smsvdp.c, before any ROM wiring. Same pattern as procgen-test.
+vdp-test:
+	@cc -Ish_src -o /tmp/vdptest tools/test_smsvdp.c sh_src/smsvdp.c
+	@/tmp/vdptest /tmp/vdp_testcard.ppm
+
 # Auto-generated header dependency files. -MMD emits one per .c next to
 # the .o; -include silently ignores them on a clean tree. Without this,
 # header changes don't trigger rebuilds and you ship stale .o files

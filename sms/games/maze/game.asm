@@ -77,14 +77,16 @@ BANKS 1
 .DEFINE VAR_EATT  $1CB5   ; music: echo attenuation
 .DEFINE VAR_EFADE $1CB6   ; music: frames to next echo fade step
 .DEFINE ECHO_Q    $1CB8   ; music: 4 slots x (countdown, div_lo, div_hi)
-.DEFINE VAR_GSTATE $1CC4  ; 0 = menu screen, 1 = playing the maze
-.DEFINE VAR_REVEAL $1CC5  ; menu: banner wipe column (0..31, 32 = text, 33 = done)
+.DEFINE VAR_GSTATE $1CC4  ; 0 = SPECS TERMINAL, 1 = maze, 2 = title card
+.DEFINE VAR_REVEAL $1CC5  ; card: banner wipe column (0..31, 32 = text, 33 =
+                          ; done). Terminal: 0 = needs paint, 1 = painted.
 .DEFINE VAR_MUSON  $1CC6  ; 1 = chime finished, SPACE-A engine owns the PSG
 .DEFINE VAR_CHF    $1CC7  ; chime: frame counter
 .DEFINE VAR_CHATT  $1CC8  ; chime: fade attenuation
 .DEFINE VAR_CHSUB  $1CC9  ; chime: frames to next fade step
 .DEFINE VAR_TMPR   $1CCA  ; banner scratch: band row0
 .DEFINE VAR_TMPC   $1CCB  ; banner scratch: screen column
+.DEFINE VAR_MSEL   $1CCC  ; terminal: 0 = TEST PATTERN, 1 = FIELD MAP
 .DEFINE PSG       $7F11   ; SN76489, memory-mapped in Z80 space (no OUT)
 .DEFINE HEART     $1F00   ; liveness ripple for save-state forensics
 .DEFINE PAD_MBX   $1FF4
@@ -121,21 +123,14 @@ BANKS 1
    ; banner and text — everything around them was last run's leftovers, and
    ; they piled up boot after boot (Mike: clean, then extra chars, then a
    ; screen of garbage). Start from a dark screen, every time.
-   ld hl, TILEBUF
-   ld bc, 768
-clr_tilebuf:
-   ld (hl), 0
-   inc hl
-   dec bc
-   ld a, b
-   or c
-   jr nz, clr_tilebuf
+   call clear_screen
    call music_init
-   xor a                   ; boot into the MENU: banner wipe + boot chime
-   ld (VAR_GSTATE), a      ; (derived from BIOS 1.3's masked-sprite reveal
-   ld (VAR_REVEAL), a      ; and tone-ramp SE-GA swell — mechanisms, not
-   ld (VAR_MUSON), a       ; Sega's data). A button hands over to the maze.
+   xor a                   ; boot into the SPECS TERMINAL (clinical operating
+   ld (VAR_GSTATE), a      ; card, Mike 2026-08-13): TEST PATTERN and FIELD
+   ld (VAR_REVEAL), a      ; MAP are its two entries. The boot chime plays
+   ld (VAR_MUSON), a       ; over it, same as it did over the old card.
    ld (VAR_CHF), a
+   ld (VAR_MSEL), a
 
 ; ---------------- main loop: one logic step per 68K frame tick ------
 loop:
@@ -148,14 +143,26 @@ loop:
    ld (hl), a
    ld a, (VAR_GSTATE)
    or a
+   jr z, do_terminal
+   cp 3
+   jr z, do_diag
+   cp 2
    jr nz, game_frame
-   call menu_tick
+   call menu_tick          ; state 2: the TEST PATTERN card (dormant)
+   jp loop
+do_terminal:
+   call terminal_tick      ; state 0: the specs terminal
+   jp loop
+do_diag:
+   call diag_tick          ; state 3: diagnostics page
    jp loop
 game_frame:
    call music_or_chime     ; music runs through the escape screen too
    ld a, (STATE_MBX)
    or a
-   jr nz, loop             ; escaped: idle until the 68K tears us down
+   jp nz, debrief_tick     ; escaped: debrief until START returns to the
+                           ; terminal (the second START, seen there, is the
+                           ; 32X's session exit — layered by design)
 
    ; ---- input: edge detect + held auto-repeat on the d-pad ----
    ld a, (PAD_MBX)
@@ -410,6 +417,250 @@ copy_str:
 ; table sweep landing on G minor (G3/D4/G4), hold, stepped fade, then
 ; the SPACE-A engine takes the channels. Any of A/B/C starts the maze.
 
+; ---------------- state 3: DIAGNOSTICS ------------------------------
+; Stats + live controller test. FRAME and HEART tick as hex (the machine
+; visibly alive), the pad row lights each button as held. START returns
+; to the terminal and hands START back to the 32X (STATE_MBX -> 0).
+diag_tick:
+   call music_or_chime
+   ld a, (VAR_REVEAL)
+   or a
+   jr nz, diag_live
+   ld hl, TILEBUF + 2*32 + 10
+   ld de, s_d1
+   ld b, 11
+   call copy_str
+   ld hl, TILEBUF + 6*32 + 6
+   ld de, s_d2
+   ld b, 6
+   call copy_str
+   ld hl, TILEBUF + 8*32 + 6
+   ld de, s_d3
+   ld b, 6
+   call copy_str
+   ld hl, TILEBUF + 10*32 + 6
+   ld de, s_d4
+   ld b, 4
+   call copy_str
+   ld hl, TILEBUF + 21*32 + 9
+   ld de, s_d5
+   ld b, 13
+   call copy_str
+   ld a, 1
+   ld (VAR_REVEAL), a
+diag_live:
+   ld a, (FRAME_MBX)
+   ld hl, TILEBUF + 6*32 + 13
+   call hex_cells
+   ld a, (HEART)
+   ld hl, TILEBUF + 8*32 + 13
+   call hex_cells
+   ld a, (PAD_MBX)         ; lamps: U D L R B C A S, bit 0 first
+   ld c, a
+   ld hl, TILEBUF + 10*32 + 11
+   ld de, lamp_letters
+   ld b, 8
+lamp_loop:
+   ld a, (de)
+   rrc c
+   jr c, lamp_on
+   ld a, 40                ; '-' unpressed
+lamp_on:
+   ld (hl), a
+   inc hl
+   inc hl                  ; gap cell
+   inc de
+   djnz lamp_loop
+   ld a, 1
+   ld (DIRTY_MBX), a
+   ld a, (PAD_MBX)         ; START edge -> terminal
+   ld b, a
+   ld hl, VAR_PPREV
+   ld c, (hl)
+   ld (hl), b
+   ld a, c
+   cpl
+   and b
+   and $80
+   ret z
+   call clear_screen
+   xor a
+   ld (STATE_MBX), a       ; START ownership back to the 32X
+   ld (VAR_GSTATE), a
+   ld (VAR_REVEAL), a
+   ld (VAR_MSEL), a
+   ld a, 1
+   ld (DIRTY_MBX), a
+   ret
+
+hex_cells:                 ; a = byte -> two hex tile ids at (hl)
+   push af
+   rra
+   rra
+   rra
+   rra
+   call hex_glyph
+   ld (hl), a
+   inc hl
+   pop af
+   call hex_glyph
+   ld (hl), a
+   ret
+hex_glyph:                 ; a low nibble -> tile id. The boot font is
+   and $0F                 ; contiguous 0-9 then A-Z, so hex is ONE add:
+   add a, 2                ; nibble 0->'0'(2) ... 10->'A'(12) ... 15->'F'.
+   ret
+
+; Debrief: EXERCISE COMPLETE stays up until a fresh START, which resets the
+; whole machine state back to the SPECS TERMINAL. Every other button idles.
+debrief_tick:
+   ld a, (PAD_MBX)
+   ld b, a
+   ld hl, VAR_PPREV
+   ld c, (hl)
+   ld (hl), b
+   ld a, c
+   cpl
+   and b
+   and $80                 ; START edge only
+   jp z, loop
+   call clear_screen
+   xor a
+   ld (STATE_MBX), a       ; drops the 68K's debrief flag too
+   ld (VAR_GSTATE), a      ; -> terminal state
+   ld (VAR_REVEAL), a      ; terminal repaints fresh
+   ld (VAR_MSEL), a
+   ld a, 1
+   ld (DIRTY_MBX), a
+   jp loop
+
+; Shared full-screen wipe (boot, and every state hand-over — the card wipe
+; and the terminal both paint on dark, and TILEBUF holds last state's text).
+clear_screen:
+   ld hl, TILEBUF
+   ld bc, 768
+clr_loop:
+   ld (hl), 0
+   inc hl
+   dec bc
+   ld a, b
+   or c
+   jr nz, clr_loop
+   ret
+
+; ---------------- state 0: the SPECS TERMINAL -----------------------
+; Clinical operating card: Master System specs, the level's specimen id,
+; two runnable entries (TEST PATTERN diag card / FIELD MAP maze), and the
+; exit contract in the footer (ENTER = the 32X's session exit; this side
+; only documents it). UP/DOWN move the cursor, A runs the selection.
+terminal_tick:
+   ld a, (VAR_REVEAL)
+   or a
+   jr nz, term_input
+   ; one-shot paint
+   ld hl, TILEBUF + 2*32 + 9
+   ld de, s_t1
+   ld b, 13
+   call copy_str
+   ld hl, TILEBUF + 5*32 + 6
+   ld de, s_t2
+   ld b, 18
+   call copy_str
+   ld hl, TILEBUF + 7*32 + 6
+   ld de, s_t3
+   ld b, 15
+   call copy_str
+   ld hl, TILEBUF + 9*32 + 6
+   ld de, s_t4
+   ld b, 19
+   call copy_str
+   ld hl, TILEBUF + 11*32 + 6
+   ld de, s_t5
+   ld b, 9
+   call copy_str
+   ld hl, TILEBUF + 11*32 + 16
+   ld de, MAP_NAME
+   ld b, 16
+   call copy_str
+   ld hl, TILEBUF + 15*32 + 8
+   ld de, s_o1
+   ld b, 10
+   call copy_str
+   ld hl, TILEBUF + 17*32 + 8
+   ld de, s_o2
+   ld b, 9
+   call copy_str
+   ld hl, TILEBUF + 21*32 + 10
+   ld de, s_t6
+   ld b, 11
+   call copy_str
+   call term_cursor
+   ld a, 1
+   ld (VAR_REVEAL), a
+   ld a, 1
+   ld (DIRTY_MBX), a
+term_input:
+   call music_or_chime
+   ld a, (PAD_MBX)
+   ld b, a
+   ld hl, VAR_PPREV
+   ld c, (hl)
+   ld (hl), b
+   ld a, c
+   cpl
+   and b                   ; a = newly pressed
+   ld d, a
+   and $03                 ; UP or DOWN: flip the 2-entry cursor
+   jr z, term_try_a
+   ld a, (VAR_MSEL)
+   xor 1
+   ld (VAR_MSEL), a
+   call term_cursor
+   ld a, 1
+   ld (DIRTY_MBX), a
+term_try_a:
+   ld a, d
+   and $40                 ; A runs the selection
+   ret z
+   ld a, (VAR_MSEL)
+   or a
+   jr nz, term_run_map
+   ; DIAGNOSTICS (state 3): stats + live controller test, IN THIS BLOB —
+   ; one ROM, every road leads back to this terminal (Mike). STATE_MBX=1
+   ; while the page is up so the 32X defers START to us, exactly like the
+   ; debrief does; our START handler drops it and repaints the terminal.
+   call clear_screen
+   xor a
+   ld (VAR_REVEAL), a
+   ld a, 3
+   ld (VAR_GSTATE), a
+   ld a, 1
+   ld (STATE_MBX), a
+   ld (DIRTY_MBX), a
+   ret
+term_run_map:
+   ld a, 1
+   ld (VAR_GSTATE), a
+   jp build_frame          ; full rebuild overwrites the terminal
+
+; cursor glyphs for both option rows: '>' (41) on the pick, dark on the other
+term_cursor:
+   ld a, (VAR_MSEL)
+   or a
+   jr nz, term_cur_map
+   ld a, 41
+   ld (TILEBUF + 15*32 + 6), a
+   xor a
+   ld (TILEBUF + 17*32 + 6), a
+   ret
+term_cur_map:
+   xor a
+   ld (TILEBUF + 15*32 + 6), a
+   ld a, 41
+   ld (TILEBUF + 17*32 + 6), a
+   ret
+
+; ---------------- state 2: the TEST PATTERN card --------------------
 menu_tick:
    ld a, (VAR_REVEAL)
    cp 33
@@ -1039,6 +1290,21 @@ band_test:    .DB 4, 8, 4, 0, 1, 2, 0             ; TEST, rows 4-8
 band_pattern: .DB 10, 2, 7, 3, 4, 0, 0, 1, 5, 6   ; PATTERN, rows 10-14
 
 ; boot-font tile ids: A=12..Z=37, 0=space ('#'-less world)
+; terminal strings (tile ids: 0=sp, 2-11='0'-'9', 12-37='A'-'Z', 38=':' 39='.')
+s_t1: .DB 24,12,30,31,16,29,0,30,36,30,31,16,24                   ; MASTER SYSTEM
+s_t2: .DB 14,27,32,38,0,37,10,2,12,0,5,39,7,10,0,24,19,37         ; CPU: Z80A 3.58 MHZ
+s_t3: .DB 29,12,24,38,0,10,3,11,4,0,13,36,31,16,30                ; RAM: 8192 BYTES
+s_t4: .DB 33,15,27,38,0,30,19,12,15,26,34,0,23,20,25,22,0,26,22   ; VDP: SHADOW LINK OK
+s_t5: .DB 30,27,16,14,20,24,16,25,38                              ; SPECIMEN:
+s_o1: .DB 15,20,12,18,25,26,30,31,20,14                           ; DIAGNOSTIC
+s_o2: .DB 17,20,16,23,15,0,24,12,27                               ; FIELD MAP
+s_t6: .DB 16,25,31,16,29,38,0,16,35,20,31                         ; ENTER: EXIT
+s_d1: .DB 15,20,12,18,25,26,30,31,20,14,30                        ; DIAGNOSTICS
+s_d2: .DB 17,29,12,24,16,38                                       ; FRAME:
+s_d3: .DB 19,16,12,29,31,38                                       ; HEART:
+s_d4: .DB 27,12,15,38                                             ; PAD:
+s_d5: .DB 30,31,12,29,31,38,0,29,16,31,32,29,25                   ; START: RETURN
+lamp_letters: .DB 32,15,23,29,13,14,12,30                         ; U D L R B C A S
 s_press:    .DB 12,0,31,26,0,13,16,18,20,25,0,16,35,16,29,14,20,30,16 ; A TO BEGIN EXERCISE
 s_complete: .DB 16,35,16,29,14,20,30,16,0,14,26,24,27,23,16,31,16    ; EXERCISE COMPLETE
 s_pexit:    .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT

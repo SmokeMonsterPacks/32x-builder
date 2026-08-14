@@ -254,9 +254,19 @@ class Z80:
         if op == 0xC5:  self.push(self.bc()); return
         if op == 0xD5:  self.push(self.de()); return
         if op == 0xE5:  self.push(self.hl()); return
+        if op == 0xF5:                                # push af (flags: C+Z only,
+            self.push((self.a << 8)                   #  the subset the sim keeps)
+                      | (0x40 if self.fz else 0) | (0x01 if self.fc else 0))
+            return
         if op == 0xC1:  self.set_bc(self.pop()); return
         if op == 0xD1:  self.set_de(self.pop()); return
         if op == 0xE1:  self.set_hl(self.pop()); return
+        if op == 0xF1:                                # pop af
+            v = self.pop()
+            self.a = (v >> 8) & 0xFF
+            self.fz = bool(v & 0x40)
+            self.fc = bool(v & 0x01)
+            return
         if op == 0xCB:                                # CB prefix: sla/srl
             sub = self.fetch()
             i = sub & 7
@@ -270,6 +280,10 @@ class Z80:
             elif 0x18 <= sub <= 0x1F:                 # rr (through carry)
                 c = v & 1
                 v = (v >> 1) | (0x80 if self.fc else 0)
+                self.fc = bool(c)
+            elif 0x08 <= sub <= 0x0F:                 # rrc (bit0 -> bit7 + carry)
+                c = v & 1
+                v = (v >> 1) | (c << 7)
                 self.fc = bool(c)
             else:
                 raise NotImplementedError(f"CB {sub:02X}")
@@ -359,22 +373,52 @@ def check(name, cond):
         fails += 1
 
 
-# boot: lands on the MENU (banner wipe + chime), not the game
+# boot: lands on the SPECS TERMINAL (clinical operating card), not the
+# card and not the game
 for _ in range(400000):
     cpu.step()
-check("boot: menu not game (no frame, no player)",
+check("boot: terminal not game (no frame, no player)",
       mem[DIRTY] == 0 and find_player() is None)
-settle(34)                           # 32 wipe columns + the text step
-check("menu: TEST banner drawn", tile(4, 8) == 44 and tile(4, 10) == 44)
-check("menu: PATTERN banner drawn", tile(10, 2) == 44 and tile(10, 3) == 44)
-check("menu: name on the title card", tile(17, 12) == 30)  # S of SIMMAZE
-check("menu: A TO BEGIN EXERCISE prompt", tile(20, 6) == 12)
-check("menu: stale TILEBUF cleared (no leftovers from a prior boot)",
-      all(tile(r, c) == 0 for r in (0, 1, 2, 3, 9, 15, 22, 23)
-                          for c in range(32)))
+settle(2)                            # first tick paints the terminal
+check("terminal: MASTER SYSTEM header", tile(2, 9) == 24)      # M
+check("terminal: CPU spec line", tile(5, 6) == 14)             # C of CPU:
+check("terminal: specimen shows the map name", tile(11, 20) == 30)  # S
+      # (MAP_NAME is a centre-padded 16-byte field: SIMMAZE starts 4 in)
+check("terminal: cursor on TEST PATTERN",
+      tile(15, 6) == 41 and tile(17, 6) == 0)
+check("terminal: ENTER: EXIT footer", tile(21, 10) == 16)      # E
 mem[DIRTY] = 0
-settle(80)                           # chime completes at frame 106
-check("menu: no redraw while idle", mem[DIRTY] == 0)
+run_frame(0x02)                      # DOWN: cursor to FIELD MAP
+check("terminal: cursor moves to FIELD MAP",
+      tile(17, 6) == 41 and tile(15, 6) == 0 and mem[DIRTY] == 1)
+run_frame(0x00)
+run_frame(0x01)                      # UP: cursor back
+check("terminal: cursor returns to TEST PATTERN", tile(15, 6) == 41)
+run_frame(0x00)
+mem[DIRTY] = 0
+run_frame(0x40)                      # A opens DIAGNOSTICS (state 3, in-blob)
+run_frame(0x00)
+check("diag: page painted (DIAGNOSTICS title)", tile(2, 10) == 15)
+check("diag: Z80 owns START while the page is up", mem[STATE] == 1)
+run_frame(0x40)                      # hold A: controller-test lamp lights
+check("diag: A lamp lights", tile(10, 23) == 12)
+run_frame(0x00)
+check("diag: A lamp clears", tile(10, 23) == 40)
+f1 = tile(6, 14)                     # FRAME hex low digit ticks
+run_frame(0x00)
+check("diag: FRAME counter is live", tile(6, 14) != f1)
+run_frame(0x80)                      # START returns to the terminal
+run_frame(0x00)
+settle(2)
+check("diag -> terminal: header back", tile(2, 9) == 24)
+check("diag -> terminal: START ownership returned", mem[STATE] == 0)
+check("terminal: stale TILEBUF cleared (no leftovers)",
+      all(tile(r, c) == 0 for r in (0, 1, 3, 22, 23) for c in range(32)))
+mem[DIRTY] = 0
+settle(80)                           # chime completes; terminal is static
+check("terminal: no redraw while idle", mem[DIRTY] == 0)
+run_frame(0x02)                      # DOWN to FIELD MAP
+run_frame(0x00)
 run_frame(0x40)                      # A begins the exercise
 check("button starts game: player at spawn (2,2)",
       mem[DIRTY] == 1 and tile(2, 2) == T_PLAYER)
@@ -568,6 +612,17 @@ check(f"debrief: level name stamped ({nm.strip()!r})",
 p2 = find_player()
 settle(3, 0x08)
 check("escaped: further input ignored", mem[STATE] == 1)
+
+# START from the debrief returns to the SPECS TERMINAL (the layered exit:
+# this first START belongs to the Z80; the second, seen at the terminal,
+# is the 32X's session exit — out of this sim's jurisdiction).
+run_frame(0x00)
+run_frame(0x80)                      # START edge
+run_frame(0x00)
+check("debrief: START drops STATE (68K flag falls with it)", mem[STATE] == 0)
+settle(2)
+check("debrief -> terminal: specs header repainted", tile(2, 9) == 24)
+check("debrief -> terminal: cursor home on DIAGNOSTIC", tile(15, 6) == 41)
 
 if fails:
     print("\n".join(frame_rows()))

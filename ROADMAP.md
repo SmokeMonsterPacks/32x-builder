@@ -91,7 +91,16 @@ the input-to-photon delay — halving it cost nothing, Z80 music verified
 fine) → whole-picture promote → native 8x8 paint. Roughly one frame
 behind the old MD-blit path, worst case.
 
-Banked next step — **dirty-epoch deltas**: the Z80 already flags DIRTY
+**BUILT FLAGGED 2026-08-13** (TESTING>EPOCH, default OFF; legacy rotation
+is the shipped arm — promote on the bake-off, not the vibe). As designed
+below, plus: payloads are ABSOLUTE content so a lost epoch only leaves
+stale cells; repair slots ride epoch tag 63 (full rate when idle, 1-in-32
+under deltas); the whole picture queues as epoch 0 at arm so the first
+paint is atomic; the COMM10 word keeps 6 epoch bits + bit15 for markers,
+leaving the format room for the per-cell attribute bits the accuracy arc
+wants. Original design rationale:
+
+Dirty-epoch deltas: the Z80 already flags DIRTY
 and the 68K knows exactly which words changed at copy time, so
 broadcast only the changed words tagged with a frame epoch; the SH-2
 applies epoch N atomically. Collapses small-change latency to transport
@@ -109,6 +118,88 @@ palette entry; real SMS tiles carry palette bits), sprite layer (the
 harness is tile-only today), and the mode-4 duet (~64a0a21) for real
 .sms compatibility. Each widens the channel or the Z80 contract; sized
 separately when the arc is scheduled.
+
+### Shadow VDP: real mode 4 on the 32X  (Mike, 2026-08-13 — the killer feature)
+**North star:** the console in the backrooms shows ACTUAL Master System
+output. The Z80 is real silicon (cycle-identical, better than emulated);
+the only missing chip is the VDP, and the VDP is write-only in practice —
+so it reduces to a state machine eating port writes plus a renderer.
+The zoom then dives into a real machine: the storytelling element.
+
+**Slice 1 ✅ BUILT + HOST-VERIFIED 2026-08-13:** sh_src/smsvdp.c — true
+mode-4 shadow VDP: control-port latch semantics, 16KB VRAM + CRAM + regs,
+name table with h/v flip + palette select + priority, 4bpp planar
+patterns, sprites (8x8/8x16, lowest-number-wins, priority-respecting),
+X/Y scroll, left-column blank, border, display gate. `make vdp-test`
+drives it with port writes only, asserts 11 pixels, and drops a PPM test
+card. Not yet: zoomed sprites, per-line raster, scroll locks, the
+8-per-line overflow flag.
+
+**Slice 2 (next):** the wire. Z80-side driver = a port-write ring in Z80
+RAM (real SMS VRAM can't fit in 8KB — the ring IS the latch Mike named);
+68K drains the ring into the dirty-epoch channel (built, flagged, ear-
+verified faster today); SH-2 feeds smsvdp and blits its 256x192 into the
+session frame with the SMS palette bridged into 32X CRAM. Sim harness
+extension before build roulette, per the house rule.
+
+**Slice 3:** a Z80 program that draws like an SMS — TEST PATTERN card
+rebuilt in real mode 4 (colour, sprites); then the mini-game inherits
+the whole SMS art vocabulary. The fidelity ceiling stops being the
+channel and becomes the art.
+
+### Every game ships as a real .sms  (Mike, 2026-08-13 — artifact pass)
+Each compiled SMS game also emits a `games/<name>/<name>.sms` playable
+on actual Master System hardware — the proof the games are real SMS
+programs, not demos. hello already dual-targets (hello.sms passed real
+hardware 2026-08-09); the maze needs four pieces, all scoped: (1) PSG
+write indirection (the $7F11 memory-mapped write is an MD-ism; real SMS
+is OUT $7F — one routine, conditionally assembled, byte-parity sim
+guards the refactor), (2) an SMS harness shim implementing the same
+mailbox contract from vblank ISR + pad port + real VDP blit (hello.asm
+has the VDP init, font upload, and SEGA header to lift), (3) a baked
+canonical map in the MAP_BITS hole at assembly time (no 68K patcher on
+real hardware), (4) the Makefile artifact target. OpenEmu loads .sms
+for the verify loop. Sized for the SMS polish thread: pure sms/ work,
+zero 32X coupling.
+
+### SMS games gate the backrooms  (Mike, 2026-08-13 — the engine becomes a game)
+**North star:** the console stops being a diegetic toy and becomes the
+key. Some procgen rooms generate with NO exit; the player discovers this
+on a terminal (the START overlay already speaks nix — an `exits: none`
+readout is the discovery beat) and the way out is on the other side of
+the glass: something done in the Master System game reveals or opens an
+exit in the room the player is standing in.
+
+**The interference channel:** map items inside the SMS ROM carry real
+procedural-map consequences in the backrooms. This is the piece that
+turns the display plumbing (game-on-glass, zoom, shadow VDP) into a
+game loop — state flows back OUT of the Z80 for the first time, not
+just pictures. Plumbing exists in sketch form: the joypad bridge and
+COMM channel already run both directions; what's new is a small
+Z80→68K→SH-2 *event* contract ("level exited, solved=Y/N", "item
+touched") distinct from the tile stream.
+
+**Exit-revealing mechanisms** (each is a distinct authored device, all
+end in "the room now has an exit"):
+1. **Interfacing a game** — play the SMS game to a goal state.
+2. **Power** — leveraging power somewhere in the world.
+3. **A switch** — the direct version; probably the first one built.
+4. **An anomaly** — no design yet, but Mike flags it as a key feature.
+   See *Mind-bending anomalies* under Level / geometry; those stop
+   being ambience and become load-bearing.
+
+**Solved-flag contract:** exiting a maze level flags it SOLVED. Exiting
+a maze level UNSOLVED and being returned to the Master System game is a
+meaningful state, not a dead end — by design, something must then
+happen, either in the backrooms or in the SMS game, to move the player
+forward. The unsolved return is itself a trigger the design spends.
+
+Open questions to settle at build time: where solved flags live (Z80
+RAM dies with the session — 68K or SDRAM owns persistence); whether a
+no-exit room is a procgen tag or authored; how the exit appears
+(reveal an always-there hidden exit vs carve one — `place_exit_door`
+and the exit-hole path are the reuse candidates); what the terminal
+readout looks like; anomaly design entirely.
 
 ### Ceiling lights as actual grid-tile illumination
 **Status:** ✅ done — scanline trapezoid fill from 4 projected corners
@@ -393,6 +484,9 @@ the recommendation maps cleanly to the existing infrastructure with
 Single dark rectangle on one wall hinting at "the way out."
 
 ### Mind-bending anomalies
+Now load-bearing, not just ambience: the *SMS games gate the backrooms*
+arc (Visual / atmospheric) wants an anomaly as one of its
+exit-revealing mechanisms.
 - ✅ partial — distant fluorescent strobe on walls past `FOG_RAMP_DIST`.
   Per-cell hash + shared frame counter make distant dark cells
   occasionally flicker to dim-yellow ("a fluorescent panel trying

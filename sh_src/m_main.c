@@ -906,7 +906,11 @@ static void lobby_action_row(uint8_t *fb, int x, int y, int sel, const char *lab
 #define PANE_X 48
 #define PANE_Y 24
 #define PANE_W 224
-#define PANE_H 156
+#define PANE_H 176   /* = MENU_H_PX: the menu grew to 15 TESTING rows (EPOCH)
+                      * and MENU_Y now equals PANE_Y, so the capture covers
+                      * the box exactly — the old 156 clipped the footer off
+                      * the flip animation. Overlay cost: +4.4KB of the
+                      * ~75KB stack headroom in .hero_overlay_lo. */
 /* MEMORY OVERLAY (.hero_overlay_lo — see mars.ld): the captured pane is live
  * only between capture_menu_pane() and the end of menu_flip_out(), a window with
  * no raycast_render call in it, so the deep gameplay stack can never reach it
@@ -1297,14 +1301,139 @@ static uint8_t  sms_fs_first;      /* force the first paint (churn may be 0) */
  * So: stage the slots, keep `seen` and `need` between calls, and promote to the
  * live buffer only when need hits 0. Slower to update, never wrong. A partial
  * picture is now unrepresentable rather than merely unlikely. */
+/* DIRTY-EPOCH reader (TESTING>EPOCH; md_main.c has the word formats).
+ * Collect the current epoch's slots into a pending list; a MARKER whose
+ * count we hold applies the whole epoch to the live picture at once —
+ * atomic presentation, same promise as the full gather, tiny payload.
+ * Repair slots (epoch tag 63) apply directly: absolute content healing
+ * whatever a lost epoch left stale. Returns 1 when anything changed the
+ * live picture. */
+#define SMS_EPOCH_REPAIR 63
+static uint16_t ep_pend_idx[SMS_FS_WORDS];
+static uint16_t ep_pend_dat[SMS_FS_WORDS];
+static uint8_t  ep_seen[SMS_FS_WORDS];
+static uint16_t ep_n   = 0;
+static uint8_t  ep_cur = 0xFF;          /* epoch being collected; FF = none */
+/* Protocol ground truth for the metrics overlay (the diag-page starvation
+ * hunt): EP = epochs applied whole, SV = cells applied via supersede-
+ * salvage, RP = cells applied via repair slots, MK = markers seen. */
+static uint16_t epd_applied, epd_salvage, epd_repair, epd_markers;
+static void sms_fs_epoch_reset(void) {
+    for (int i = 0; i < SMS_FS_WORDS; i++) ep_seen[i] = 0;
+    ep_n = 0;
+    ep_cur = 0xFF;
+}
+static int sms_fs_apply_word(uint16_t slot, uint16_t w) {
+    int ch = 0;
+    uint16_t c = (uint16_t)(slot * 2u);
+    uint8_t lo = (uint8_t)(w & 0xFF), hi = (uint8_t)(w >> 8);
+    if (sms_fs_tiles[c] != lo)     { sms_fs_tiles[c] = lo;     ch++; }
+    if (sms_fs_tiles[c + 1] != hi) { sms_fs_tiles[c + 1] = hi; ch++; }
+    sms_fs_churn = (uint16_t)(sms_fs_churn + ch);
+    return ch;
+}
+/* guard = the per-call spin budget, SUPPLIED BY CONTEXT (Mike's split):
+ * the zoom ladder passes SMS_EPOCH_SPIN_ZOOM (small — this reader has no
+ * steady-state completion to exit on, so the bound IS the cost, and a fat
+ * bound stalled every transition frame ~50ms); the fullscreen session
+ * passes SMS_EPOCH_SPIN_GAME (huge — the session owns the CPU, and the
+ * only price of spinning is START latency measured in milliseconds).
+ * Either way an applied epoch returns immediately. */
+#define SMS_EPOCH_SPIN_ZOOM   3000
+#define SMS_EPOCH_SPIN_GAME 100000
+/* SIP, DON'T CHUG. This reader shares its bus with the 68K, whose loop is
+ * the Z80's clock (FRAME_MBX) — a 100%-duty uncached spin here starves the
+ * 68K's vblank poll and the whole Master System slows down. That was "the
+ * stall": every reader-logic fix changed nothing because the reader's BUS
+ * PRESSURE was the defect. So the spin runs in short bursts with off-bus
+ * rests on the on-chip FRT (zero bus traffic — the TESTING>IDLE lesson).
+ * Markers repeat every pass of the delta set, so resting through a few
+ * costs sub-millisecond latency; the 68K getting its bus back is worth
+ * orders of magnitude more. Rest length is FRT ticks at Φ/128 (~5.5μs
+ * each): 32 ticks ≈ 180μs off-bus per 256-read burst ≈ ~60% duty. */
+#define SMS_EPOCH_SIP_MASK  0xFF
+#define SMS_EPOCH_SIP_TICKS 32
+static int sms_fs_gather_epoch(uint32_t guard) {
+    int changed = 0;
+    while (--guard) {
+        if ((guard & SMS_EPOCH_SIP_MASK) == 0) {
+            uint16_t t0 = prof_read_frt();        /* off-bus rest (see above) */
+            while ((uint16_t)(prof_read_frt() - t0) < SMS_EPOCH_SIP_TICKS) {}
+        }
+        uint16_t i1 = MARS_SYS_COMM10;
+        uint16_t w  = MARS_SYS_COMM6;
+        if (MARS_SYS_COMM10 != i1) continue;      /* torn pair: skip */
+        if (i1 == 0xFFFF) continue;               /* seqlock invalidate */
+        if (i1 & 0x8000) {                        /* MARKER: epoch, count */
+            uint8_t  e = (uint8_t)((i1 >> 9) & 63);
+            uint16_t n = (uint16_t)(i1 & 0x1FF);
+            epd_markers++;
+            if (e == ep_cur && n && ep_n >= n) {
+                for (uint16_t k = 0; k < ep_n; k++)
+                    changed += sms_fs_apply_word(ep_pend_idx[k], ep_pend_dat[k]);
+                sms_fs_epoch_reset();
+                epd_applied++;
+                if (changed) return 1;            /* paint this epoch */
+            }
+            continue;
+        }
+        uint8_t  e = (uint8_t)((i1 >> 9) & 63);
+        uint16_t s = (uint16_t)(i1 & 0x1FF);
+        if (s >= SMS_FS_WORDS) continue;          /* stale/garbage: skip */
+        if (e == SMS_EPOCH_REPAIR) {              /* absolute repair slot */
+            int ch = sms_fs_apply_word(s, w);
+            changed += ch;
+            epd_repair = (uint16_t)(epd_repair + ch);
+            continue;
+        }
+        if (e != ep_cur) {                        /* new epoch supersedes */
+            /* SALVAGE, don't discard: payloads are ABSOLUTE, so a
+             * superseded epoch's partial set is safe to apply late —
+             * atomicity only protected a frame that is already stale.
+             * Discarding here starved one-shot paints under continuous
+             * churn (the diagnostics page: counters epoch every frame,
+             * the static text rode one lost epoch and then crawled in
+             * at repair speed — Mike's "not using our fast method"). */
+            for (uint16_t k = 0; k < ep_n; k++) {
+                int ch = sms_fs_apply_word(ep_pend_idx[k], ep_pend_dat[k]);
+                changed += ch;
+                epd_salvage = (uint16_t)(epd_salvage + ch);
+            }
+            sms_fs_epoch_reset();
+            ep_cur = e;
+        }
+        if (!ep_seen[s]) {
+            ep_seen[s] = 1;
+            ep_pend_idx[ep_n] = s;
+            ep_pend_dat[ep_n] = w;
+            ep_n++;
+        }
+    }
+    return changed ? 1 : 0;   /* repair-only progress still repaints */
+}
+
 static int sms_fs_gather(void) {
     int *needp = &sms_fs_need;
-    /* The spin reads three sysregs an iteration at full rate. It is the same
-     * shape as the glass gather but 8x the slots, and the 68K is next door
-     * holding Z80 BUSREQ to copy TILEBUF -- hammering it while it does that is
-     * a real suspect for the PSG distortion (AU: stays 0, so the 32X PWM is
-     * not underrunning; this is the Z80's own audio). Bounded per call. */
-    uint32_t guard = 20000;
+    /* The spin reads three sysregs an iteration at full rate, ~8.7ms per
+     * call -- sized to drink a WHOLE broadcast rotation (and change) in one
+     * visit, so a complete picture promotes nearly every frame and the
+     * mini-game's screen runs at frame rate.
+     *
+     * HISTORY: this was cut to 3000 during the build-302 "clipping" hunt to
+     * relieve bus pressure on the Z80's pauses -- the clipping turned out to
+     * be macOS Low Power Mode throttling the emulator (see the audio-symptom
+     * memory), and the cut's real effect was a 12-20Hz picture ("slow video
+     * frames", Mike). The pressure theory was never validated on anything.
+     * If hardware someday shows real contention here, fix it with pacing on
+     * the 68K side, not by starving this reader.
+     *
+     * CRANKED (Mike): the SMS session owns this CPU — nothing else runs
+     * while the modal screen is up, so the spin may as well go until the
+     * picture is whole. The loop exits the moment need hits 0 (normal case:
+     * one rotation, ~6-10ms); the bound is pure wedge protection for a
+     * stopped broadcast, and its only cost is START latency in that
+     * already-broken state. */
+    uint32_t guard = 100000;
     while (*needp && --guard) {
         uint16_t i1 = MARS_SYS_COMM10;
         uint16_t w  = MARS_SYS_COMM6;
@@ -1391,9 +1520,20 @@ static void sms_zoom_world_step(uint8_t *fb,
     int duy = (wh1 << 8) / wh0;
     int sx0 = ((wx_d * SCREEN_W) << 8) / ww0;
     int sy0 = ((wy_d * SCREEN_H) << 8) / wh0;
+    /* Split the two passes at the mapping's FIXED POINT (src row == dest
+     * row), NOT the screen middle: the window translates toward the glass
+     * as it shrinks, so the point rows contract toward moves with it.
+     * Splitting mid-screen let one side read rows already overwritten,
+     * and the corruption arced across frames — the "rotating square"
+     * smear in Mike's 21-26 captures. Above yF sources sit below (toward
+     * yF, unwritten top-down); below yF they sit above (unwritten
+     * bottom-up). */
+    int yF = (256 - duy > 0) ? sy0 / (256 - duy) : SCREEN_H / 2;
+    if (yF < 0) yF = 0;
+    if (yF > SCREEN_H) yF = SCREEN_H;
     for (int half = 0; half < 2; half++) {
         int y    = half ? SCREEN_H - 1 : 0;
-        int yend = half ? SCREEN_H / 2 - 1 : SCREEN_H / 2;
+        int yend = half ? yF - 1 : yF;
         int ys   = half ? -1 : 1;
         for (; y != yend; y += ys) {
             int sy = (sy0 + y * duy) >> 8;
@@ -1502,7 +1642,8 @@ static void sms_game_screen(int from_glass) {
          * the frozen white ghost over the framebuffer picture. Armed here,
          * the blit is dead before the boot/handoff below, cmd 18 skips its
          * bridge paint, and the clear at the bottom is the last writer. */
-        HwMdSetSmsTileBcast(1);
+        sms_fs_epoch_reset();
+        HwMdSetSmsTileBcast(1 | (SHARED_UC->sms_epoch_on ? 2 : 0));
     }
     /* Black BOTH 32X buffers (word stores — the FB drops zero BYTE writes)
      * so the Master System's tiles overlay a black room, the compositing
@@ -1566,7 +1707,8 @@ static void sms_game_screen(int from_glass) {
         int wwp[2] = {320, 320}, whp[2] = {224, 224};
         int cxp[2] = {160, 160}, cyp[2] = {112, 112};
         for (int f = 1; f <= SMS_ZOOM_LADDER; f++) {
-            sms_fs_gather();
+            if (SHARED_UC->sms_epoch_on) sms_fs_gather_epoch(SMS_EPOCH_SPIN_ZOOM);
+            else                         sms_fs_gather();
             volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
             for (int i = 0; i < SCREEN_H; i++)
                 line_table[i] = (uint16_t)(i * 160 + 0x100);
@@ -1617,10 +1759,16 @@ static void sms_game_screen(int from_glass) {
         uint16_t pad = MARS_SYS_COMM8;
         uint16_t pressed = (uint16_t)(pad & ~prev);
         prev = pad;
-        if (pressed & SEGA_CTRL_START) break;
+        if ((pressed & SEGA_CTRL_START) && !(pad & 0x4000)) break;
+        /* bit 14: the Z80 owns START right now (its debrief or its
+         * diagnostics page — both return to its terminal). The flag drops
+         * with STATE_MBX, so the next START, seen at the terminal, exits
+         * the session. One ROM, layered exits. */
         if (on_32x) {
             sms_fs_churn = 0;
-            int whole = sms_fs_gather();
+            int ep = (int)SHARED_UC->sms_epoch_on;
+            int whole = ep ? sms_fs_gather_epoch(SMS_EPOCH_SPIN_GAME)
+                           : sms_fs_gather();
             /* Only repaint when the picture actually moved. The Z80 sets DIRTY
              * only on change and most frames are not dirty, so redrawing 768
              * glyphs every frame was work nobody asked for -- and the swap that
@@ -1637,9 +1785,38 @@ static void sms_game_screen(int from_glass) {
                     font_draw_string(
                         (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200),
                         0, 0, m, SMS_FS_INK);
+                    /* Protocol ground truth (the diag-page hunt): epochs
+                     * applied whole / salvaged cells / repair cells /
+                     * markers seen. Raw counters — two captures a few
+                     * seconds apart give the rates. */
+                    char pm[40];
+                    int pi = 0;
+                    const char *tags[4] = { "EP:", "SV:", "RP:", "MK:" };
+                    uint16_t vals[4];
+                    vals[0] = epd_applied;  vals[1] = epd_salvage;
+                    vals[2] = epd_repair;   vals[3] = epd_markers;
+                    for (int t = 0; t < 4; t++) {
+                        pm[pi++] = tags[t][0]; pm[pi++] = tags[t][1];
+                        pm[pi++] = tags[t][2];
+                        uint16_t x = vals[t];
+                        for (int d = 3; d >= 0; d--) {
+                            pm[pi + d] = (char)('0' + x % 10); x /= 10;
+                        }
+                        pi += 4;
+                        pm[pi++] = ' ';
+                    }
+                    pm[pi] = 0;
+                    font_draw_string(
+                        (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200),
+                        0, 8, pm, SMS_FS_INK);
                 }
                 swapBuffers();
-            } else {
+            } else if (!ep) {
+                /* Legacy arm only. In epoch mode the loop goes straight
+                 * back to drinking the stream — a vblank nap here added
+                 * up to 16ms to every delta's arrival, and the session
+                 * has nothing better to spend the CPU on (the split:
+                 * no levers unbound at full screen). */
                 Hw32xDelay(1);
             }
         } else {
@@ -2023,6 +2200,11 @@ int m_main(void) {
      * diagnostic — SMS32X defaults ON. The TESTING row still toggles it
      * for A/B against the MD plane-B path. */
     SHARED_UC->sms_on_32x = 1;
+    SHARED_UC->hum_ym = 1;      /* YM bed on; AUDIO>HUM kills it live */
+    SHARED_UC->sms_epoch_on = 1;/* dirty-epoch broadcast: soak configuration
+                                 * (Mike, 2026-08-13, after the ear A/B said
+                                 * "way faster") — TESTING>EPOCH is the live
+                                 * rollback while it earns the promotion. */
 
     /* High-res "attic box" splash: the SEGA CORE label on the closed
      * carton, held until START. Then we hand off to the live low-res 3D
@@ -2574,6 +2756,18 @@ int m_main(void) {
          *    ch1 and releases it ~2s later (RR=6 gives the tail). */
         {
             static uint16_t ym_sting_frames = 0;
+            /* AUDIO>HUM row: OFF = the YM goes fully dark — bed keyed off
+             * once, drip and TL writes suppressed. Live A/B for "is the
+             * tick the Yamaha at all", and a mute for anyone who just
+             * wants the room quiet. */
+            static uint8_t hum_was_on = 0;
+            if (!SHARED_UC->hum_ym) {
+                if (hum_was_on) {
+                    HwMdYmWrite(0x28, 0x01);   /* bed (ch2) key OFF */
+                    hum_was_on = 0;
+                }
+            } else {
+            if (!hum_was_on) { hum_was_on = 1; g_ym_upload = 1; /* re-strike */ }
             if (g_ym_upload > 0) {
                 if (g_ym_upload <= (int)YM_HUM_PATCH_N) {
                     HwMdYmWrite(ym_hum_patch[g_ym_upload - 1][0],
@@ -2595,6 +2789,7 @@ int m_main(void) {
                 HwMdYmWrite(ym_bed_tl_reg[tl_i], (uint8_t)tl);
                 if (++tl_i >= 4) { tl_i = 0; g_ym_tl_dirty = 0; }
             }
+            }   /* hum_ym on-arm */
             /* ch1 NEVER keys in this design: its hum-toned patch at the
              * bed's own frequencies beat against ch2 as cancellation —
              * Mike heard the "sting" as a clipping frequency CUT. The
