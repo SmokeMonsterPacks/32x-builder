@@ -48,3 +48,13 @@
 - The session plays inside a wallpaper-yellow frame: full brightness through the zoom, dimmed once the screen takes over.
 - Input latency during the mini-game roughly halved.
 - Fixed: a stale title screen could freeze over the mini-game picture; the exit hole's deepest shade and the SMS banner's % glyph were reading past their arrays; the PSG is silenced at power-on instead of singing from boot.
+
+## Master System quality of life
+
+- The console boots to a specs terminal: Master System operating specs, the level's specimen id, and two entries — DIAGNOSTICS (live frame counter, heartbeat, and a controller test that lights each button as you hold it) and FIELD MAP (the exercise). Every screen's START returns to the terminal; the terminal's START exits to the room. One ROM, layered exits.
+- The picture channel moved to a delta protocol: only changed cells cross to the 32X, applied atomically per frame, with a background repair sweep that heals any dropped cell in under a frame. Screen transitions converge instantly; the mini-game's input-to-screen delay is at its floor.
+- The Z80 is now properly parked when idle — frozen with its bus held rather than free-running or held in reset — so the sound chips keep their state across sessions. The fluorescent hum survives entering and leaving the console.
+- AUDIO menu gains a HUM row (the synthesized bed's on/off); the hum's amplitude wobble is off pending a proper retune.
+- The zoom-into-the-glass transition no longer smears at its edges mid-flight.
+
+Under the hood for what's next: a host-verified true mode-4 Master System video pipeline (patterns, palettes, sprites, scroll) — the foundation for real SMS graphics on the console's screen.
