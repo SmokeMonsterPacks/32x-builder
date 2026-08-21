@@ -24,8 +24,22 @@ games/hello-c/game.bin: games/hello-c/main.c games/hello-c/harness.h games/hello
 	cd games/hello-c && makebin -p out.ihx game.bin
 	python3 ../tools/gen_z80_game.py hello-c
 
-$(GDIR)/game.o: $(GDIR)/game.asm
+# tiles.inc (the metatile table) comes from sms/tileset.json via the same
+# codegen that builds the SH-2's sms_tiles.h — see the root Makefile rule.
+games/maze/tiles.inc: tileset.json ../tools/gen_sms_tiles.py
+	python3 ../tools/gen_sms_tiles.py
+
+$(GDIR)/game.o: $(GDIR)/game.asm games/maze/tiles.inc
 	cd $(GDIR) && wla-z80 -o game.o game.asm
+
+# Standalone maze: the same game.asm wrapped in a mode-4 shim, as a real
+# .sms for Ares' MASTER SYSTEM core (fast art/iteration loop — no 32X
+# boot). tiles_sms.inc rides the same codegen as tiles.inc.
+maze-ares: games/maze/maze.sms
+games/maze/maze.sms: games/maze/standalone.asm games/maze/game.asm games/maze/tiles.inc
+	cd games/maze && wla-z80 -o standalone.o standalone.asm
+	printf '[objects]\nstandalone.o\n' > games/maze/standalone.linkfile
+	cd games/maze && wlalink -d standalone.linkfile maze.sms
 
 $(GDIR)/game.linkfile: Makefile
 	printf '[objects]\ngame.o\n' > $(GDIR)/game.linkfile

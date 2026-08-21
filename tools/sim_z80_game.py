@@ -24,7 +24,13 @@ BIN = ROOT / "sms" / "games" / GAME / "game.bin"
 
 TILEBUF, MAP_BITS, MAP_META = 0x1900, 0x1C00, 0x1C80
 PAD, DIRTY, STATE, FRAME = 0x1FF4, 0x1FF5, 0x1FF6, 0x1FF7
-T_FLOOR, T_WALL, T_PLAYER, T_EXIT = 1, 44, 27, 16
+# the maze frame is 8x6 METATILE CELLS (4x4 art tiles each, v4 32px
+# geometry), stamped from the table at $1700 — rows FLOOR WALL EXIT
+# PLAYER-STAND-IN + 15 edge-partition combos (kind = 3 + N1+E2+S4+W8)
+METATILES = 0x1700
+MT_KINDS = 19
+MT_FLOOR, MT_WALL, MT_EXIT, MT_PLAYER = 0, 1, 2, 3
+PEDGE_N, PEDGE_W = 0x1D00, 0x1D90   # edge-partition bitmaps (33 rows/cols)
 
 
 PSG_PORT = 0x7F11
@@ -189,6 +195,18 @@ class Z80:
             d, e = self.d, self.e
             self.d, self.e, self.h, self.l = self.h, self.l, d, e
             return
+        if op == 0xED:                                # ED prefix
+            sub = self.fetch()
+            if sub == 0xA0:                           # ldi
+                addr = self.de()
+                self.m[addr] = self.m[self.hl()]
+                if addr == PSG_PORT:
+                    self.psg.append(self.m[addr])
+                self.set_hl((self.hl() + 1) & 0xFFFF)
+                self.set_de((self.de() + 1) & 0xFFFF)
+                self.set_bc((self.bc() - 1) & 0xFFFF)
+                return
+            raise NotImplementedError(f"ED {sub:02X}")
         if 0x40 <= op <= 0x7F and op != 0x76:         # ld r,r'
             self.set_r((op >> 3) & 7, self.get_r(op & 7))
             return
@@ -311,6 +329,11 @@ for y in range(32):
         if maze[y][x]:
             mem[MAP_BITS + y * 4 + (x >> 3)] |= 0x80 >> (x & 7)
 mem[MAP_META:MAP_META + 4] = bytes([2, 2, 31, 16])
+# edge partitions: a vertical slab on the W edge of (3,1) — blocks the
+# LEFT step probed below — and a horizontal slab on the N edge of (6,4),
+# visible from spawn as combo cells on both its neighbours
+mem[PEDGE_W + 1 * 5 + 0] |= 0x80 >> 3
+mem[PEDGE_N + 4 * 4 + 0] |= 0x80 >> 6
 # Boot with DIRTY Z80 RAM. TILEBUF lives above the uploaded image, so a
 # re-upload never clears it and the program inherits the previous session's
 # frame — the title card only paints its banner and text, so anything it
@@ -349,16 +372,34 @@ def tile(row, col):
     return mem[TILEBUF + row * 32 + col]
 
 
+def metatile(kind):
+    return list(mem[METATILES + kind * 16:METATILES + kind * 16 + 16])
+
+
+def cellkind(cr, cc):
+    """Which metatile occupies viewport cell (cr, cc), or None."""
+    block = [tile(cr * 4 + r, cc * 4 + t) for r in range(4) for t in range(4)]
+    for k in range(MT_KINDS):
+        if block == metatile(k):
+            return k
+    return None
+
+
 def frame_rows():
-    return ["".join({0: " ", T_FLOOR: ".", T_WALL: "#",
-                     T_PLAYER: "P", T_EXIT: "E"}.get(tile(r, c), "?")
-                    for c in range(32)) for r in range(24)]
+    def ch(k):
+        if k is None:
+            return "?"
+        if k > MT_PLAYER:
+            return "p"      # an edge-partition combo cell
+        return {MT_FLOOR: ".", MT_WALL: "#", MT_PLAYER: "P",
+                MT_EXIT: "E"}[k]
+    return ["".join(ch(cellkind(r, c)) for c in range(16)) for r in range(12)]
 
 
 def find_player():
-    for r in range(24):
-        for c in range(32):
-            if tile(r, c) == T_PLAYER:
+    for r in range(12):
+        for c in range(16):
+            if cellkind(r, c) == MT_PLAYER:
                 return r, c
     return None
 
@@ -420,12 +461,14 @@ check("terminal: no redraw while idle", mem[DIRTY] == 0)
 run_frame(0x02)                      # DOWN to FIELD MAP
 run_frame(0x00)
 run_frame(0x40)                      # A begins the exercise
-check("button starts game: player at spawn (2,2)",
-      mem[DIRTY] == 1 and tile(2, 2) == T_PLAYER)
+check("button starts game: player cell at spawn (2,2)",
+      mem[DIRTY] == 1 and cellkind(2, 2) == MT_PLAYER)
 run_frame(0x00)
-check("game: border wall drawn", tile(0, 0) == T_WALL and tile(0, 31) == T_WALL)
-check("game: floor drawn", tile(1, 1) == T_FLOOR)
-check("game: exit visible at (16,31)", tile(16, 31) == T_EXIT)
+check("game: border wall cells drawn", cellkind(0, 0) == MT_WALL
+      and cellkind(0, 7) == MT_WALL)
+check("game: floor cell drawn", cellkind(1, 1) == MT_FLOOR)
+check("game: exit off-screen (the 8x6 viewport shows a map corner)",
+      all(cellkind(r, c) != MT_EXIT for r in range(12) for c in range(16)))
 
 mem[DIRTY] = 0                       # 68K consumed the frame
 settle(2, 0)                         # idle frames: nothing redraws
@@ -433,36 +476,52 @@ check("idle: no spurious redraw", mem[DIRTY] == 0)
 
 run_frame(0x08)                      # RIGHT pressed
 check("move right: redraw", mem[DIRTY] == 1)
-check("move right: player at (2,3)", tile(2, 3) == T_PLAYER
-      and tile(2, 2) != T_PLAYER)
+check("move right: player cell (2,3), old cell back to floor",
+      cellkind(2, 3) == MT_PLAYER and cellkind(2, 2) == MT_FLOOR)
 mem[DIRTY] = 0
 
-run_frame(0x00)                      # release
+settle(8)                            # the move cooldown (the glide) expires
 run_frame(0x01)                      # UP into the wall at y=1... (2,3): up = (1,3) floor!
-check("move up: (1,3) is open, player moved", tile(1, 3) == T_PLAYER)
+check("move up: (1,3) is open, player moved", cellkind(1, 3) == MT_PLAYER)
 mem[DIRTY] = 0
-run_frame(0x00)
+settle(8)                            # cooldown out of the way: the WALL is the gate
 run_frame(0x01)                      # UP again into border wall y=0
 check("wall blocks: no redraw", mem[DIRTY] == 0)
-check("wall blocks: player still at (1,3)", tile(1, 3) == T_PLAYER)
+check("wall blocks: player still at cell (1,3)", cellkind(1, 3) == MT_PLAYER)
 
-# auto-repeat: hold DOWN for 20 frames, expect >= 2 steps
-p0 = find_player()
+# edge partition: (2,1) is open floor, but the W edge of (3,1) carries a
+# slab — LEFT must be blocked by the EDGE, not the cell (no cooldown in
+# play: the blocked UP above set none)
+run_frame(0x00)
+run_frame(0x04)                      # LEFT into the partition
+check("partition edge blocks the crossing (cell itself is open)",
+      mem[DIRTY] == 0 and cellkind(1, 3) == MT_PLAYER)
+# and the slab renders: N edge of (6,4) makes combo cells of both
+# neighbours — N-combo (kind 4) below the edge, S-combo (kind 7) above
+check("partition renders: N-combo cell at (4,6), S-combo at (3,6)",
+      cellkind(4, 6) == 3 + 1 and cellkind(3, 6) == 3 + 4)
+
+# held pacing: hold DOWN for 20 frames — the 8-frame move cooldown means
+# steps land at frames 1, 10, 19 (steered off the game's own y var)
+VAR_VPY = 0x1CA2
+p0 = mem[0x1CA1]
 run_frame(0x02)
 for _ in range(19):
     run_frame(0x02)
     mem[DIRTY] = 0
-p1 = find_player()
-check(f"auto-repeat: held DOWN moved {p0} -> {p1}", p1[0] - p0[0] >= 2)
+p1 = mem[0x1CA1]
+check(f"held pacing: DOWN for 20 frames moved y {p0} -> {p1} (cooldown 8)",
+      p1 - p0 >= 2)
 
-# walk to the gap and deep down: viewport must scroll (player row pinned ~12)
-for _ in range(60):
+# walk deep down: the viewport must scroll and clamp at the bottom edge.
+# The v4 frame is 8x6 cells, so vp_y = clamp(py-3, 0, 26): at map y=30
+# it clamps to 26 and the player sits on screen row 30-26 = 4.
+for _ in range(150):
     run_frame(0x02)
     mem[DIRTY] = 0
     run_frame(0)
-p = find_player()
-check(f"viewport scrolled: player row {p[0]} = 22 (map y=30, vp=8)",
-      p == (22, find_player()[1]))
+check(f"viewport scrolled: vp_y={mem[VAR_VPY]}, player on screen row 4",
+      mem[VAR_VPY] == 26 and cellkind(4, 3) == MT_PLAYER)
 
 # route to the exit door at (31,16): align y=16 (the bar's gap row), then
 # walk right through the gap to x=30, then step INTO the door. Steer off
@@ -473,7 +532,7 @@ VAR_PX, VAR_PY = 0x1CA0, 0x1CA1
 def tap(pad):
     run_frame(pad)
     mem[DIRTY] = 0
-    run_frame(0)
+    settle(8)                        # drain the move cooldown
 
 
 for _ in range(40):
@@ -484,6 +543,11 @@ for _ in range(40):
     if mem[VAR_PX] == 30 or mem[STATE]:
         break
     tap(0x08)
+# at (30,16) the viewport clamps right (vp_x = clamp(30-4,0,24) = 24,
+# vp_y = clamp(16-3,0,26) = 13): the door at map (31,16) sits on screen
+# col 31-24 = 7, the player on col 6, both on row 16-13 = 3
+check("exit door cell visible beside the player",
+      cellkind(3, 7) == MT_EXIT and cellkind(3, 6) == MT_PLAYER)
 tap(0x08)                            # the step into the door itself
 check("escape: STATE flipped", mem[STATE] == 1)
 settle(150, 0)                       # music keeps playing on the escape screen
@@ -493,8 +557,9 @@ settle(150, 0)                       # music keeps playing on the escape screen
 # Independent reimplementation of games/maze/game.asm's SPACE-A music (and
 # of run_engine_space in sms_liminal_gen.py): the whole point is three
 # copies of the algorithm agreeing byte for byte. Echoes use the Z80's
-# countdown model; section order per frame is the parity contract:
-# bass, phrase select, note fire, melody decay, echo fire, echo decay.
+# chorus model (ch1 doubles ch2 a divider sharp); section order per
+# frame is the parity contract: bass, phrase select, note fire, melody
+# decay, drum fire, drum decay.
 def ref_psg(seed, frames):
     s = (seed & 0xFFFF) or 1
 
@@ -511,6 +576,12 @@ def ref_psg(seed, frames):
     BASS = [762, 855, 960, 762]
     BT = [330 + i * 30 for i in range(8)]
     MGAP = [75 + i * 30 for i in range(8)]
+    # drum march (ctrl, att, wait): LFSR-free two-bar cadence on ch3,
+    # mirrors drum_pat in game.asm byte for byte
+    DRUMS = [(0xE6, 4, 45), (0xE6, 6, 39), (0xE6, 8, 3), (0xE6, 8, 3),
+             (0xE6, 4, 45), (0xE6, 6, 45), (0xE6, 4, 45), (0xE6, 6, 39),
+             (0xE6, 8, 3), (0xE6, 8, 3), (0xE6, 4, 45), (0xE6, 6, 18),
+             (0xE6, 8, 27)]
 
     def tone(base, d):
         return [base | (d & 0xF), (d >> 4) & 0x3F]
@@ -523,8 +594,7 @@ def ref_psg(seed, frames):
     b_i, b_att, b_fade, b_t = 0, 15, 0, 0
     motif, mi = [], 0
     m_att, m_fade, note_t, gap = 15, 0, 0, 0
-    e_att, e_fade = 15, 0
-    echo = []                                    # [countdown, div]
+    d_i, d_t, d_att, d_fade = 0, 0, 15, 0
     ch_att = 15
     for f in range(frames):
         if f < 107:
@@ -567,8 +637,9 @@ def ref_psg(seed, frames):
             mi += 1
             out += tone(0xC0, d)
             out.append(0xD0 | 2)
+            out += tone(0xA0, d + 1)       # chorus double, one divider sharp
+            out.append(0xB0 | 3)
             m_att, m_fade = 2, 6
-            echo.append([19, d])
             note_t = 13 + (step() & 7)
         elif note_t > 0:
             note_t -= 1
@@ -578,19 +649,21 @@ def ref_psg(seed, frames):
                 m_fade = 6
                 m_att += 1
                 out.append(0xD0 | m_att)
-        for slot in echo:
-            slot[0] -= 1
-            if slot[0] == 0:
-                out += tone(0xA0, slot[1])
-                out.append(0xB0 | 7)
-                e_att, e_fade = 7, 6
-        echo = [x for x in echo if x[0] > 0]
-        if e_att < 15:
-            e_fade -= 1
-            if e_fade == 0:
-                e_fade = 6
-                e_att += 1
-                out.append(0xB0 | e_att)
+                out.append(0xB0 | min(15, m_att + 1))
+        if d_t == 0:
+            ctrl, att, wait = DRUMS[d_i]
+            d_i = (d_i + 1) % len(DRUMS)
+            out.append(ctrl)
+            out.append(0xF0 | att)
+            d_att, d_fade = att, 2
+            d_t = wait
+        d_t -= 1
+        if d_att < 15:
+            d_fade -= 1
+            if d_fade == 0:
+                d_fade = 2
+                d_att += 1
+                out.append(0xF0 | d_att)
     return out
 
 
@@ -600,7 +673,13 @@ check(f"music parity: {len(cpu.psg)} PSG writes match reference byte-for-byte",
       cpu.psg == expected)
 check("music: melody onsets occurred",
       sum(1 for b in cpu.psg if b & 0xF0 == 0xC0) >= 1)
-rows = frame_rows()
+check("music: drum taps on the noise channel",
+      sum(1 for b in cpu.psg if b == 0xE6) >= 2)
+# every melody attack ($D2) must be doubled by a chorus attack ($B3) —
+# the ch1 detune is the instrument, not a garnish
+check("music: chorus doubles every melody onset",
+      sum(1 for b in cpu.psg if b == 0xB3) ==
+      sum(1 for b in cpu.psg if b == 0xD2) >= 1)
 esc = "".join(chr(t - 12 + ord('A')) if 12 <= t <= 37 else ' '
               for t in mem[TILEBUF + 8 * 32:TILEBUF + 8 * 32 + 32])
 check(f"debrief: 'EXERCISE COMPLETE' drawn ({esc.strip()!r})",
@@ -609,7 +688,6 @@ nm = "".join(chr(t - 12 + ord('A')) if 12 <= t <= 37 else ' '
              for t in mem[TILEBUF + 11 * 32:TILEBUF + 11 * 32 + 32])
 check(f"debrief: level name stamped ({nm.strip()!r})",
       "SIMMAZE" in nm.replace(" ", ""))
-p2 = find_player()
 settle(3, 0x08)
 check("escaped: further input ignored", mem[STATE] == 1)
 

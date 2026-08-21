@@ -193,9 +193,19 @@ def render_wav(ev, path, seconds=SECONDS):
             amp = 0.22 * (10 ** (-a * 2 / 20.0))
             t = t_all[s0:s1]
             if ch == 3:
-                # periodic-noise approximation: soft filtered pulse train
-                seg = np.random.default_rng(f0).uniform(-1, 1, s1 - s0)
-                seg = np.convolve(seg, np.ones(24) / 24, mode="same")
+                # d carries the noise ctrl byte when the event set one
+                # (drums); None = the legacy air-handler swell.
+                if d is not None and (d & 4) == 0:
+                    # periodic noise: a 1-in-15 pulse train at rate/15
+                    rate = PSG_CLOCK / (512 << (d & 3))
+                    phase = (t * rate / 15.0) % 1.0
+                    seg = np.where(phase < (1 / 15.0), 1.0, -1.0)
+                else:
+                    # white noise, duller at the slower shift rates
+                    width = 6 << (d & 3) if d is not None else 24
+                    seg = np.random.default_rng(f0).uniform(-1, 1, s1 - s0)
+                    seg = np.convolve(seg, np.ones(width) / width,
+                                      mode="same")
             else:
                 phase = (t * div_freq(d)) % 1.0
                 seg = np.where(phase < 0.5, 1.0, -1.0)
@@ -350,8 +360,58 @@ SPACE_BASS = [762, 855, 960, 762]     # D3 C3 Bb2 D3
 ECHO_DELAY = 18
 ECHO_ATT = 5                          # added attenuation (~10 dB down)
 
+# ---- drums: the Aliens march (Horner's quiet military snare) ----------
+# LFSR-free fixed loops of (noise ctrl, attenuation, frames to next hit)
+# so the melody/bass random streams are untouched by the drum layer.
+# $E6 = white noise clk/2048 (the dull distant snare); $E2 = periodic
+# noise clk/2048, a ~116 Hz thud. Hits decay att+1 every 2 frames.
+DRUM_PATTERNS = {
+    # two-bar march cadence, 45 f/beat (~80 bpm): accent, tap, drag ruff
+    # into beat 3, tap; bar 2 adds a pickup ghost into the loop.
+    # THE ROM PATTERN — mirrors drum_pat in game.asm byte for byte.
+    "A-march": [
+        (0xE6, 4, 45), (0xE6, 6, 39), (0xE6, 8, 3), (0xE6, 8, 3),
+        (0xE6, 4, 45), (0xE6, 6, 45), (0xE6, 4, 45), (0xE6, 6, 39),
+        (0xE6, 8, 3), (0xE6, 8, 3), (0xE6, 4, 45), (0xE6, 6, 18),
+        (0xE6, 8, 27)],
+    # 60 bpm heartbeat: periodic-noise thuds on 1 and 3, ghost taps
+    # between — darker, less snare, more machine-room.
+    "B-heartbeat": [
+        (0xE2, 4, 60), (0xE6, 8, 60), (0xE2, 5, 60), (0xE6, 8, 54),
+        (0xE6, 8, 6)],
+    # sparse and cinematic: a quiet four-stroke ruff into an accent,
+    # one lone answering tap, then five seconds of nothing.
+    "C-distant": [
+        (0xE6, 9, 3), (0xE6, 8, 3), (0xE6, 9, 3), (0xE6, 8, 3),
+        (0xE6, 5, 180), (0xE6, 7, 258)],
+}
 
-def run_engine_space(seed, frames=FRAMES, vibrato=False):
+# ---- melody instruments: envelope shapes for the SN76489 --------------
+# The chip has no timbre — three identical squares — so an "instrument"
+# is a volume envelope: a list of (frames to hold, attenuation) played
+# from note-on, then silence. Table-driven, so the winner ports to the
+# Z80 exactly like drum_pat did. "chorus" replaces the delayed echo
+# with a simultaneous detuned (divider+1) double — the dreamy pad trick.
+INSTRUMENTS = {
+    # the current sound: bright attack, one step down every 6 frames
+    "A-musicbox": dict(env=[(6, 2 + i) for i in range(13)]),
+    # harder attack, fast linear decay — plucked string, drier
+    "B-harp": dict(env=[(3, i) for i in range(15)]),
+    # fast drop to a quiet level, then a long slow ring — struck bell
+    "C-bell": dict(env=[(2, 3), (2, 4), (2, 5), (2, 6)]
+                       + [(14, a) for a in range(7, 15)]),
+    # reverse envelope: blooms in over 16 frames, holds, slow release —
+    # bowed glass / pad; melts notes together at this note spacing
+    "D-swell": dict(env=[(4, 11), (4, 9), (4, 7), (4, 5), (40, 4)]
+                        + [(8, a) for a in range(5, 15)]),
+    # music-box envelope but ch1 doubles every note at divider+1:
+    # a slow ~4 Hz beat between the pair (trades the echo away)
+    "E-chorus": dict(env=[(6, 2 + i) for i in range(13)], chorus=True),
+}
+
+
+def run_engine_space(seed, frames=FRAMES, vibrato=False, drums=None,
+                     inst=None):
     rng = LFSR(seed)
     ev = []
     # melody phrase state
@@ -363,6 +423,12 @@ def run_engine_space(seed, frames=FRAMES, vibrato=False):
     e_att, e_fade, e_div = 15, 0, 0
     # bass state
     b_i, b_t, b_att, b_fade = 0, 0, 15, 0
+    # drum state
+    d_i, d_t, d_att, d_fade = 0, 0, 15, 0
+    # instrument-envelope state (inst is not None)
+    m_seq, m_hold = [], 0
+    e_seq, e_hold = [], 0
+    chorus = bool(inst and inst.get("chorus"))
     vib_phase = 0
     for f in range(frames):
         # ---- bass: one soft note per phrase-ish period, slow fade
@@ -391,18 +457,38 @@ def run_engine_space(seed, frames=FRAMES, vibrato=False):
         if mi < len(motif) and note_t == 0:
             m_div = motif[mi]
             mi += 1
-            m_att, m_fade = 2, 6                   # bright attack, quick decay
-            ev.append((f, 2, m_div, m_att))
-            echo.append((f + ECHO_DELAY, m_div))
+            if inst is None:
+                m_att, m_fade = 2, 6               # bright attack, quick decay
+                ev.append((f, 2, m_div, m_att))
+                echo.append((f + ECHO_DELAY, m_div))
+            else:
+                m_seq = list(inst["env"])
+                m_hold, m_att = m_seq.pop(0)
+                ev.append((f, 2, m_div, m_att))
+                if chorus:
+                    ev.append((f, 1, m_div + 1, min(15, m_att + 1)))
+                else:
+                    echo.append((f + ECHO_DELAY, m_div))
             note_t = 13 + (rng.step() & 7)         # lilting inter-note timing
         elif note_t > 0:
             note_t -= 1
-        if m_att < 15:
-            m_fade -= 1
-            if m_fade == 0:
-                m_fade = 6
-                m_att += 1
+        if inst is None:
+            if m_att < 15:
+                m_fade -= 1
+                if m_fade == 0:
+                    m_fade = 6
+                    m_att += 1
+                    ev.append((f, 2, None, m_att))
+        elif m_hold > 0:
+            m_hold -= 1
+            if m_hold == 0:
+                if m_seq:
+                    m_hold, m_att = m_seq.pop(0)
+                else:
+                    m_att = 15
                 ev.append((f, 2, None, m_att))
+                if chorus:
+                    ev.append((f, 1, None, min(15, m_att + 1)))
         if vibrato and m_att < 12:
             vib_phase = (vib_phase + 1) & 15
             if vib_phase == 0:
@@ -412,14 +498,42 @@ def run_engine_space(seed, frames=FRAMES, vibrato=False):
         # ---- echo channel: replay, quieter, same decay shape
         if echo and echo[0][0] == f:
             _, e_div = echo.pop(0)
-            e_att, e_fade = 2 + ECHO_ATT, 6
+            if inst is None:
+                e_att, e_fade = 2 + ECHO_ATT, 6
+            else:
+                e_seq = [(h, min(15, a + ECHO_ATT)) for h, a in inst["env"]]
+                e_hold, e_att = e_seq.pop(0)
             ev.append((f, 1, e_div, e_att))
-        if e_att < 15:
-            e_fade -= 1
-            if e_fade == 0:
-                e_fade = 6
-                e_att += 1
+        if inst is None:
+            if e_att < 15:
+                e_fade -= 1
+                if e_fade == 0:
+                    e_fade = 6
+                    e_att += 1
+                    ev.append((f, 1, None, e_att))
+        elif not chorus and e_hold > 0:
+            e_hold -= 1
+            if e_hold == 0:
+                if e_seq:
+                    e_hold, e_att = e_seq.pop(0)
+                else:
+                    e_att = 15
                 ev.append((f, 1, None, e_att))
+        # ---- drums: fixed march loop on the noise channel (LFSR-free)
+        if drums:
+            if d_t == 0:
+                ctrl, att, wait = drums[d_i]
+                d_i = (d_i + 1) % len(drums)
+                d_att, d_fade = att, 2
+                ev.append((f, 3, ctrl, att))
+                d_t = wait
+            d_t -= 1
+            if d_att < 15:
+                d_fade -= 1
+                if d_fade == 0:
+                    d_fade = 2
+                    d_att += 1
+                    ev.append((f, 3, None, d_att))
     return ev
 
 
@@ -470,4 +584,17 @@ for name, vib in (("SPACE-A-echo", False), ("SPACE-B-echo-vibrato", True)):
     render_wav(evs, OUT / f"{name}.wav")
     render_midi(evs, OUT / f"{name}.mid")
     print(f"{name}: {len(evs)} PSG events (phrase+echo engine)")
+
+for dname, pat in DRUM_PATTERNS.items():
+    evs = run_engine_space(0xACE1 ^ 0x0202 ^ 0x101F, drums=pat)
+    render_wav(evs, OUT / f"DRUM-{dname}.wav")
+    print(f"DRUM-{dname}: {len(evs)} PSG events (SPACE-A + drums)")
+
+# instrument auditions: same notes, same march, only the melody
+# envelope changes (A-musicbox is what the ROM plays today)
+for iname, cfg in INSTRUMENTS.items():
+    evs = run_engine_space(0xACE1 ^ 0x0202 ^ 0x101F,
+                           drums=DRUM_PATTERNS["A-march"], inst=cfg)
+    render_wav(evs, OUT / f"INST-{iname}.wav")
+    print(f"INST-{iname}: {len(evs)} PSG events (envelope audition)")
 print(f"output: {OUT}")

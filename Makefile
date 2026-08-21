@@ -127,7 +127,15 @@ MISTER_TV  ?= root@mister.tv.local
 all: release
 
 release: MDEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
-release: SHEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin
+# -fno-thread-jumps: sh-elf GCC 15.2.0 at O2+LTO jump-threads the main-loop
+# control flow so SHARED_UC->frame_count++ (and the ULTRA gate tail) is
+# bypassed -- the frame clock pins at the fade-in count and every
+# frame-paced effect freezes (first seen as the PVM static becoming a
+# photograph). Bisected 2026-08-21 with ares-headless: -O1 ticks, -O2
+# freezes, -O2 -fno-thread-jumps ticks. CI's pinned marsdev (v1.0.0-rc1)
+# does not need it but is not hurt by it; keep until a local toolchain
+# proves clean without it.
+release: SHEXTRA  = -O2 -fomit-frame-pointer -flto -fuse-linker-plugin -fno-thread-jumps
 release: $(MDTARGET).bin $(MDTARGET).lst $(TARGET).32x $(TARGET).lst
 
 # The community ROM (everything contributors have sent in) and a single
@@ -327,6 +335,15 @@ sh_src/raycast.o: sh_src/sprite_defs.h
 sh_src/sms_font.h: md_src/font.s tools/gen_sms_font.py
 	@python3 tools/gen_sms_font.py
 sh_src/m_main.o: sh_src/sms_font.h
+
+# sh_src/sms_tiles.h — the maze mini-game's 4bpp art tiles + picture palette,
+# codegen'd from sms/tileset.json (authored in tools/tile-editor.html). The
+# same run regenerates sms/games/maze/tiles.inc, the Z80-side metatile table:
+# one source feeds both halves of the display duet. CHECKED IN (not
+# gitignored): the tileset is authored content, like registry.json.
+sh_src/sms_tiles.h: sms/tileset.json tools/gen_sms_tiles.py
+	@python3 tools/gen_sms_tiles.py
+sh_src/m_main.o: sh_src/sms_tiles.h
 
 # Standalone gate (maps + assets + registry), no toolchain — used by CI.
 lint:

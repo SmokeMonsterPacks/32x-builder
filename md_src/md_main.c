@@ -8,7 +8,12 @@ static volatile uint16_t* const mars_comm2  = (uint16_t*) MARS_COMM2;
 static volatile uint16_t* const mars_comm6  = (uint16_t*) MARS_COMM6;
 static volatile uint16_t* const mars_comm8  = (uint16_t*) MARS_COMM8;
 static volatile uint16_t* const mars_comm10 = (uint16_t*) MARS_COMM10;
-static volatile uint32_t* const mars_comm12 = (uint32_t*) MARS_COMM12;
+// 16-bit ON PURPOSE: a 32-bit tick write at $A1512C spans COMM14 too,
+// and clobbered the SMS maze status published there every vblank (the
+// smooth renderer flickered against the TILEBUF path — Mike's captures
+// 40-46). Every SH-2 consumer of the tick only tests "changed since
+// last read", so a 16-bit counter (wraps ~18 min) is equivalent there.
+static volatile uint16_t* const mars_comm12 = (uint16_t*) MARS_COMM12;
 
 // VDP
 static volatile uint16_t* const vdp_data_port = (uint16_t*) VDP_DATA_PORT;
@@ -18,7 +23,7 @@ static volatile uint32_t* const vdp_ctrl_wide = (uint32_t*) VDP_CTRL_PORT;
 // External functions
 extern uint16_t read_joypad(uint8_t player);
 
-uint32_t timer = 0;
+uint16_t timer = 0;   // 16-bit with the tick write — see mars_comm12
 uint16_t vramOffset = 0;
 // SMS mode active: the VDP is in mode 4, where the mode-5 vblank status
 // bit the main loop paces on NEVER sets — polling it livelocks the loop
@@ -542,8 +547,16 @@ void do_commands(void) {
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
 		for (uint16_t i = 0; i < Z80_GAME_LEN; i++)
 			zram[i] = z80_sms_game[i];
-		for (uint16_t i = 0; i < Z80_GAME_MAP_LEN; i++)
+		// the pack's three ranges land at three addresses — the game's
+		// vars live in the gaps, a straight 440B copy would flatten them
+		for (uint16_t i = 0; i < Z80_GAME_MAP_CORE; i++)
 			zram[Z80_GAME_MAP_BITS + i] = sms_game_map[i];
+		for (uint16_t i = 0; i < Z80_GAME_PEDGE_N_LEN; i++)
+			zram[Z80_GAME_PEDGE_N + i] =
+				sms_game_map[Z80_GAME_MAP_CORE + i];
+		for (uint16_t i = 0; i < Z80_GAME_PEDGE_W_LEN; i++)
+			zram[Z80_GAME_PEDGE_W + i] =
+				sms_game_map[Z80_GAME_MAP_CORE + Z80_GAME_PEDGE_N_LEN + i];
 		zram[Z80_GAME_PAD_MBX]   = 0;      // mailboxes live OUTSIDE the
 		zram[Z80_GAME_DIRTY_MBX] = 0;      // payload and uninit Z80 RAM
 		zram[Z80_GAME_STATE_MBX] = 0;      // boots 0xFF (the phantom-
@@ -575,8 +588,16 @@ void do_commands(void) {
 		{ uint32_t g = 200000; while ((*busreq & 0x100) && --g) ; }
 		for (uint16_t i = 0; i < Z80_GAME_LEN; i++)
 			zram[i] = z80_sms_game[i];
-		for (uint16_t i = 0; i < Z80_GAME_MAP_LEN; i++)
+		// the pack's three ranges land at three addresses — the game's
+		// vars live in the gaps, a straight 440B copy would flatten them
+		for (uint16_t i = 0; i < Z80_GAME_MAP_CORE; i++)
 			zram[Z80_GAME_MAP_BITS + i] = sms_game_map[i];
+		for (uint16_t i = 0; i < Z80_GAME_PEDGE_N_LEN; i++)
+			zram[Z80_GAME_PEDGE_N + i] =
+				sms_game_map[Z80_GAME_MAP_CORE + i];
+		for (uint16_t i = 0; i < Z80_GAME_PEDGE_W_LEN; i++)
+			zram[Z80_GAME_PEDGE_W + i] =
+				sms_game_map[Z80_GAME_MAP_CORE + Z80_GAME_PEDGE_N_LEN + i];
 		zram[Z80_GAME_PAD_MBX]   = 0;
 		zram[Z80_GAME_DIRTY_MBX] = 0;
 		zram[Z80_GAME_STATE_MBX] = 0;
@@ -631,8 +652,12 @@ void do_commands(void) {
 				uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
 				*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
 				               | ((ofs >> 14) | 0x03);
-				for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++)
-					*vdp_data_port = *t++;
+				for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++) {
+					uint16_t id = *t++;
+					// art tiles (128+) exist only on the SMS32X arm;
+					// this plane has just the boot font in VRAM
+					*vdp_data_port = (id & 0x80) ? 44 : id;
+				}
 			}
 		}
 		sms_glass_on = 0;
@@ -702,6 +727,16 @@ static void sms_game_frame(uint8_t modal) {
 	// diagnostics page) the SH-2 lets START through to the Z80 (which
 	// returns to its terminal) instead of exiting the session. COMM8 b14.
 	sms_debrief = (uint8_t)(modal && zram[Z80_GAME_STATE_MBX] == 1);
+	if (modal) {
+		// maze status for the SH-2's SMOOTH renderer: player cell +
+		// maze-active, published every frame (COMM14 is otherwise unused)
+		uint16_t st = 0x8000
+			| ((zram[Z80_GAME_VAR_GSTATE] == 1
+			    && zram[Z80_GAME_STATE_MBX] == 0) ? 0x0400 : 0)
+			| ((uint16_t)(zram[Z80_GAME_VAR_PX] & 31) << 5)
+			| (zram[Z80_GAME_VAR_PY] & 31);
+		*((volatile uint16_t *)MARS_COMM14) = st;
+	}
 	dirty = zram[Z80_GAME_DIRTY_MBX];
 	if (dirty) {
 		if (sms_tile_bcast && sms_tile_epoch_on) {
@@ -745,8 +780,11 @@ static void sms_game_frame(uint8_t modal) {
 			uint32_t ofs = (((row + 2u) * 64u + 4u) * 2u) + 0xE000;
 			*vdp_ctrl_wide = (uint32_t)(0x4000 | (ofs & 0x3FFF)) << 16
 			               | ((ofs >> 14) | 0x03);
-			for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++)
-				*vdp_data_port = *t++;
+			for (uint16_t i = 0; i < Z80_GAME_TILEBUF_COLS; i++) {
+				uint16_t id = *t++;
+				// art tiles (128+) exist only on the SMS32X arm
+				*vdp_data_port = (id & 0x80) ? 44 : id;
+			}
 		}
 	}
 }

@@ -55,6 +55,11 @@ typedef volatile signed long int vint32;
 #define MARS_SYS_COMM8      (*(volatile uint16_t *)0x20004028) /* controller 1 current value */
 #define MARS_SYS_COMM10     (*(volatile uint16_t *)0x2000402A) /* controller 2 current value */
 #define MARS_SYS_COMM12     (*(volatile uint32_t *)0x2000402C) /* vcount current value */
+#define MARS_SYS_COMM14     (*(volatile uint16_t *)0x2000402E) /* SMS maze status: the 68K
+                             * publishes bit15 = valid, bit10 = maze active
+                             * (GSTATE==1 && !STATE), bits 9-5 player cell x,
+                             * bits 4-0 player cell y — the SH-2's smooth
+                             * maze renderer eases toward it */
 
 #define MARS_PWM_CTRL       (*(volatile uint16_t *)0x20004030) /* sound */
 #define MARS_PWM_CYCLE      (*(volatile uint16_t *)0x20004032)

@@ -16,12 +16,15 @@ boot font). The Z80 never touches the VDP. Ares' MD core has no mode 4
 and duplicates Z80 control-port writes; both problems are bypassed
 entirely by this split.
 
-Level injection: the blob reserves a 148-byte region at a fixed address.
+Level injection: the blob reserves fixed regions for the level pack.
 The SH-2 packs the live 32x32 `world_map` to 1 bit per cell plus spawn,
-exit, and the 16-tile level name, and streams it as 74 indexed words (command
-0x0B); the 68000 writes it into the region after the code copy and before
-the Z80 leaves reset (command 0x0C). Teardown parks the Z80 and sweeps
-the play rows (command 0x0D). The SH-2 owns the exit path (START in
+exit, the 16-tile level name, and the two edge-partition bitmaps
+(pedge_n/pedge_w — thin slabs read as thin slabs on the map, and block
+edge crossings, instead of vanishing), and streams the 440 bytes as 220
+indexed words (command 0x0B); the 68000 splits the three ranges back to
+their addresses after the code copy and before the Z80 leaves reset
+(command 0x0C — the game's vars live in the gaps, so no straight copy).
+Teardown parks the Z80 and sweeps the play rows (command 0x0D). The SH-2 owns the exit path (START in
 `sms_game_screen`), so no Z80 state can trap the player.
 
 Z80 start order (command 0x0C): release reset, request bus, copy code +
@@ -33,14 +36,23 @@ spike (command 9) parks the Z80 instead; the game must run it.
 Fixed addresses in Z80 RAM, single source of truth = the game's `.DEFINE`
 lines, parsed by `tools/gen_z80_game.py` into `md_src/z80_sms_game.h`.
 
+All RAM addresses in game.asm are written RB+offset: RB = 0 in the
+harness build (Genesis Z80 RAM), RB = $C000 in the STANDALONE build
+(section 2a) — same layout either way.
+
 | Region      | Address       | Size | Owner                                  |
 |-------------|---------------|------|----------------------------------------|
-| code + data | $0000-$18FF   | 6400 | game (uploaded blob)                   |
+| code + data | $0000-$16FF   | 5888 | game (uploaded blob)                   |
+| METATILES   | $1700-$182F   | 304  | game data (tiles.inc: 19 rows x 16 ids)|
 | TILEBUF     | $1900-$1BFF   | 768  | game writes, 68K reads (24 rows x 32)  |
 | MAP_BITS    | $1C00-$1C7F   | 128  | 68K patches (1bpp map, $80>>(x&7))     |
 | MAP_META    | $1C80-$1C83   | 4    | 68K patches (spawn_x/y, exit_x/y)      |
 | MAP_NAME    | $1C84-$1C93   | 16   | 68K patches (level name, tile ids)     |
 | game vars   | $1CA0-...     | free | game                                   |
+| PEDGE_N     | $1D00-$1D83   | 132  | 68K patches (33 edge rows x 4B: the N  |
+|             |               |      | edge of cell (x,y), bit $80>>(x&7))    |
+| PEDGE_W     | $1D90-$1E2F   | 160  | 68K patches (32 rows x 5B, x 0..32:    |
+|             |               |      | the W edge of cell (x,y))              |
 | HEART       | $1F00         | 1    | game increments (liveness forensics)   |
 | stack       | grows < $1F80 | ~128 | game                                   |
 | PAD_MBX     | $1FF4         | 1    | 68K writes pad byte each frame         |
@@ -50,10 +62,29 @@ lines, parsed by `tools/gen_z80_game.py` into `md_src/z80_sms_game.h`.
 
 Pad byte: U=$01 D=$02 L=$04 R=$08 B=$10 C=$20 A=$40 START=$80.
 
-Display: TILEBUF holds boot-font tile ids, blitted to plane B rows 2-25,
-cols 4-35. Available glyphs (mars.c `NextChr`): space=0, dot=1, digits
-2-11, A-Z 12-37, `:.->|+%` 38-44. No custom tiles in this tier — the font
-is shared with the game HUD and menus.
+SMOOTH MAZE on the 32X arm: while the maze is being PLAYED, the SH-2
+does not draw from TILEBUF at all — the 68K publishes the player's
+cell + maze-active on COMM14 each frame (bit15 valid, bit10 active,
+bits 9-5 x, 4-0 y), and the SH-2 renders the scrolled view itself from
+world_map/pedge/sms_tiles.h with the same pixel camera and 4px/frame
+glide as the standalone's scroll engine (m_main.c sms_maze_*). The
+game's RPT_DELAY is 9 so cell repeats never outrun the 8-frame glide.
+TILEBUF remains authoritative for every text screen and the glass;
+the epoch reader sits maze frames out and its repair rotation heals
+the picture when a text screen returns.
+
+Display: TILEBUF holds tile ids. 0-44 are the boot font (mars.c
+`NextChr`): space=0, dot=1, digits 2-11, A-Z 12-37, `:.->|+%` 38-44 —
+every TEXT screen uses these. Ids 128+ are ART TILES: 4bpp 8x8 art from
+sms/tileset.json (authored in tools/tile-editor.html, compiled by
+tools/gen_sms_tiles.py). The maze's map view is built from METATILE
+CELLS — each map cell a 4x4 block of art tiles (32x32 px), an 8x6-cell
+viewport scrolled on both axes — stamped from the METATILES table. Art
+renders on the SMS32X arm only (the SH-2 draws it through a dedicated
+15-color CRAM run, SMS_PIC_BASE in m_main.c); the MD plane-B arm has
+just the boot font in VRAM and clamps art ids to '%', so it shows a
+legible-but-monochrome maze. The glass painter's lit/unlit phosphor
+approximation treats any nonzero id as lit, art included.
 
 Rules the harness enforces or assumes:
 - One logic step per FRAME_MBX change. The Z80 free-runs between ticks.
@@ -68,6 +99,48 @@ Rules the harness enforces or assumes:
   any screen that does not paint all 768 cells shows last run's leftovers
   — they compound boot after boot. The simulator boots from a $55 fill to
   keep this honest.
+
+### 2a. Standalone .sms build (the fast Ares loop)
+
+`make maze-ares` (sms/Makefile) wraps the SAME game.asm in a mode-4
+shim (games/maze/standalone.asm) and emits games/maze/maze.sms — a
+real 32KB cartridge image for Ares' MASTER SYSTEM core (which has real
+mode 4; it is the MD core's mode-4 stub that is broken). No 32X boot,
+no menu walk: open the .sms, A (button 1) starts, button 2 is START.
+The shim plays the missing hardware's roles: VDP init + planar tiles
+from tiles_sms.inc (same codegen run as everything else), a demo level
+pack copied where the 68K would patch, sa_frame as the per-frame
+bridge (vblank poll -> pad byte, FRAME_MBX, DIRTY blit), and psg_write
+as OUT ($7F). game.asm's RB define lifts the whole RAM contract to
+$C000.
+
+The maze runs in SCROLL MODE (the Snail Maze pattern from
+srcref/sms/bios13.asm, modernized per the devkitSMS survey): a pixel
+camera over the 1024x1024-px map, VDP regs 8/9 pan it (reg 8 negated;
+reg 9 wrapped at 224), ONE seam column/row streamed per 8px tile
+crossing into the 32x28 name table (invariant: name row nr holds map
+row base+k where nr=(base%28+k)%28; symmetric for columns), column 0
+masked to hide the seam pop, and the player as 16 hardware sprites at
+world - camera (sprite tiles = the player metatile with the floor
+diffed to transparent, VRAM tile 224, sprite palette mirrors BG).
+Moves glide at 4px/frame; the shim gates PAD_MBX to zero during a
+glide so a held direction chains cell-by-cell. Font screens (terminal,
+diag, card, debrief) stay on the plain DIRTY-blit path; transitions
+reset scroll regs and empty the sprite list. Entry does a display-off
+full paint (~2 dark frames, classifier-cached).
+
+Boot-verified headlessly by tools/sim_sms_standalone.py (the game
+sim's core + port instructions + a minimal VDP/pad model): boot,
+terminal blit, cursor input, A into the maze, slides, BOTH seam axes
+checked against an exact 896-entry name-table recomputation, escape
+back to blit mode — run it after touching standalone.asm, before any
+emulator session. FIRST-BOOT GOTCHA: Ares
+starts the Master System with Controller Port 1 EMPTY — "input isn't
+wired" means ares menu -> Master System -> Controller Port 1 ->
+Gamepad, not a ROM bug (confirmed in ares source: the $DC read isn't
+gated by $3F/$3E state; the port just has no device until assigned).
+Remaining caveat: the DIRTY blit overruns vblank — fine in an
+emulator, needs budgeting before real hardware.
 
 ## 3. Directory layout
 
@@ -118,8 +191,13 @@ Direction (2026-08-09): v1 has NO enemies. The target is a passable
 map-to-exit simulator using the best the Master System can do —
 presentation and atmosphere, not mechanics.
 
-Shipped rules: overhead view, D-pad moves one cell (7-frame auto-repeat
-on hold), walls block, stepping into the exit cell wins, escape screen,
+Shipped rules: overhead view, D-pad moves one cell — HELD state behind
+an 8-frame move cooldown (MOVE_COOL, = the display glide length on both
+arms, so the game can never outrun the picture; edges + auto-repeat
+caused run-ahead "input stickiness" on the 32X arm, which cannot gate
+the pad the way the standalone shim does) — walls block (blocked
+attempts set no cooldown: holding into a wall walks the moment a
+corridor opens), stepping into the exit cell wins, escape screen,
 START exits. v2 additions, each independent:
 
 1. Fog of war: 128-byte seen-bitmap, cells revealed in a radius-3 square

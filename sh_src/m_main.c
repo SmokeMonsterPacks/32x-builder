@@ -4,6 +4,8 @@
 #include "sin_table.h"   /* COS_FX/SIN_FX for the automap player arrow */
 #include "font.h"
 #include "sms_font.h"    /* generated from md_src/font.s — index IS the tile id */
+#include "sms_tiles.h"   /* generated from sms/tileset.json — 4bpp art tiles
+                          * (TILEBUF ids >= SMS_ART_BASE) + picture palette */
 #include "version.h"
 #include "shared.h"
 #include "procgen.h"
@@ -1170,12 +1172,27 @@ static void sms_boot_screen(void) {
  * the YOU ESCAPED screen — the SH-2 owns that exit path, so no Z80 state
  * can trap the player). */
 /* Pack the live level for the Z80: 1bpp map, spawn = the player's cell,
- * exit = the level's real exit (fallback: farthest open cell), and the
+ * exit = the level's real exit (fallback: farthest open cell), the
  * level name as 16 centered boot-font tile ids (TEST PATTERN <name> —
  * procgen syllable hashes become specimen ids; mapping mirrors mars.c
- * NextChr). Shared by the fullscreen game and the glass session. */
+ * NextChr), and the edge-partition bitmaps so thin slabs read as thin
+ * slabs on the map instead of vanishing (pedge_n rows are 4B wide,
+ * pedge_w rows 5B — 33 edge columns). Shared by the fullscreen game and
+ * the glass session; the 68K splits the three ranges back apart. */
+#define SMS_PACK_LEN 440
+static int sms_exit_x, sms_exit_y;   /* stashed for the smooth renderer */
 static void sms_pack_level(unsigned char *pack) {
-    for (int i = 0; i < 148; i++) pack[i] = 0;
+    for (int i = 0; i < SMS_PACK_LEN; i++) pack[i] = 0;
+    for (int y = 0; y <= MAP_H; y++)
+        for (int x = 0; x < MAP_W; x++)
+            if (pedge_n[y][x])
+                pack[148 + y * 4 + (x >> 3)] |=
+                    (unsigned char)(0x80 >> (x & 7));
+    for (int y = 0; y < MAP_H; y++)
+        for (int x = 0; x <= MAP_W; x++)
+            if (pedge_w[y][x])
+                pack[280 + y * 5 + (x >> 3)] |=
+                    (unsigned char)(0x80 >> (x & 7));
     for (int y = 0; y < MAP_H; y++)
         for (int x = 0; x < MAP_W; x++)
             if (world_map[y][x] != 0)
@@ -1200,6 +1217,8 @@ static void sms_pack_level(unsigned char *pack) {
     pack[129] = (unsigned char)sy;
     pack[130] = (unsigned char)ex;
     pack[131] = (unsigned char)ey;
+    sms_exit_x = ex;
+    sms_exit_y = ey;
     char mn[18];
     cur_map_name(mn);
     int len = 0;
@@ -1227,7 +1246,7 @@ static void sms_glass_toggle(void) {
         HwMdSmsGlassStop();
         raycast_glass_set_active(0);
     } else {
-        unsigned char pack[148];
+        unsigned char pack[SMS_PACK_LEN];
         sms_pack_level(pack);
         HwMdSmsGameMap(pack);
         HwMdSmsGlassBoot();
@@ -1273,6 +1292,31 @@ static void sms_glass_toggle(void) {
 #define SMS_FS_FRAME    254
 #define SMS_FS_FRAME_W  ((uint16_t)0xFEFE)     /* index pair, word fills */
 #define SMS_FS_FRAME_32 ((uint32_t)0xFEFEFEFE)
+/* The picture palette: a dedicated 15-entry CRAM run just under the frame
+ * entry (239..253 — the community arena's top tail; ~2 potential sprite
+ * blocks spent, see raycast.c COMM_BASE). Art pixel value v (1..15) paints
+ * index SMS_PIC_BASE+v; value 0 is transparent — the CRT-black backing
+ * stays, and the FB would drop a zero byte write anyway. Painted at session
+ * entry; nothing else renders these indices, so there is no restore. */
+#define SMS_PIC_BASE    238
+static void sms_fs_paint_palette(void) {
+    volatile uint16_t *pal = &MARS_CRAM;
+    for (int i = 1; i < 16; i++)
+        pal[SMS_PIC_BASE + i] = sms_art_pal[i];
+}
+/* Paint one 4bpp art tile at (x,y): 2 px per byte, high nibble left. */
+static void sms_art_draw(uint8_t *fb, int x, int y, const uint8_t *tile) {
+    for (int r = 0; r < 8; r++) {
+        uint8_t *p = fb + (y + r) * SCREEN_W + x;
+        for (int b = 0; b < 4; b++) {
+            uint8_t two = *tile++;
+            uint8_t v = (uint8_t)(two >> 4);
+            if (v) p[b * 2] = (uint8_t)(SMS_PIC_BASE + v);
+            v = (uint8_t)(two & 0x0F);
+            if (v) p[b * 2 + 1] = (uint8_t)(SMS_PIC_BASE + v);
+        }
+    }
+}
 #define SMS_FS_FRAME_DIM 96    /* /256: the settled session frame — bright
                                 * yellow SELLS the zoom, then the room recedes
                                 * the moment the screen owns the frame */
@@ -1482,6 +1526,12 @@ static void sms_fs_draw(void) {
     for (int r = 0; r < SMS_FS_ROWS; r++)
         for (int c = 0; c < SMS_FS_COLS; c++) {
             uint8_t id = *t++;
+            if (id >= SMS_ART_BASE) {           /* 4bpp art tile (maze cells) */
+                if (id < SMS_ART_BASE + SMS_ART_TILES)
+                    sms_art_draw(fb, SMS_FS_X0 + c * 8, SMS_FS_Y0 + r * 8,
+                                 sms_art[id - SMS_ART_BASE]);
+                continue;
+            }
             if (id >= SMS_FONT_TILES) id = 0;   /* torn/garbage slot: blank */
             font_draw_rows(fb, SMS_FS_X0 + c * 8, SMS_FS_Y0 + r * 8,
                            sms_font[id], SMS_FS_INK);
@@ -1586,7 +1636,18 @@ static void sms_fs_draw_scaled(int w, int h, int cx, int cy) {
         for (int xx = 0; xx < w; xx++, u8 += du) {
             int srcX = u8 >> 8;
             uint8_t id = rowt[srcX >> 3];
-            if (id == 0 || id >= SMS_FONT_TILES) continue;
+            if (id == 0) continue;
+            if (id >= SMS_ART_BASE) {           /* art: nearest-sample 4bpp */
+                if (id < SMS_ART_BASE + SMS_ART_TILES) {
+                    uint8_t two = sms_art[id - SMS_ART_BASE]
+                                         [gy * 4 + ((srcX & 7) >> 1)];
+                    uint8_t v = (srcX & 1) ? (uint8_t)(two & 0x0F)
+                                           : (uint8_t)(two >> 4);
+                    if (v) p[xx] = (uint8_t)(SMS_PIC_BASE + v);
+                }
+                continue;
+            }
+            if (id >= SMS_FONT_TILES) continue;
             if (sms_font[id][gy] & (uint8_t)(0x80u >> (srcX & 7)))
                 p[xx] = SMS_FS_INK;
         }
@@ -1611,10 +1672,174 @@ static void sms_zoom_melt(uint8_t *fb, int diss,
     }
 }
 
+/* ---- SMOOTH MAZE (SMS32X arm) ----------------------------------------
+ * Tile-by-tile TILEBUF updates read as cell hops next to the standalone
+ * .sms's hardware scrolling (Mike, 2026-08-14). So while the maze is
+ * being PLAYED, this side stops shipping pictures through the epoch pipe
+ * and renders the maze itself: the SH-2 already owns world_map, the
+ * edge-partition bitmaps and the 4bpp art — the 68K just publishes the
+ * player's CELL on COMM14 every frame, and this renderer runs the same
+ * pixel camera + 4px/frame glide the standalone's scroll engine does
+ * (RPT_DELAY 9 > the 8-frame glide, so the picture always catches the
+ * game). Full redraw per frame — nothing else wants this CPU here.
+ * TILEBUF stays authoritative for every text screen and the glass; the
+ * epoch reader just sits maze frames out and its repair rotation heals
+ * whatever it missed on return. */
+static int mz_on;
+static int mz_pxw, mz_pyw, mz_txw, mz_tyw;   /* world px, eased/target */
+
+static int mz_cell_kind(int cx, int cy) {    /* mirror of cell_kind_bg */
+    if (cx == sms_exit_x && cy == sms_exit_y) return 2;
+    if (world_map[cy][cx]) return 1;
+    int combo = 0;
+    if (pedge_n[cy][cx])     combo |= 1;
+    if (pedge_w[cy][cx + 1]) combo |= 2;
+    if (pedge_n[cy + 1][cx]) combo |= 4;
+    if (pedge_w[cy][cx])     combo |= 8;
+    return combo ? 3 + combo : 0;
+}
+
+/* 4bpp art tile at screen (x,y), clipped to the 256x192 picture rect.
+ * Pixel 0 = transparent (CRT black stays; FB drops zero bytes anyway). */
+static void sms_art_draw_clip(uint8_t *fb, int x, int y,
+                              const uint8_t *tile) {
+    for (int r = 0; r < 8; r++) {
+        int py = y + r;
+        if (py < SMS_FS_Y0 || py >= SMS_FS_Y0 + 192) continue;
+        uint8_t *p = fb + py * SCREEN_W;
+        for (int b = 0; b < 4; b++) {
+            uint8_t two = tile[r * 4 + b];
+            int px = x + b * 2;
+            uint8_t v = (uint8_t)(two >> 4);
+            if (v && px >= SMS_FS_X0 && px < SMS_FS_X0 + 256)
+                p[px] = (uint8_t)(SMS_PIC_BASE + v);
+            v = (uint8_t)(two & 0x0F);
+            px++;
+            if (v && px >= SMS_FS_X0 && px < SMS_FS_X0 + 256)
+                p[px] = (uint8_t)(SMS_PIC_BASE + v);
+        }
+    }
+}
+
+/* The draw must FIT ONE VBLANK or the swap drops frames and the glide
+ * (px per RENDER) slows with it — measured as ~80% walking speed vs the
+ * standalone (Mike, 2026-08-16). Three costs cut: the yellow frame
+ * paints once per buffer instead of every frame; blank tiles (most of
+ * the floor) skip entirely; fully-opaque tiles blit rows with no
+ * per-pixel transparency or clip tests. The glide itself now steps by
+ * ELAPSED 68K vblank ticks, so even a dropped frame can't change the
+ * walking SPEED — only its smoothness. */
+static uint8_t mz_border_done[2];
+static uint8_t mz_parity;
+static void sms_maze_draw(void) {
+    volatile uint16_t *line_table = &MARS_FRAMEBUFFER;
+    for (int i = 0; i < SCREEN_H; i++)
+        line_table[i] = (uint16_t)(i * 160 + 0x100);
+    uint8_t *fb = (uint8_t *)((uintptr_t)&MARS_FRAMEBUFFER + 0x200);
+    mz_parity ^= 1;
+    if (!mz_border_done[mz_parity]) {        /* the room-yellow frame */
+        mz_border_done[mz_parity] = 1;
+        uint32_t *fb32 = (uint32_t *)fb;
+        for (int i = 0; i < (SCREEN_W * SCREEN_H) / 4; i++)
+            fb32[i] = SMS_FS_FRAME_32;
+    }
+    for (int yy = 0; yy < 192; yy++) {       /* the CRT face */
+        uint32_t *pw = (uint32_t *)(fb + (SMS_FS_Y0 + yy) * SCREEN_W
+                                    + SMS_FS_X0);
+        for (int i = 0; i < 256 / 4; i++) pw[i] = 0;
+    }
+    int camx = mz_pxw - 120;                 /* v3: 16px cells, 512px world */
+    if (camx < 0) camx = 0; if (camx > 256) camx = 256;
+    int camy = mz_pyw - 88;
+    if (camy < 0) camy = 0; if (camy > 320) camy = 320;
+    int tx0 = camx >> 3, ty0 = camy >> 3;
+    int ox = camx & 7, oy = camy & 7;
+    int ck_cx = -1, ck_cy = -1, ck = 0;      /* 1-cell classifier cache */
+    for (int ty = 0; ty <= 24; ty++) {
+        int mr = ty0 + ty;
+        if (mr >= 64) break;
+        int y = SMS_FS_Y0 + ty * 8 - oy;
+        for (int tx = 0; tx <= 32; tx++) {
+            int mc = tx0 + tx;
+            if (mc >= 64) break;
+            int cx = mc >> 1, cy = mr >> 1;
+            if (cx != ck_cx || cy != ck_cy) {
+                ck_cx = cx; ck_cy = cy;
+                ck = mz_cell_kind(cx, cy);
+            }
+            uint8_t ai = sms_metatiles[ck][(mr & 1) * 2 + (mc & 1)];
+            uint8_t fl = sms_art_flags[ai];
+            if (fl & 1) continue;            /* all-transparent: backing */
+            int x = SMS_FS_X0 + tx * 8 - ox;
+            if ((fl & 2) && x >= SMS_FS_X0 && x + 8 <= SMS_FS_X0 + 256
+                         && y >= SMS_FS_Y0 && y + 8 <= SMS_FS_Y0 + 192) {
+                const uint8_t *t = sms_art[ai];  /* opaque + fully inside */
+                for (int r = 0; r < 8; r++) {
+                    uint8_t *p = fb + (y + r) * SCREEN_W + x;
+                    for (int b = 0; b < 4; b++) {
+                        uint8_t two = *t++;
+                        p[b * 2]     = (uint8_t)(SMS_PIC_BASE + (two >> 4));
+                        p[b * 2 + 1] = (uint8_t)(SMS_PIC_BASE + (two & 0x0F));
+                    }
+                }
+                continue;
+            }
+            sms_art_draw_clip(fb, x, y, sms_art[ai]);
+        }
+    }
+    /* the 32x32 hero straddles 16px cells: centered over the cell,
+     * feet on its bottom edge */
+    int sx = mz_pxw - camx - 8, sy = mz_pyw - camy - 16;
+    /* walk cycle: a new frame every 8px of travel; idle = frame 0 */
+    int frame = 0;
+    if (mz_pxw != mz_txw || mz_pyw != mz_tyw)
+        frame = ((mz_pxw + mz_pyw) >> 3) & 3;
+    for (int i = 0; i < 16; i++)
+        sms_art_draw_clip(fb, SMS_FS_X0 + sx + (i & 3) * 8,
+                          SMS_FS_Y0 + sy + (i >> 2) * 8,
+                          sms_player_sprite[frame][i]);
+}
+
+static int mz_step_axis(int cur, int tgt) {
+    if (cur < tgt) return cur + 4;
+    if (cur > tgt) return cur - 4;
+    return cur;
+}
+
+static uint16_t mz_ltick;
+static void sms_maze_frame(uint16_t st) {
+    int px = ((st >> 5) & 31) * 16, py = (st & 31) * 16;
+    /* the 68K's frame tick lives in COMM12's high word (single writer:
+     * the C loop, vblank-status paced — the _vblank ISR never runs, SR
+     * stays $2700). Stepping the glide by ELAPSED ticks makes walking
+     * speed independent of our own render rate. */
+    uint16_t tick = (uint16_t)(MARS_SYS_COMM12 >> 16);
+    if (!mz_on) {                            /* entry: snap, no glide */
+        mz_on = 1;
+        mz_pxw = mz_txw = px;
+        mz_pyw = mz_tyw = py;
+        mz_ltick = tick;
+        mz_border_done[0] = mz_border_done[1] = 0;
+    } else {
+        int d = (uint16_t)(tick - mz_ltick);
+        mz_ltick = tick;
+        if (d > 4) d = 4;                    /* pause/glitch: no teleport */
+        mz_txw = px;
+        mz_tyw = py;
+        while (d--) {
+            mz_pxw = mz_step_axis(mz_pxw, mz_txw);
+            mz_pyw = mz_step_axis(mz_pyw, mz_tyw);
+        }
+    }
+    sms_maze_draw();
+}
+
 static void sms_game_screen(int from_glass) {
     uint16_t saved_mode = MARS_VDP_DISPMODE;
     sms_audio_duck();
-    unsigned char pack[148];
+    sms_fs_paint_palette();     /* before the zoom: art cells resolve in
+                                 * colour from the first ladder rung */
+    unsigned char pack[SMS_PACK_LEN];
     if (!from_glass) {
         raycast_glass_set_active(0);   /* fullscreen takes the one Z80 */
         sms_pack_level(pack);
@@ -1765,6 +1990,17 @@ static void sms_game_screen(int from_glass) {
          * with STATE_MBX, so the next START, seen at the terminal, exits
          * the session. One ROM, layered exits. */
         if (on_32x) {
+            /* SMOOTH MAZE takes the frame whenever the 68K says the maze
+             * is live; the epoch pipe resumes (and self-heals via its
+             * repair rotation) the moment a text screen returns. */
+            uint16_t mzst = MARS_SYS_COMM14;
+            if ((mzst & 0x8000) && (mzst & 0x0400)) {
+                sms_maze_frame(mzst);
+                sms_fs_first = 1;    /* text repaints whole on return */
+                swapBuffers();       /* vblank-paced: one glide step */
+                continue;
+            }
+            mz_on = 0;
             sms_fs_churn = 0;
             int ep = (int)SHARED_UC->sms_epoch_on;
             int whole = ep ? sms_fs_gather_epoch(SMS_EPOCH_SPIN_GAME)

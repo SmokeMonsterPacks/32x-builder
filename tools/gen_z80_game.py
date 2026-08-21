@@ -36,6 +36,11 @@ EXPORT = {
     "TILEBUF":   "Z80_GAME_TILEBUF",
     "MAP_BITS":  "Z80_GAME_MAP_BITS",
     "MAP_META":  "Z80_GAME_MAP_META",
+    "PEDGE_N":   "Z80_GAME_PEDGE_N",
+    "PEDGE_W":   "Z80_GAME_PEDGE_W",
+    "VAR_PX":    "Z80_GAME_VAR_PX",
+    "VAR_PY":    "Z80_GAME_VAR_PY",
+    "VAR_GSTATE": "Z80_GAME_VAR_GSTATE",
     "HEART":     "Z80_GAME_HEART",
     "PAD_MBX":   "Z80_GAME_PAD_MBX",
     "DIRTY_MBX": "Z80_GAME_DIRTY_MBX",
@@ -45,7 +50,9 @@ EXPORT = {
 
 defines = {}
 for line in ASM.read_text().splitlines():
-    m = re.match(r"\.DEFINE\s+(\w+)\s+\$([0-9A-Fa-f]+)", line)
+    # RAM addresses are written RB+$off (RB = 0 in the harness build,
+    # which is the address space the 68K patches) — parse the offset.
+    m = re.match(r"\.DEFINE\s+(\w+)\s+(?:RB\+)?\$([0-9A-Fa-f]+)", line)
     if m:
         defines[m.group(1)] = int(m.group(2), 16)
 
@@ -80,7 +87,14 @@ if GAME == "maze":
         "#define Z80_GAME_TILEBUF_ROWS 24\n"
         "#define Z80_GAME_TILEBUF_COLS 32\n"
         "#define Z80_GAME_TILEBUF_LEN 768\n"
-        "#define Z80_GAME_MAP_LEN 148   /* 128B 1bpp map + spawn/exit + 16B name */\n"
+        "/* The staged level pack: 148B core (1bpp map + spawn/exit + name)\n"
+        " * + the edge-partition bitmaps. Z80 RAM is NOT contiguous across\n"
+        " * the three — copy each range to its own address (the vars live\n"
+        " * in the gap). */\n"
+        "#define Z80_GAME_MAP_LEN 440\n"
+        "#define Z80_GAME_MAP_CORE 148\n"
+        "#define Z80_GAME_PEDGE_N_LEN 132   /* 33 edge rows x 4B */\n"
+        "#define Z80_GAME_PEDGE_W_LEN 160   /* 32 rows x 5B (33 edge cols) */\n"
         f"{consts}\n"
         "static const unsigned char z80_sms_game[] = {\n    "
         + ",\n    ".join(lines)

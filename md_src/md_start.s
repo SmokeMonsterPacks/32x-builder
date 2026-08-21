@@ -161,7 +161,10 @@ _start:
 
 		move.b	#0,(0xA15107)			/* clear RV - allow SH2 to access ROM */
 		move.w	#0,(JoypadState)		/* controller 1 */
-		move.l	#0,(VBlankCounter)		/* clear the vblank count */
+		move.l	#0,(VBlankCounter)		/* clear the vblank count AND
+										 * COMM14 (maze status) — the one
+										 * intentional long write, pre-
+										 * session */
 	0:
 		cmp.l	#0x4D5F4F4B,(MARS_COMM0)	/* M_OK */
 		bne.s	0b							/* wait for primary ok */
@@ -316,9 +319,13 @@ get_input:
 _vblank:
 		move.l	d0,-(sp)
 
-		move.l	(VBlankCounter),d0
-		addq.l	#1,d0
-		move.l	d0,(VBlankCounter)	/* increment the vblank count */
+		/* WORD ops on purpose: a .l here spans COMM14 ($A1512E), which
+		 * now carries the SMS maze status — the long increment clobbered
+		 * it every frame and the smooth maze flickered against the
+		 * TILEBUF path. Tick consumers only test changed-since-read. */
+		move.w	(VBlankCounter),d0
+		addq.w	#1,d0
+		move.w	d0,(VBlankCounter)	/* increment the vblank count */
 
 		move.l	(sp)+,d0
 _hblank:

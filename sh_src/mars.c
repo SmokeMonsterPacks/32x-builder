@@ -256,10 +256,11 @@ void HwMdSmsStop(void) {
 }
 
 void HwMdSmsGameMap(const unsigned char *packed) {
-	/* Stream the 148-byte level patch (1bpp world_map + spawn + exit +
-	 * the 16-tile level name) as 74 indexed words. Each word is stateless
-	 * (index rides in the command low byte), so nothing can shear. */
-	for (int i = 0; i < 74; i++) {
+	/* Stream the 440-byte level patch (1bpp world_map + spawn + exit +
+	 * the 16-tile level name + the two edge-partition bitmaps) as 220
+	 * indexed words. Each word is stateless (index rides in the command
+	 * low byte — 220 still fits its 8 bits), so nothing can shear. */
+	for (int i = 0; i < 220; i++) {
 		while (MARS_SYS_COMM0) ;
 		MARS_SYS_COMM2 = (unsigned short)((packed[i * 2] << 8) | packed[i * 2 + 1]);
 		MARS_SYS_COMM0 = (unsigned short)(0x0B00 | i);

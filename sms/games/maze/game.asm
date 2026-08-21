@@ -12,15 +12,26 @@
 ;
 ; Division of labor (the proven mode-5 duet, see md_main.c):
 ;   Z80 (this file): ALL game state and logic. Owns an overhead-view
-;     tile frame in TILEBUF (24 rows x 32 cols of boot-font tile ids).
+;     tile frame in TILEBUF (24 rows x 32 cols of tile ids).
 ;   68K: per frame, under a brief bus request, pokes the pad byte,
 ;     bumps FRAME_MBX, and if DIRTY_MBX is set copies TILEBUF out and
 ;     blits it to the mode-5 text layer. The Z80 never touches the VDP
 ;     (Ares' mode-4 stub and the Z80-control-write dup live in git
 ;     history as the reasons why).
 ;
+; The MAZE VIEW is built from METATILE CELLS: each map cell is a 4x4
+; block of art tiles (32x32 px), so the frame shows an 8x6-cell
+; viewport of the 32x32 map, scrolled on both axes to keep the player
+; centred. Cell art lives in the metatile table at METATILES ($1700,
+; tiles.inc — generated from sms/tileset.json, authored in
+; tools/tile-editor.html). Art tile ids are 128+; the boot font keeps
+; 0..44 and every text screen in this blob. The SH-2 renders art ids
+; from its 4bpp copy of the tileset (SMS32X path); the MD plane-B arm
+; has no art tiles in VRAM and clamps them to '%'.
+;
 ; Mailbox / patch contract (fixed addresses, mirrored by
 ; tools/gen_z80_game.py into md_src/z80_sms_game.h):
+;   METATILES $1700  4 kinds x 16 tile ids (FLOOR WALL EXIT PLAYER)
 ;   TILEBUF   $1900  768B frame, row-major 24x32
 ;   MAP_BITS  $1C00  128B, 32 rows x 4 bytes, bit $80>>(x&7) = wall
 ;   MAP_META  $1C80  spawn_x, spawn_y, exit_x, exit_y
@@ -37,6 +48,7 @@
 ; Build: make game.bin (wla-z80 + wlalink), then tools/gen_z80_game.py.
 ; =====================================================================
 
+.IFNDEF STANDALONE
 .MEMORYMAP
 DEFAULTSLOT 0
 SLOTSIZE $2000
@@ -50,65 +62,119 @@ BANKS 1
 .ENDRO
 
 .EMPTYFILL $00
+.ENDIF
 
 ; ---------------- the contract ----------------
-.DEFINE TILEBUF   $1900
-.DEFINE MAP_BITS  $1C00
-.DEFINE MAP_META  $1C80
-.DEFINE MAP_NAME  $1C84   ; 16 tile-id bytes: the level's name, patched in
+; Every RAM address is RB+offset. In the HARNESS build RB=0: the game
+; runs from Genesis Z80 RAM at $0000 and these are the absolute
+; addresses the 68K pokes (tools/gen_z80_game.py parses the offsets out
+; of these lines — keep the literal after RB+). In the STANDALONE build
+; (standalone.asm defines STANDALONE, then includes this file) RB=$C000:
+; same layout, hosted in Master System work RAM, with a thin mode-4 shim
+; playing the 68K's role. ROM data (METATILES) has no RB.
+.IFDEF STANDALONE
+.DEFINE RB $C000
+.ELSE
+.DEFINE RB $0000
+.ENDIF
+.DEFINE METATILES $1700
+.DEFINE TILEBUF   RB+$1900
+.DEFINE MAP_BITS  RB+$1C00
+.DEFINE MAP_META  RB+$1C80
+.DEFINE MAP_NAME  RB+$1C84   ; 16 tile-id bytes: the level's name, patched in
                           ; by the 68K with the map (TEST PATTERN <name>)
-.DEFINE VAR_PX    $1CA0   ; player cell x
-.DEFINE VAR_PY    $1CA1   ; player cell y
-.DEFINE VAR_VPY   $1CA2   ; viewport top map row (0..8)
-.DEFINE VAR_PPREV $1CA3   ; previous pad byte (edge detect)
-.DEFINE VAR_FLAST $1CA4   ; last FRAME_MBX seen
-.DEFINE VAR_RPT   $1CA5   ; held-direction auto-repeat counter
-.DEFINE VAR_LFSR  $1CA6   ; music: 16-bit Galois LFSR state
-.DEFINE VAR_BI    $1CA8   ; music: bass walker index
-.DEFINE VAR_BATT  $1CA9   ; music: bass attenuation
-.DEFINE VAR_BFADE $1CAA   ; music: frames to next bass fade step
-.DEFINE VAR_BT    $1CAB   ; music: frames to next bass note (16-bit)
-.DEFINE VAR_MPTR  $1CAD   ; music: current motif read pointer (16-bit)
-.DEFINE VAR_MLEFT $1CAF   ; music: notes left in the motif
-.DEFINE VAR_MATT  $1CB0   ; music: melody attenuation
-.DEFINE VAR_MFADE $1CB1   ; music: frames to next melody fade step
-.DEFINE VAR_NOTET $1CB2   ; music: frames to next note in the motif
-.DEFINE VAR_GAP   $1CB3   ; music: frames of silence between phrases (16-bit)
-.DEFINE VAR_EATT  $1CB5   ; music: echo attenuation
-.DEFINE VAR_EFADE $1CB6   ; music: frames to next echo fade step
-.DEFINE ECHO_Q    $1CB8   ; music: 4 slots x (countdown, div_lo, div_hi)
-.DEFINE VAR_GSTATE $1CC4  ; 0 = SPECS TERMINAL, 1 = maze, 2 = title card
-.DEFINE VAR_REVEAL $1CC5  ; card: banner wipe column (0..31, 32 = text, 33 =
+.DEFINE VAR_PX    RB+$1CA0   ; player cell x
+.DEFINE VAR_PY    RB+$1CA1   ; player cell y
+.DEFINE VAR_VPY   RB+$1CA2   ; viewport top map cell row (0..26)
+.DEFINE VAR_PPREV RB+$1CA3   ; previous pad byte (edge detect)
+.DEFINE VAR_FLAST RB+$1CA4   ; last FRAME_MBX seen
+.DEFINE VAR_COOL  RB+$1CA5   ; frames until movement input reopens
+.DEFINE VAR_LFSR  RB+$1CA6   ; music: 16-bit Galois LFSR state
+.DEFINE VAR_BI    RB+$1CA8   ; music: bass walker index
+.DEFINE VAR_BATT  RB+$1CA9   ; music: bass attenuation
+.DEFINE VAR_BFADE RB+$1CAA   ; music: frames to next bass fade step
+.DEFINE VAR_BT    RB+$1CAB   ; music: frames to next bass note (16-bit)
+.DEFINE VAR_MPTR  RB+$1CAD   ; music: current motif read pointer (16-bit)
+.DEFINE VAR_MLEFT RB+$1CAF   ; music: notes left in the motif
+.DEFINE VAR_MATT  RB+$1CB0   ; music: melody attenuation
+.DEFINE VAR_MFADE RB+$1CB1   ; music: frames to next melody fade step
+.DEFINE VAR_NOTET RB+$1CB2   ; music: frames to next note in the motif
+.DEFINE VAR_GAP   RB+$1CB3   ; music: frames of silence between phrases (16-bit)
+                          ; ($1CB5-$1CC3 free: the retired echo queue)
+.DEFINE VAR_GSTATE RB+$1CC4  ; 0 = SPECS TERMINAL, 1 = maze, 2 = title card
+.DEFINE VAR_REVEAL RB+$1CC5  ; card: banner wipe column (0..31, 32 = text, 33 =
                           ; done). Terminal: 0 = needs paint, 1 = painted.
-.DEFINE VAR_MUSON  $1CC6  ; 1 = chime finished, SPACE-A engine owns the PSG
-.DEFINE VAR_CHF    $1CC7  ; chime: frame counter
-.DEFINE VAR_CHATT  $1CC8  ; chime: fade attenuation
-.DEFINE VAR_CHSUB  $1CC9  ; chime: frames to next fade step
-.DEFINE VAR_TMPR   $1CCA  ; banner scratch: band row0
-.DEFINE VAR_TMPC   $1CCB  ; banner scratch: screen column
-.DEFINE VAR_MSEL   $1CCC  ; terminal: 0 = TEST PATTERN, 1 = FIELD MAP
+.DEFINE VAR_MUSON  RB+$1CC6  ; 1 = chime finished, SPACE-A engine owns the PSG
+.DEFINE VAR_CHF    RB+$1CC7  ; chime: frame counter
+.DEFINE VAR_CHATT  RB+$1CC8  ; chime: fade attenuation
+.DEFINE VAR_CHSUB  RB+$1CC9  ; chime: frames to next fade step
+.DEFINE VAR_TMPR   RB+$1CCA  ; banner scratch: band row0
+.DEFINE VAR_TMPC   RB+$1CCB  ; banner scratch: screen column
+.DEFINE VAR_MSEL   RB+$1CCC  ; terminal: 0 = TEST PATTERN, 1 = FIELD MAP
+.DEFINE VAR_VPX    RB+$1CCD  ; viewport left map cell col (0..24)
+.DEFINE VAR_CROW   RB+$1CCE  ; frame build scratch: viewport cell row
+.DEFINE VAR_CCOL   RB+$1CCF  ; frame build scratch: viewport cell col
+.DEFINE VAR_DPTR   RB+$1CD0  ; music: drum pattern read pointer (16-bit)
+.DEFINE VAR_DT     RB+$1CD2  ; music: frames to next drum hit
+.DEFINE VAR_DATT   RB+$1CD3  ; music: drum (noise channel) attenuation
+.DEFINE VAR_DFADE  RB+$1CD4  ; music: frames to next drum fade step
+.DEFINE PEDGE_N   RB+$1D00 ; 132B: 33 edge rows x 4B, bit $80>>(x&7) —
+                           ; pedge_n[y][x], the N edge of cell (x,y)
+.DEFINE PEDGE_W   RB+$1D90 ; 160B: 32 rows x 5B — pedge_w[y][x], x 0..32,
+                           ; the W edge of cell (x,y)
 .DEFINE PSG       $7F11   ; SN76489, memory-mapped in Z80 space (no OUT)
-.DEFINE HEART     $1F00   ; liveness ripple for save-state forensics
-.DEFINE PAD_MBX   $1FF4
-.DEFINE DIRTY_MBX $1FF5
-.DEFINE STATE_MBX $1FF6
-.DEFINE FRAME_MBX $1FF7
+.DEFINE HEART     RB+$1F00   ; liveness ripple for save-state forensics
+.DEFINE PAD_MBX   RB+$1FF4
+.DEFINE DIRTY_MBX RB+$1FF5
+.DEFINE STATE_MBX RB+$1FF6
+.DEFINE FRAME_MBX RB+$1FF7
+; page bytes for the addr-arithmetic tricks below (RB-aware)
+.DEFINE MAPB_PG   MAP_BITS >> 8
+.DEFINE TILEBUF_PG TILEBUF >> 8
+.DEFINE PEDGEN_PG PEDGE_N >> 8
 
-; boot-font tile ids (mars.c NextChr mapping)
-.DEFINE T_FLOOR   1       ; small centered dot
-.DEFINE T_WALL    44      ; '%'
-.DEFINE T_PLAYER  27      ; 'P'
-.DEFINE T_EXIT    16      ; 'E'
+; metatile kinds — row indices into the METATILES table (tiles.inc).
+; The boot font (mars.c NextChr mapping) still backs every TEXT screen;
+; the maze frame itself is built entirely from these art cells.
+.DEFINE MT_FLOOR  0
+.DEFINE MT_WALL   1
+.DEFINE MT_EXIT   2
+.DEFINE MT_PLAYER 3
+; rows 4..18: floor with edge-partition slabs, kind = 3 + combo where
+; combo = N*1 + E*2 + S*4 + W*8 (composed by gen_sms_tiles.py)
 
-.DEFINE RPT_DELAY 7       ; frames a held direction waits between steps
+.IFDEF STANDALONE
+.DEFINE MOVE_COOL 15      ; frames movement input stays closed after a
+                          ; step. A 32px cell walks in 16 frames (WALK_PX=2
+                          ; per frame), and the gate costs
+                          ; one frame more than it counts (it decrements
+                          ; BEFORE reopening), so 15 reopens input on the
+                          ; landing frame itself. Set it one too high and
+                          ; the walk stalls a frame per cell. Movement
+                          ; reads the HELD pad behind this cooldown, so
+                          ; game cells can never run ahead of the
+                          ; picture and releasing stops at the
+                          ; in-flight cell (the 32X arm's input
+                          ; stickiness: it can't gate the pad the way
+                          ; the standalone shim does, so the game
+                          ; paces itself)
+.ELSE
+.DEFINE MOVE_COOL 8       ; the 32X arm BLITS whole cells — there is no
+                          ; pixel glide to pace against, so the walk
+                          ; cadence is a jump per cooldown. 8 keeps the
+                          ; apparent speed the old 16px cells had at 4.
+.ENDIF
 
+.IFNDEF STANDALONE
 .BANK 0 SLOT 0
 .ORG $0000
+.ENDIF
+entry:
    di
-   ld sp, $1F80
+   ld sp, RB+$1F80
    xor a
    ld (VAR_PPREV), a
-   ld (VAR_RPT), a
+   ld (VAR_COOL), a
    ld (STATE_MBX), a
    ld (DIRTY_MBX), a
    ld a, (FRAME_MBX)
@@ -136,6 +202,9 @@ BANKS 1
 loop:
    ld hl, HEART
    inc (hl)
+.IFDEF STANDALONE
+   call sa_frame           ; the shim plays the 68K: pad, tick, blit
+.ENDIF
    ld a, (FRAME_MBX)
    ld hl, VAR_FLAST
    cp (hl)
@@ -164,33 +233,21 @@ game_frame:
                            ; terminal (the second START, seen there, is the
                            ; 32X's session exit — layered by design)
 
-   ; ---- input: edge detect + held auto-repeat on the d-pad ----
+   ; ---- input: held d-pad behind the move cooldown ----
    ld a, (PAD_MBX)
    ld b, a                 ; b = current pad
-   ld hl, VAR_PPREV
-   ld c, (hl)
+   ld hl, VAR_PPREV        ; kept current for the other states' edges
    ld (hl), b
-   ld a, c
-   cpl
-   and b
-   ld d, a                 ; d = newly pressed bits
-   ld a, b
-   and $0F
-   jr z, rpt_clear
-   ld hl, VAR_RPT
-   inc (hl)
+   ld hl, VAR_COOL
    ld a, (hl)
-   cp RPT_DELAY
-   jr c, dispatch
-   ld (hl), 0
+   or a
+   jr z, cool_open
+   dec (hl)                ; a step is still gliding on screen
+   jp loop
+cool_open:
    ld a, b
    and $0F
-   or d
-   ld d, a                 ; repeat fires: treat held dirs as pressed
-   jr dispatch
-rpt_clear:
-   xor a
-   ld (VAR_RPT), a
+   ld d, a                 ; d = held directions
 
    ; ---- movement: first direction by priority U, D, L, R ----
 dispatch:
@@ -235,13 +292,60 @@ move:
    cp c
    jr z, escaped
 not_exit:
+   ; ---- edge partition across the crossing? Only one axis moved, so:
+   ; vertical: the N edge of the LOWER cell (up: (x,py); down: (x,ty));
+   ; horizontal: the W edge of the RIGHT cell (left: (px,y); right: (tx,y))
+   ld a, (VAR_PY)
+   cp c
+   jr z, mv_horiz
+   jr c, mv_down
+   push bc                 ; moving up: edge = pedge_n(x, py)
+   ld c, a
+   call pedge_n_bit
+   pop bc
+   jp nz, loop
+   jr mv_edge_ok
+mv_down:
+   call pedge_n_bit        ; c is already ty = py+1
+   jp nz, loop
+   jr mv_edge_ok
+mv_horiz:
+   ld a, (VAR_PX)
+   cp e
+   jr c, mv_right
+   push de                 ; moving left: edge = pedge_w(px, y) = (tx+1, y)
+   inc e
+   call pedge_w_bit
+   pop de
+   jp nz, loop
+   jr mv_edge_ok
+mv_right:
+   call pedge_w_bit        ; e is already tx: the W edge of the target
+   jp nz, loop
+mv_edge_ok:
    call map_bit            ; NZ = wall at (e,c)
    jp nz, loop
    ld a, e
    ld (VAR_PX), a
    ld a, c
    ld (VAR_PY), a
+   ld a, MOVE_COOL         ; input reopens as the glide lands. Blocked
+   ld (VAR_COOL), a        ; attempts set NO cooldown — holding into a
+                           ; wall walks the moment a corridor opens
+.IFDEF STANDALONE
+   ; On the raw SMS the VDP pans a pre-painted 128x128 map and TILEBUF
+   ; is NOT the display, so rebuilding it here is dead work — and it is
+   ; not cheap: 41,000 instructions, about EIGHT frames of Z80 time, on
+   ; the very frame the glide is meant to start. The camera froze for
+   ; that long and then lurched, which is what "no smooth scrolling"
+   ; actually was. The 32X arm still needs the rebuild: there the 68K
+   ; blits TILEBUF, and there is no scroll register to pan with.
+   ld a, (SA_MODE)
+   or a
+   jr nz, skip_build
+.ENDIF
    call build_frame
+skip_build:
    jp loop
 
 escaped:
@@ -265,7 +369,7 @@ map_bit:
    srl a                   ; x/8 (0..3)
    add a, l
    ld l, a
-   ld h, $1C               ; hl = MAP_BITS + y*4 + x/8 (MAP_BITS is $1C00)
+   ld h, MAPB_PG           ; hl = MAP_BITS + y*4 + x/8 (page-aligned base)
    ld b, (hl)              ; b = the map byte
    ld a, e
    and 7
@@ -281,96 +385,224 @@ map_bit:
 
 bitmask: .DB $80, $40, $20, $10, $08, $04, $02, $01
 
-; ---------------- frame build ----------------
-; TILEBUF = 24 map rows starting at vp_y, then exit + player overlaid.
-build_frame:
-   ld a, (VAR_PY)
-   sub 12
-   jr nc, vp_lo_ok
-   xor a
-vp_lo_ok:
-   cp 9
-   jr c, vp_hi_ok
-   ld a, 8
-vp_hi_ok:
-   ld (VAR_VPY), a
-   ld d, a                 ; d = current map row
-   ld hl, TILEBUF
-   ld b, 24
-frow:
-   push bc
-   call build_row
-   inc d
-   pop bc
-   djnz frow
-   ; ---- exit overlay (only if inside the viewport) ----
-   ld a, (MAP_META + 3)
-   ld hl, VAR_VPY
-   sub (hl)
-   jr c, exit_done
-   cp 24
-   jr nc, exit_done
-   call cell_addr
+; ---------------- background cell classifier ----------------
+; in: e = x, c = y (0..31). out: a = metatile kind — exit / wall /
+; edge-partition combo (4..18) / floor. NO player check: the harness
+; stamps the player as a cell (build_frame), the standalone draws it
+; as hardware sprites over this background. Preserves e, c; clobbers
+; d, hl, flags.
+cell_kind_bg:
    ld a, (MAP_META + 2)
-   ld e, a
+   cp e
+   jr nz, ckb_not_exit
+   ld a, (MAP_META + 3)
+   cp c
+   jr nz, ckb_not_exit
+   ld a, MT_EXIT
+   ret
+ckb_not_exit:
+   call map_bit            ; NZ = wall at (e,c); preserves bc, de
+   ld a, MT_WALL
+   ret nz
+   ; ---- floor: gather the edge-partition combo (N=1 E=2 S=4 W=8) ----
    ld d, 0
-   add hl, de
-   ld (hl), T_EXIT
-exit_done:
-   ; ---- player overlay (always inside by the vp clamp) ----
-   ld a, (VAR_PY)
-   ld hl, VAR_VPY
-   sub (hl)
-   call cell_addr
-   ld a, (VAR_PX)
-   ld e, a
-   ld d, 0
-   add hl, de
-   ld (hl), T_PLAYER
-   ld a, 1
-   ld (DIRTY_MBX), a
+   call pedge_n_bit        ; N edge of (x,y)
+   jr z, ckb_e
+   ld d, 1
+ckb_e:
+   inc e                   ; E edge = W edge of (x+1,y)
+   call pedge_w_bit
+   jr z, ckb_e0            ; test BEFORE undoing the inc — dec sets Z itself
+   ld a, d
+   or 2
+   ld d, a
+ckb_e0:
+   dec e
+   inc c                   ; S edge = N edge of (x,y+1)
+   call pedge_n_bit
+   jr z, ckb_s0
+   ld a, d
+   or 4
+   ld d, a
+ckb_s0:
+   dec c
+   call pedge_w_bit        ; W edge of (x,y)
+   jr z, ckb_done
+   ld a, d
+   or 8
+   ld d, a
+ckb_done:
+   ld a, d
+   or a
+   jr z, ckb_floor
+   add a, 3                ; combo 1..15 -> kind 4..18
+   ret
+ckb_floor:
+   ld a, MT_FLOOR
    ret
 
-; a = viewport row -> hl = TILEBUF + a*32 (clobbers de)
-cell_addr:
+; ---------------- edge partition queries ----------------
+; pedge_n_bit: in e = x (0..31), c = edge row y (0..32); out NZ = a
+; partition slab runs along the N edge of cell (x,y). Preserves bc, de.
+pedge_n_bit:
+   push bc
+   push de
+   ld a, c
+   add a, a
+   add a, a                ; y*4 (max 128)
+   ld l, a
+   ld a, e
+   srl a
+   srl a
+   srl a
+   add a, l
+   ld l, a
+   ld h, PEDGEN_PG         ; hl = PEDGE_N + y*4 + x/8 (page-aligned base)
+   jr pedge_test
+; pedge_w_bit: in e = edge col x (0..32), c = y (0..31); out NZ = a
+; partition slab runs along the W edge of cell (x,y). Preserves bc, de.
+pedge_w_bit:
+   push bc
+   push de
+   ld a, c
+   add a, a
+   add a, a                ; y*4
+   add a, c                ; y*5 (max 155)
+   ld l, a
+   ld h, 0
+   ld a, e
+   srl a
+   srl a
+   srl a
+   add a, l
+   ld l, a
+   jr nc, pw_nc
+   inc h
+pw_nc:
+   ld bc, PEDGE_W          ; not page-aligned: 16-bit add. bc, NOT de —
+   add hl, bc              ; the shared tail still needs e = x
+pedge_test:
+   ld b, (hl)
+   ld a, e
+   and 7
+   ld e, a
+   ld d, 0
+   ld hl, bitmask
+   add hl, de
+   ld a, b
+   and (hl)                ; Z = open, NZ = slab
+   pop de
+   pop bc
+   ret
+
+; ---------------- frame build: 2x2-tile metatile cells ----------------
+; TILEBUF = a 16x12-cell viewport of the map, each cell a 2x2 block of
+; art tiles copied whole from the METATILES table (v3 geometry: 16px
+; cells; the 32x32 player straddles cells on the sprite arms, so the
+; composed table's player row is a downsampled stand-in here). The
+; viewport scrolls on both axes to keep the player centred.
+build_frame:
+   ld a, (VAR_PY)          ; vp_y = clamp(py - 3, 0, 26)
+   sub 3
+   jr nc, bf_ylo
+   xor a
+bf_ylo:
+   cp 27
+   jr c, bf_yhi
+   ld a, 26
+bf_yhi:
+   ld (VAR_VPY), a
+   ld a, (VAR_PX)          ; vp_x = clamp(px - 4, 0, 24)
+   sub 4
+   jr nc, bf_xlo
+   xor a
+bf_xlo:
+   cp 25
+   jr c, bf_xhi
+   ld a, 24
+bf_xhi:
+   ld (VAR_VPX), a
+   xor a
+   ld (VAR_CROW), a
+bf_row:
+   xor a
+   ld (VAR_CCOL), a
+bf_col:
+   ; ---- map coords of this viewport cell ----
+   ld a, (VAR_VPX)
+   ld hl, VAR_CCOL
+   add a, (hl)
+   ld e, a                 ; e = map x
+   ld a, (VAR_VPY)
+   ld hl, VAR_CROW
+   add a, (hl)
+   ld c, a                 ; c = map y
+   ; ---- cell kind: the player, else the shared background classifier
+   ld a, (VAR_PX)
+   cp e
+   jr nz, bf_not_player
+   ld a, (VAR_PY)
+   cp c
+   jr nz, bf_not_player
+   ld a, MT_PLAYER
+   jr bf_kind
+bf_not_player:
+   call cell_kind_bg
+bf_kind:
+   ; ---- src = METATILES + kind*16 (19 kinds x 16 ids = 304B: needs
+   ; 16-bit math now, the v3 ld l,a / ld h,$17 trick overflowed) ----
    ld l, a
    ld h, 0
    add hl, hl
    add hl, hl
    add hl, hl
-   add hl, hl
-   add hl, hl
-   ld de, TILEBUF
+   add hl, hl              ; kind*16 (max 288)
+   ld de, METATILES
    add hl, de
-   ret
-
-; one map row d into 32 tilebuf bytes at hl (hl advances, d preserved)
-build_row:
-   push de
-   ld a, d
-   add a, a
-   add a, a
+   ; ---- dst = TILEBUF + crow*4*32 + ccol*4 = crow*128 + ccol*4 ----
+   ld a, (VAR_CROW)
+   ld d, a
+   srl d                   ; d = crow >> 1 (crow*128 high byte)
+   ld a, (VAR_CROW)
+   and 1
+   rrca                    ; a = (crow & 1) << 7
    ld e, a
-   ld d, $1C               ; de = MAP_BITS + row*4
+   ld a, (VAR_CCOL)
+   add a, a
+   add a, a                ; ccol*4, max 28 — (crow&1)<<7 + 28 <= 156
+   add a, e
+   ld e, a
+   ld a, d
+   add a, TILEBUF_PG       ; + TILEBUF (page-aligned base)
+   ld d, a
+   ; ---- stamp the cell: 4 rows of 4 tile ids (src runs contiguous) ----
    ld b, 4
-brow_byte:
-   ld a, (de)
-   inc de
-   ld c, a
+bf_mrow:
    push bc
-   ld b, 8
-brow_bit:
-   ld a, T_FLOOR
-   sla c
-   jr nc, put_tile
-   ld a, T_WALL
-put_tile:
-   ld (hl), a
-   inc hl
-   djnz brow_bit
+   ldi
+   ldi
+   ldi
+   ldi
+   ld a, e                 ; dst down one tile row (+32 total)
+   add a, 28
+   ld e, a
+   jr nc, bf_mnc
+   inc d
+bf_mnc:
    pop bc
-   djnz brow_byte
-   pop de
+   djnz bf_mrow
+   ld a, (VAR_CCOL)
+   inc a
+   ld (VAR_CCOL), a
+   cp 8
+   jp c, bf_col
+   ld a, (VAR_CROW)
+   inc a
+   ld (VAR_CROW), a
+   cp 6
+   jp c, bf_row
+   ld a, 1
+   ld (DIRTY_MBX), a
    ret
 
 ; ---------------- escape screen ----------------
@@ -804,11 +1036,11 @@ chime_tick:
    cp 106
    jr c, ch_sweepdown
    ld a, $9F               ; the cut: reversed tapes don't fade out
-   ld (PSG), a
+   call psg_write
    ld a, $BF
-   ld (PSG), a
+   call psg_write
    ld a, $DF
-   ld (PSG), a
+   call psg_write
    ld a, 1
    ld (VAR_MUSON), a       ; chime over — engine ticks from the next frame
    jp ch_adv
@@ -819,19 +1051,19 @@ ch_fadein:
    ld a, e                 ; hidden behind att 15, and emerges
    and $0F
    or $80
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    ld de, 381              ; D4
    ld a, e
    and $0F
    or $A0
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    ld de, 285              ; G4
    ld a, e
    and $0F
    or $C0
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    ld a, 15
    ld (VAR_CHATT), a
@@ -847,13 +1079,13 @@ fadein_att:
    ld (VAR_CHATT), a
    ld b, a
    or $90
-   ld (PSG), a
+   call psg_write
    ld a, b
    or $B0
-   ld (PSG), a
+   call psg_write
    ld a, b
    or $D0
-   ld (PSG), a
+   call psg_write
    jp ch_adv
 ch_sweepdown:
    ld b, a                 ; index = 105 - frame: 23 down to 0
@@ -876,7 +1108,7 @@ ch_sweepdown:
    ld a, e
    and $0F
    or $80
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    pop hl
    ld e, (hl)
@@ -887,7 +1119,7 @@ ch_sweepdown:
    ld a, e
    and $0F
    or $A0
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    pop hl
    ld e, (hl)
@@ -896,7 +1128,7 @@ ch_sweepdown:
    ld a, e
    and $0F
    or $C0
-   ld (PSG), a
+   call psg_write
    call emit_data_de
 ch_adv:
    ld hl, VAR_CHF
@@ -909,21 +1141,24 @@ ch_adv:
 ; tools/sms_liminal_gen.py; the simulator asserts byte parity of the PSG
 ; stream. ch2 plays short G-minor motifs (from the At the Inn
 ; transcription) with music-box decay (att 2, one step per 6 frames);
-; ch1 is a pseudo-delay replaying every melody note 21 frames later at
-; att+5; ch0 walks a slow D3/C3/Bb2 bass, one soft note per 7-10 s.
+; ch1 CHORUSES it — the same note struck at the same instant one
+; divider sharp, one attenuation step under, so the pair beats at a few
+; Hz (Mike's pick; this replaced the ch1 delay line, whose queue is
+; gone). ch0 walks a slow D3/C3/Bb2 bass, one soft note per 7-10 s.
+; ch3 taps the Aliens-style march (drum_pat, LFSR-free) under it all.
 ; Seed = $ACE1 ^ (spawn_y:spawn_x) ^ (exit_y:exit_x). Per frame the
 ; sections run in fixed order (bass, phrase select, note fire, melody
-; decay, echo fire, echo decay) — the parity contract depends on it.
+; decay, drum fire, drum decay) — the parity contract depends on it.
 
 music_init:
    ld a, $9F               ; silence all four channels first
-   ld (PSG), a
+   call psg_write
    ld a, $BF
-   ld (PSG), a
+   call psg_write
    ld a, $DF
-   ld (PSG), a
+   call psg_write
    ld a, $FF
-   ld (PSG), a
+   call psg_write
    ld hl, (MAP_META + 0)   ; hl = spawn_y:spawn_x
    ld a, (MAP_META + 2)
    ld e, a
@@ -950,7 +1185,6 @@ seed_ok:
    ld a, 15                ; all envelopes silent, all timers at zero:
    ld (VAR_BATT), a        ; frame 0 fires the first bass note AND the
    ld (VAR_MATT), a        ; first phrase, exactly like the Python engine
-   ld (VAR_EATT), a
    xor a
    ld (VAR_BI), a
    ld (VAR_MLEFT), a
@@ -958,14 +1192,12 @@ seed_ok:
    ld hl, 0
    ld (VAR_BT), hl
    ld (VAR_GAP), hl
-   ld hl, ECHO_Q           ; free every echo slot (countdown 0)
-   ld b, 4
-eq_clear:
-   ld (hl), 0
-   inc hl
-   inc hl
-   inc hl
-   djnz eq_clear
+   ld hl, drum_pat         ; drums: first tap fires on engine frame 0
+   ld (VAR_DPTR), hl
+   xor a
+   ld (VAR_DT), a
+   ld a, 15
+   ld (VAR_DATT), a
    ret
 
 ; advance the LFSR one Galois step: s >>= 1; if carry out, s ^= $B400
@@ -998,7 +1230,7 @@ emit_data_de:
    and $F0
    or b
    and $3F
-   ld (PSG), a
+   call psg_write
    ret
 
 music_tick:
@@ -1031,10 +1263,10 @@ bi_step:
    ld a, e
    and $0F
    or $80                  ; ch0 tone latch
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    ld a, $96               ; ch0 att 6
-   ld (PSG), a
+   call psg_write
    ld a, 6
    ld (VAR_BATT), a
    ld a, 30
@@ -1067,7 +1299,7 @@ bass_count:
    inc a
    ld (VAR_BATT), a
    or $90
-   ld (PSG), a
+   call psg_write
 
    ; ---- melody: pick a phrase when the last one is done and the gap is over
 mel_select:
@@ -1134,32 +1366,22 @@ mel_fire:
    ld a, e
    and $0F
    or $C0                  ; ch2 tone latch
-   ld (PSG), a
+   call psg_write
    call emit_data_de
    ld a, $D2               ; ch2 att 2 — the music-box attack
-   ld (PSG), a
+   call psg_write
+   inc de                  ; chorus: ch1 doubles the note one divider
+   ld a, e                 ; sharp, struck together. The pair beats at a
+   and $0F                 ; few Hz — the dreamy detune, and the reason
+   or $A0                  ; ch1 is no longer a delay line.
+   call psg_write
+   call emit_data_de
+   ld a, $B3               ; ch1 att 3 — the double, one step under
+   call psg_write
    ld a, 2
    ld (VAR_MATT), a
    ld a, 6
    ld (VAR_MFADE), a
-   ld hl, ECHO_Q           ; enqueue the echo: 21 frames from now (22
-   ld b, 4                 ; pre-decrement — this frame's sweep takes one)
-eq_find:
-   ld a, (hl)
-   or a
-   jr z, eq_take
-   inc hl
-   inc hl
-   inc hl
-   djnz eq_find
-   jr eq_done              ; full: drop (cannot happen at 18+ frame spacing)
-eq_take:
-   ld (hl), 19             ; 18-frame echo (A2 tempo), +1 pre-decrement
-   inc hl
-   ld (hl), e
-   inc hl
-   ld (hl), d
-eq_done:
    call lfsr_step          ; lilting inter-note timing: 13-20 frames
    ld a, l
    and 7
@@ -1170,68 +1392,76 @@ notet_count:
    dec a
    ld (VAR_NOTET), a
 
-   ; ---- melody decay ----
+   ; ---- melody decay: ch2 steps down, ch1 follows one step under ----
 mel_decay:
    ld a, (VAR_MATT)
    cp 15
-   jr z, echo_fire
+   jr z, drum_fire
    ld hl, VAR_MFADE
    dec (hl)
-   jr nz, echo_fire
+   jr nz, drum_fire
    ld (hl), 6
    ld a, (VAR_MATT)
    inc a
    ld (VAR_MATT), a
    or $D0
-   ld (PSG), a
+   call psg_write
+   ld a, (VAR_MATT)        ; the double rides one step quieter, clamped
+   inc a
+   cp 15
+   jr c, ch_att_ok
+   ld a, 15
+ch_att_ok:
+   or $B0
+   call psg_write
 
-   ; ---- echo: sweep the queue, fire any slot reaching zero ----
-echo_fire:
-   ld hl, ECHO_Q
-   ld b, 4
-eq_sweep:
-   ld a, (hl)
+   ; ---- drums: the Aliens march, soft taps on the noise channel ----
+   ; LFSR-free fixed loop (ctrl, att, wait) so every other section's
+   ; random stream is untouched. White noise at clk/2048 ($E6), ghost
+   ; taps and drag ruffs into accents, 45 frames per beat (~80 bpm).
+   ; A hit decays att+1 every 2 frames — a 4-att accent lasts ~22 frames.
+drum_fire:
+   ld a, (VAR_DT)
    or a
-   jr z, eq_next
-   dec a
-   ld (hl), a
-   jr nz, eq_next
-   push hl
-   push bc
+   jr nz, dt_count
+   ld hl, (VAR_DPTR)
+   ld a, (hl)              ; ctrl byte; 0 = end marker, loop the bar
+   or a
+   jr nz, d_hit
+   ld hl, drum_pat
+   ld a, (hl)
+d_hit:
+   call psg_write          ; noise control latch
    inc hl
-   ld e, (hl)
+   ld a, (hl)
+   ld (VAR_DATT), a
+   or $F0                  ; noise attenuation latch
+   call psg_write
    inc hl
-   ld d, (hl)
-   ld a, e
-   and $0F
-   or $A0                  ; ch1 tone latch
-   ld (PSG), a
-   call emit_data_de
-   ld a, $B7               ; ch1 att 7 — the echo, ~10 dB down
-   ld (PSG), a
-   ld a, 7
-   ld (VAR_EATT), a
-   ld a, 6
-   ld (VAR_EFADE), a
-   pop bc
-   pop hl
-eq_next:
+   ld a, (hl)
    inc hl
-   inc hl
-   inc hl
-   djnz eq_sweep
-   ld a, (VAR_EATT)        ; ---- echo decay ----
+   ld (VAR_DPTR), hl
+   ld (VAR_DT), a
+   ld a, 2
+   ld (VAR_DFADE), a
+   ld a, (VAR_DT)
+dt_count:
+   dec a                   ; d_t decrements every frame, trigger frame too
+   ld (VAR_DT), a
+
+   ; ---- drum decay ----
+   ld a, (VAR_DATT)
    cp 15
    ret z
-   ld hl, VAR_EFADE
+   ld hl, VAR_DFADE
    dec (hl)
    ret nz
-   ld (hl), 6
-   ld a, (VAR_EATT)
+   ld (hl), 2
+   ld a, (VAR_DATT)
    inc a
-   ld (VAR_EATT), a
-   or $B0
-   ld (PSG), a
+   ld (VAR_DATT), a
+   or $F0
+   call psg_write
    ret
 
 bass_divs:  .DW 762, 855, 960, 762                       ; D3 C3 Bb2 D3
@@ -1246,6 +1476,25 @@ motif2: .DB 3
         .DW 143, 190, 240                                ; G5 D5 Bb4
 motif3: .DB 4
         .DW 254, 240, 285, 190                           ; A4 Bb4 G4 D5
+
+; drum march: (noise ctrl, attenuation, frames to next hit) triples,
+; 0 = loop. Two 4-beat bars (45 f/beat, 360 f total): accent, tap,
+; drag ruff into beat 3, tap — bar 2 adds a pickup ghost into the loop.
+drum_pat:
+   .DB $E6, 4, 45          ; bar A beat 1: accent
+   .DB $E6, 6, 39          ; beat 2: tap
+   .DB $E6, 8, 3           ; ruff grace
+   .DB $E6, 8, 3           ; ruff grace
+   .DB $E6, 4, 45          ; beat 3: accent
+   .DB $E6, 6, 45          ; beat 4: tap
+   .DB $E6, 4, 45          ; bar B beat 1: accent
+   .DB $E6, 6, 39          ; beat 2: tap
+   .DB $E6, 8, 3           ; ruff grace
+   .DB $E6, 8, 3           ; ruff grace
+   .DB $E6, 4, 45          ; beat 3: accent
+   .DB $E6, 6, 18          ; beat 4: tap
+   .DB $E6, 8, 27          ; pickup ghost into the next bar
+   .DB 0
 
 ; chime sweep: 24 frames x (ch0, ch1, ch2) dividers.
 ; ch0: 1023-19f -> lands G3 571; ch1: 762-16f -> D4 381; ch2: 570-12f -> G4 285.
@@ -1308,3 +1557,18 @@ lamp_letters: .DB 32,15,23,29,13,14,12,30                         ; U D L R B C 
 s_press:    .DB 12,0,31,26,0,13,16,18,20,25,0,16,35,16,29,14,20,30,16 ; A TO BEGIN EXERCISE
 s_complete: .DB 16,35,16,29,14,20,30,16,0,14,26,24,27,23,16,31,16    ; EXERCISE COMPLETE
 s_pexit:    .DB 27,29,16,30,30,0,30,31,12,29,31,0,31,26,0,16,35,20,31 ; PRESS START TO EXIT
+
+; ---------------- PSG write shim ----------------
+; Harness: the SN76489 is memory-mapped at $7F11 in the Genesis Z80 map
+; (no OUT instructions exist there). Standalone: it is port $7F on a
+; real Master System. Same byte stream either way — the sim asserts it.
+psg_write:
+.IFDEF STANDALONE
+   out ($7F), a
+.ELSE
+   ld (PSG), a
+.ENDIF
+   ret
+
+; the metatile table, generated from sms/tileset.json — pinned at $1700
+.INCLUDE "tiles.inc"
