@@ -1,5 +1,5 @@
-# four_rooms.map
-name: FOUR_ROOMS
+# four_rooms_2.0.map
+name: FOUR_ROOMS_2.0
 size: 32x32
 spawn: 16, 29.5 facing=N
 role: community
@@ -50,30 +50,28 @@ author: Double K
 23,4 -> 23,5  style=spotted height=full crawl=no
 23,5 -> 24,5  style=spotted height=full crawl=no
 24,5 -> 24,6  style=spotted height=full crawl=no
-8,6 -> 7,6  style=spotted height=half crawl=no
 5,6 -> 6,6  style=spotted height=half crawl=no
+7,6 -> 8,6  style=spotted height=half crawl=no
 1,19 -> 3,19  style=spotted height=half crawl=no
 3,19 -> 3,20  style=spotted height=half crawl=no
 29,1 -> 29,6  style=chevron height=full crawl=no
 20,24 -> 22,24  style=chevron height=full crawl=no
-22,24 -> 22,23  style=chevron height=full crawl=no
-22,23 -> 22,22  style=chevron height=full crawl=no
+22,22 -> 22,24  style=chevron height=full crawl=no
 22,22 -> 23,22  style=chevron height=full crawl=no
-21,31 -> 21,29  style=chevron height=full crawl=no
+21,29 -> 21,31  style=chevron height=full crawl=no
 13,22 -> 15,22  style=chevron height=half crawl=no
 15,22 -> 15,28  style=chevron height=half crawl=no
-18,31 -> 18,27  style=chevron height=half crawl=no
-8,12 -> 8,9  style=chevron height=full crawl=no
-8,9 -> 10,9  style=chevron height=full crawl=no
-10,9 -> 10,8  style=chevron height=full crawl=no
-10,8 -> 11,8  style=chevron height=full crawl=no
-11,8 -> 11,7  style=chevron height=full crawl=no
-11,7 -> 12,7  style=chevron height=full crawl=no
+18,27 -> 18,31  style=chevron height=half crawl=no
+8,9 -> 8,12  style=chevron height=full crawl=no
 8,21 -> 8,26  style=chevron height=full crawl=no
+8,9 -> 10,9  style=chevron height=full crawl=no
+10,8 -> 10,9  style=chevron height=full crawl=no
+10,8 -> 11,8  style=chevron height=full crawl=no
+11,7 -> 11,8  style=chevron height=full crawl=no
+11,7 -> 12,7  style=chevron height=full crawl=no
 8,26 -> 10,26  style=chevron height=full crawl=no
 
 [decals]
-neanderthal 6.5,25.5 face=N
 chair  28.5,29.5 face=N
 chair  27.5,3.5 face=N
 chair  2.5,7.5 face=N
@@ -84,27 +82,27 @@ outlet 13,27.5 face=W
 outlet 1,4.5 face=W
 outlet 4.5,6 face=N
 door   24.5,31 face=S
-torn   11.5,13 face=N
-torn   31,11.5 face=W
-torn   8,1.5 face=W
-torn   19,24.5 face=E
-torn   2.5,31 face=N
-torn   12,25.5 face=W
-torn   28.5,31 face=S
-torn   20,26.5 face=W
-torn   31,23.5 face=E
-torn   25.5,1 face=N
-torn2  13,20.5 face=W
-torn3  19,28.5 face=E
-torn3  9.5,21 face=N
-torn3  13,29.5 face=W
-torn3  21.5,13 face=N
-torn3  8,16.5 face=W
-torn   20.5,20 face=S
 chair  10.5,23.5 face=N
 chair  21.5,23.5 face=N
 chair  10.5,10.5 face=N
 chair  25.5,18.5 face=N
+torn3 15.5,18 face=N
+torn3 13,20.5 face=W
+torn3 12.5,13 face=N
+torn3 31,14.5 face=E
+torn3 3.5,21 face=N
+torn3 31,24.5 face=E
+torn3 10.5,1 face=N
+torn3 19,6.5 face=W
+torn3 1,26.5 face=W
+torn3 31,10.5 face=W
+torn3 24.5,1 face=N
+desk   22.5,18.5 face=N
+desk   16.5,13.5 face=N
+desk   26.5,24.5 face=N
+desk   5.5,23.5 face=N
+desk   6.5,8.5 face=N
+desk   16.5,23.5 face=N
 
 [dark]
 20,21 -> 30,30
