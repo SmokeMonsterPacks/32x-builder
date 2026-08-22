@@ -185,19 +185,21 @@ def submit_pr():
     if not (token and login):
         return jsonify({"error": "not signed in"}), 401
     model = request.get_json(force=True, silent=True)
-    model, text, errs = _lint_submission(model)
+    model, text, errs, target, is_update = _lint_submission(model)
     if errs:
         return jsonify({"ok": False, "errors": errs}), 400
-    slug = _safe(model["name"]).lower()
+    what = ("Map update" if is_update else "Community map")
+    lead = ("Update to **%s** by @%s" if is_update else
+            "New community map **%s** by @%s") % (model["name"], login)
     try:
         pr = github_pr.open_map_pr(
             token, login, config.GITHUB_REPO, config.GITHUB_BRANCH,
-            "maps/community/%s.map" % slug, text,
-            title="Community map: %s" % model["name"],
-            body=("New community map **%s** by @%s, submitted from the "
+            target, text,
+            title="%s: %s" % (what, model["name"]),
+            body=(lead + ", submitted from the "
                   "[hosted map editor](https://backrooms-32x-project.fly.dev/).\n\n"
                   "CI lints it and builds the ROM; once merged it ships in the "
-                  "next `build-N` release automatically." % (model["name"], login)))
+                  "next `build-N` release automatically."))
     except github_pr.GitHubError as e:
         return jsonify({"ok": False, "errors": [str(e)]}), 502
     return jsonify({"ok": True, "pr_url": pr["url"], "pr_number": pr["number"],
@@ -310,19 +312,18 @@ def fork_save_map():
     if not (token and login):
         return jsonify({"error": "not signed in"}), 401
     model = request.get_json(force=True, silent=True)
-    model, text, errs = _lint_submission(model)
+    model, text, errs, target, _is_update = _lint_submission(model)
     if errs:
         return jsonify({"ok": False, "errors": errs}), 400
-    slug = _safe(model["name"]).lower()
     try:
         r = github_pr.commit_to_fork(
             token, login, config.GITHUB_REPO, config.GITHUB_BRANCH,
-            [("maps/community/%s.map" % slug, text)],
+            [(target, text)],
             "Map: %s (from the hosted editor)" % model["name"])
     except github_pr.GitHubError as e:
         return jsonify({"ok": False, "errors": [str(e)]}), 502
     r["ok"] = True
-    r["path"] = "maps/community/%s.map" % slug
+    r["path"] = target
     return jsonify(r)
 
 
@@ -628,50 +629,72 @@ def map_save(name):
 
 
 def _lint_submission(model):
-    """Run the CI lint gate on a submission model (forced role=community).
-    Returns (model, text, errors). Duplicate names against the repo's existing
-    maps are rejected here so junk PRs never reach GitHub."""
+    """Run the CI lint gate on a submission model. A brand-new name becomes a
+    community map; a name matching an EXISTING community or CURATED map is an
+    UPDATE of that map — it keeps the existing file's path and role, so the
+    merged tree never grows a second copy (Smokemonster's promoted ALOHA
+    COMPLEX hit exactly that: the old community-only exemption made his own
+    curated file read as a duplicate). Curated files are CODEOWNERS-gated on
+    the GitHub side, so promotion review still holds; core canon still
+    collides — you can't shadow it. Returns (model, text, errors, target,
+    is_update) where target is the repo-relative path to write."""
     if not isinstance(model, dict):
-        return None, None, ["expected a JSON model"]
+        return None, None, ["expected a JSON model"], None, False
     model = dict(model)
     model["name"] = (model.get("name") or "untitled").upper()[:16]
-    model["role"] = "community"          # submissions are always community maps
-    text, err = _serialize_or_400(model)
-    if err:
-        return model, None, [err]
+    this_name = model["name"]
 
     with open(config.REGISTRY) as fh:
         reg = json.load(fh)
-    # Seed the duplicate-name check with the maps already in the repo — EXCEPT
-    # a community map with this same name, which is the one being UPDATED (the
-    # submission overwrites its file, it doesn't add a second copy). Without
-    # this, every resubmission of an existing map failed as a duplicate of
-    # itself. A same-named CORE map still collides: you can't shadow canon.
-    this_name = (model.get("name") or "").upper()
-    seen, errs = {}, []
+    roles = reg.get("roles", {})
+
+    # One scan of the repo's maps: seed the duplicate-name check AND find the
+    # file this submission updates, if any. Only community/curated tiers are
+    # updatable through the editor; any same-named core-tier map stays in
+    # `seen` and fails lint as before.
+    seen, errs, existing = {}, [], None
     for folder, name, path in _iter_map_files():
+        role = "community"
         try:
-            nm = (mapfmt.parse(open(path).read()).get("name") or name).upper()
+            m = mapfmt.parse(open(path).read())
+            nm = (m.get("name") or name).upper()
+            role = m.get("role", "community")
         except Exception:
             nm = name.upper()
-        if nm == this_name and (folder or "") == "community":
+        if (nm == this_name and existing is None
+                and roles.get(role, {}).get("tier") in ("community", "curated")):
+            existing = (folder or "community", name, role)
             continue                      # updating this map, not duplicating it
         seen[nm] = "maps/%s/%s.map" % (folder or ".", name)
-    lint_maps.lint_model(mapfmt.parse(text), model["name"], "community",
+
+    if existing:
+        folder, stem, role = existing
+        model["role"] = role              # keep curated curated: role and
+        lint_folder = folder              # folder must agree or CI lint fails
+        target = "maps/%s/%s.map" % (folder, stem)
+    else:
+        model["role"] = "community"
+        lint_folder = "community"
+        target = "maps/community/%s.map" % _safe(this_name).lower()
+
+    text, err = _serialize_or_400(model)
+    if err:
+        return model, None, [err], None, False
+    lint_maps.lint_model(mapfmt.parse(text), model["name"], lint_folder,
                          reg, seen, errs)
     nxt = (model.get("next") or "").strip().upper()
-    if nxt and nxt not in seen:
+    if nxt and nxt != this_name and nxt not in seen:
         errs.append("%s: next: %r is not a map in the game yet — submit the "
                     "later chapters of a story first (chains are built "
                     "tail-first)" % (model["name"], nxt))
-    return model, text, errs
+    return model, text, errs, target, existing is not None
 
 
 @app.route("/lint", methods=["POST"])
 def map_lint():
     """The same gate CI runs, before the contributor leaves the editor."""
     model = request.get_json(force=True, silent=True)
-    _model, _text, errs = _lint_submission(model)
+    _model, _text, errs, _target, _is_update = _lint_submission(model)
     return jsonify({"ok": not errs, "errors": errs})
 
 
@@ -685,11 +708,21 @@ def submit_url():
     long for the browser/GitHub (~8KB)."""
     from urllib.parse import quote
     model = request.get_json(force=True, silent=True)
-    model, text, errs = _lint_submission(model)
+    model, text, errs, target, is_update = _lint_submission(model)
     if errs:
         return jsonify({"ok": False, "errors": errs}), 400
-    slug = _safe(model["name"]).lower()
-    filename = "maps/community/%s.map" % slug
+    # An update must land on the existing file. GitHub's /new page refuses to
+    # overwrite, so route updates through the EDIT page for that path instead
+    # (value can't be pre-filled there; the client's download/clipboard path
+    # covers the content either way).
+    filename = target
+    if is_update:
+        edit_url = "https://github.com/%s/edit/%s/%s" % (
+            config.GITHUB_REPO, config.GITHUB_BRANCH, filename)
+        return jsonify({"ok": True, "url": edit_url, "bare_url": edit_url,
+                        "upload_url": edit_url, "filename": filename,
+                        "text": text, "url_len": len(edit_url),
+                        "update": True})
     base = "https://github.com/%s/new/%s" % (config.GITHUB_REPO, config.GITHUB_BRANCH)
     url = "%s?filename=%s&value=%s" % (base, quote(filename, safe=""), quote(text, safe=""))
     # For maps too big for a pre-filled URL, the client downloads the real .map

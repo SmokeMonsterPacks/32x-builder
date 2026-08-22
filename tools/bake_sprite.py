@@ -29,22 +29,20 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MAX_W, MAX_H = 64, 96          # texel caps for a STANDEE (tall, camera-facing)
-# A wall decal is the other shape: wide and short, sampled one texel per screen
-# pixel exactly like the standee, so a wider cap costs no render time -- only
-# ROM, which the same 4 KB budget already bounds. At 64 the tester's torn
-# wallpaper spent 2112 of its 4096 texels and threw away the rest of its detail.
-# Wall decals also get their own TEXEL budget, and it is much larger than a
-# standee's. Measured on the tester's torn wallpaper: his speckle is ~3px grain
-# in a 654px-wide drawing, so at 89 texels each texel swallows a 7x7 block of it
-# and the grain averages to a smooth smudge BEFORE any palette or shading math.
-# Proof: his own art downscaled to 89x46 with no palette limit looks identical
-# to what we shipped. The grain only survives from ~176 texels up. A decal
-# samples one texel per screen pixel, so this costs ROM and nothing else.
-# A SQUARE sheet is a normal upload (an artist draws a page of damage and that
-# page IS the decal), so the budget has to hold 224x224, not just a wide strip.
-MAX_W_WALL      = 224
-MAX_H_WALL      = 224
-MAX_TEXELS_WALL = 50176         # 49 KB: a full 224x224 decal
+# A wall decal samples one texel per screen pixel exactly like the standee,
+# and the cap was once raised to 224x224 on the theory that texels "cost ROM
+# and nothing else". The field falsified that (Double K, 2026-08-21, "lags a
+# lot when I move towards the torn effects"): the SH-2 data cache is 4 KB
+# TOTAL, so a 49 KB texture sampled at close range misses on every row step
+# and the serial overlay pass stalls on SDRAM — the one memory both CPUs are
+# fighting over. A texture only samples for free while the WHOLE array is
+# cache-resident, so the real budget is the standee's same 4 KB, and the cap
+# exists to keep every decal under it. (The 224-era torn bakes were
+# downscaled to 64 wide in place; the art survived — grain that only lives
+# above ~176 texels was averaging to a smudge through the renderer anyway.)
+MAX_W_WALL      = 64
+MAX_H_WALL      = 64
+MAX_TEXELS_WALL = 4096          # 4 KB: the whole decal fits the SH-2 cache
 MAX_TEXELS   = 4096            # ROM budget per community STANDEE (4 KB)
 RAMP_N       = 16              # COMM_BASE ramp length (raycast.c)
 

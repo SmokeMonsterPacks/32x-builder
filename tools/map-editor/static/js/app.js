@@ -1199,16 +1199,23 @@ init();
     wall: 'Wall decal: painted flat on a wall face at the height you ' +
           'set, like the outlet.'
   };
-  /* Steps 1+2 gate the bake button; the button itself says what is missing. */
+  /* Steps 1+2 gate the bake; the button stays CLICKABLE either way and the
+     click says what is missing. It used to be disabled until ready, and a
+     disabled button swallows clicks silently \u2014 reported from the field as
+     "clicking on step five doesn't do anything" (the only feedback was a
+     hover tooltip). Dim it when not ready, never deafen it. */
+  const NAME_RE = /^[a-z][a-z0-9_]{1,15}$/;
+  const nameFix = n => n.toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+                        .replace(/^[^a-z]+/, '').slice(0, 16);
   const readiness = () => {
     const f = $s('spr-file').files[0];
     const name = $s('spr-name').value.trim();
-    const nameOk = /^[a-z][a-z0-9_]{1,15}$/.test(name);
+    const nameOk = NAME_RE.test(name);
     $s('spr-name-hint').textContent =
       name === '' ? '' :
       nameOk ? '\u2713 ' + name : 'lowercase a-z 0-9 _ only, 2-16 chars, letter first';
     const btn = $s('spr-bake');
-    btn.disabled = !(f && nameOk);
+    btn.style.opacity = (f && nameOk) ? '' : '.55';
     btn.title = !f ? 'Step 1: pick an image first'
               : !nameOk ? 'Step 2: give it a valid name'
               : 'Bake it \u2014 the preview shows exactly what ships';
@@ -1246,6 +1253,14 @@ init();
   $s('spr-bake').addEventListener('click', async () => {
     const f = $s('spr-file').files[0];
     if (!f) { $s('spr-msg').textContent = 'step 1: pick an image first'; return; }
+    const name = $s('spr-name').value.trim();
+    if (!NAME_RE.test(name)) {
+      const fix = nameFix(name);
+      $s('spr-msg').textContent = 'step 2: name it first — lowercase ' +
+        'a-z 0-9 _ only, 2-16 chars, letter first' +
+        (fix && fix.length >= 2 ? ' (try "' + fix + '")' : '');
+      return;
+    }
     const fd = new FormData();
     fd.append('image', f);
     fd.append('id', $s('spr-name').value.trim());
